@@ -1799,6 +1799,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		toolSession.enableMCP = enableMCP;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
 		const customTools: CustomTool[] = [];
+		const startupMcpToolNames = new Set<string>();
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
 		const startupQuiet = settings.get("startup.quiet");
 		const onMCPStatus = (event: McpConnectionStatusEvent) => {
@@ -1871,8 +1872,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 
 				if (mcpResult.tools.length > 0) {
-					// MCP tools are LoadedCustomTool, extract the tool property
-					customTools.push(...mcpResult.tools.map(loaded => loaded.tool));
+					// MCP tools are LoadedCustomTool, extract the tool property.
+					for (const loaded of mcpResult.tools) {
+						customTools.push(loaded.tool);
+						startupMcpToolNames.add(loaded.tool.name);
+					}
 				}
 			}
 		}
@@ -2386,6 +2390,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			for (const name of collectPendingMCPToolNames(options.toolNames)) {
 				if (!toolRegistry.has(name)) {
 					toolRegistry.set(name, createPendingMCPTool(name));
+					startupMcpToolNames.add(name);
 				}
 			}
 		}
@@ -2942,6 +2947,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
 			toolRegistry,
+			mcpToolNames: startupMcpToolNames,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)

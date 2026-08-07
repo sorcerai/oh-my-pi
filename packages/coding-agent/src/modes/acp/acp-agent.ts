@@ -53,6 +53,7 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { createAcpExtensionRuntimeActions } from "../../extensibility/extensions/runtime-actions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../../internal-urls";
@@ -2297,6 +2298,7 @@ export class AcpAgent implements Agent {
 				setLabel: (targetId, label) => {
 					record.session.sessionManager.appendLabelChange(targetId, label);
 				},
+				...createAcpExtensionRuntimeActions(record.session, extensionRunner),
 				getActiveTools: () => record.session.getEnabledToolNames(),
 				getAllTools: () => record.session.getAllToolNames(),
 				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),

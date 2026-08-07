@@ -31,6 +31,8 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionRuntimeMode,
+	ExtensionToolActivationDelta,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -38,6 +40,7 @@ import type {
 	RegisteredCommand,
 	ToolDefinition,
 } from "./types";
+import { snapshotRegisteredTool } from "./types";
 
 installLegacyPiSpecifierShim();
 
@@ -62,6 +65,13 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+
+	/**
+	 * Pre-init default. `ExtensionRunner.initialize` overwrites this with the
+	 * host-supplied trusted value; until then the safest provenance is the
+	 * headless `noninteractive` mode (mirrors `hasUI()` defaulting to false).
+	 */
+	runtimeMode: ExtensionRuntimeMode = "noninteractive";
 
 	sendMessage(): void {
 		throw new ExtensionRuntimeNotInitializedError();
@@ -114,6 +124,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	setSessionName(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
+
+	refreshRegisteredTools(_delta: ExtensionToolActivationDelta): Promise<void> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
 }
 
 /**
@@ -146,12 +160,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		list.push(handler);
 		this.extension.handlers.set(event, list);
 	}
-
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
-		this.extension.tools.set(tool.name, {
+		const registeredTool = snapshotRegisteredTool({
 			definition: tool,
 			extensionPath: this.extension.path,
 		});
+		this.extension.tools.set(tool.name, registeredTool);
 	}
 
 	registerCommand(
@@ -262,6 +276,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	registerProvider(name: string, config: ProviderConfig): void {
 		this.runtime.pendingProviderRegistrations.push({ name, config, sourceId: this.extension.path });
+	}
+
+	get runtimeMode(): ExtensionRuntimeMode {
+		return this.runtime.runtimeMode;
+	}
+
+	refreshRegisteredTools(delta: ExtensionToolActivationDelta): Promise<void> {
+		return this.runtime.refreshRegisteredTools(delta);
 	}
 }
 

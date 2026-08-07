@@ -35,6 +35,7 @@ import type {
 	ExtensionEvent,
 	ExtensionFlag,
 	ExtensionRuntime,
+	ExtensionRuntimeMode,
 	ExtensionShortcut,
 	ExtensionUIContext,
 	InputEvent,
@@ -295,6 +296,8 @@ export class ExtensionRunner {
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
+		this.runtime.runtimeMode = actions.runtimeMode;
+		this.runtime.refreshRegisteredTools = actions.refreshRegisteredTools;
 
 		// Context actions (required)
 		this.#getModel = contextActions.getModel;
@@ -386,6 +389,14 @@ export class ExtensionRunner {
 			}
 		}
 		return tools;
+	}
+
+	/**
+	 * Trusted runtime mode owning approval authority, set by the host at
+	 * {@link initialize}. Pre-init value is `noninteractive`.
+	 */
+	getRuntimeMode(): ExtensionRuntimeMode {
+		return this.runtime.runtimeMode;
 	}
 
 	/**

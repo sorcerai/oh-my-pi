@@ -21,6 +21,7 @@ import { Type } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { createRecordingRefreshDelegate, createTestExtensionActions } from "./utils/extension-actions-fixture";
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -517,21 +518,10 @@ describe("ExtensionRunner", () => {
 				modelRegistry,
 			);
 			runner.initialize(
-				{
-					sendMessage: () => {},
-					sendUserMessage: () => {},
-					appendEntry: () => {},
-					setLabel: () => {},
-					getActiveTools: () => [],
-					getAllTools: () => [],
-					setActiveTools: async () => {},
-					getCommands: () => [],
-					setModel: async () => false,
-					getThinkingLevel: () => undefined,
-					setThinkingLevel: () => {},
-					getSessionName: () => undefined,
-					setSessionName: async () => {},
-				},
+				createTestExtensionActions({
+					runtimeMode: "noninteractive",
+					refreshRegisteredTools: createRecordingRefreshDelegate(),
+				}),
 				{
 					getModel: () => primaryModel,
 					isIdle: () => true,
@@ -1194,21 +1184,10 @@ describe("ExtensionRunner", () => {
 				}),
 			);
 			runner.initialize(
-				{
-					sendMessage: () => {},
-					sendUserMessage: () => {},
-					appendEntry: () => {},
-					setLabel: () => {},
-					getActiveTools: () => [],
-					getAllTools: () => [],
-					setActiveTools: async () => {},
-					getCommands: () => [],
-					setModel: async () => false,
-					getThinkingLevel: () => undefined,
-					setThinkingLevel: () => {},
-					getSessionName: () => undefined,
-					setSessionName: async () => {},
-				},
+				createTestExtensionActions({
+					runtimeMode: "noninteractive",
+					refreshRegisteredTools: createRecordingRefreshDelegate(),
+				}),
 				{
 					getModel: () => undefined,
 					isIdle: () => true,
@@ -1256,23 +1235,16 @@ describe("ExtensionRunner", () => {
 				modelRegistry,
 			);
 			runner.initialize(
-				{
-					sendMessage: () => {},
-					sendUserMessage: () => {},
-					appendEntry: () => {},
-					setLabel: () => {},
-					getActiveTools: () => [],
-					getAllTools: () => [],
-					setActiveTools: async () => {},
-					getCommands: () => [],
-					setModel: async () => false,
-					getThinkingLevel: () => undefined,
-					setThinkingLevel: () => {},
-					getSessionName: () => sessionManager.getSessionName(),
-					setSessionName: async name => {
-						await sessionManager.setSessionName(name);
+				createTestExtensionActions({
+					runtimeMode: "noninteractive",
+					refreshRegisteredTools: createRecordingRefreshDelegate(),
+					overrides: {
+						getSessionName: () => sessionManager.getSessionName(),
+						setSessionName: async name => {
+							await sessionManager.setSessionName(name);
+						},
 					},
-				},
+				}),
 				{
 					getModel: () => undefined,
 					isIdle: () => true,
@@ -1314,21 +1286,10 @@ describe("ExtensionRunner", () => {
 			select: (title: string, options: string[]) => Promise<string | undefined>,
 		) => {
 			runner.initialize(
-				{
-					sendMessage: () => {},
-					sendUserMessage: () => {},
-					appendEntry: () => {},
-					setLabel: () => {},
-					getActiveTools: () => [],
-					getAllTools: () => [],
-					setActiveTools: async () => {},
-					getCommands: () => [],
-					setModel: async () => false,
-					getThinkingLevel: () => undefined,
-					setThinkingLevel: () => {},
-					getSessionName: () => undefined,
-					setSessionName: async () => {},
-				},
+				createTestExtensionActions({
+					runtimeMode: "noninteractive",
+					refreshRegisteredTools: createRecordingRefreshDelegate(),
+				}),
 				{
 					getModel: () => undefined,
 					isIdle: () => true,
@@ -1981,21 +1942,13 @@ describe("ExtensionRunner", () => {
 			}
 
 			runner.initialize(
-				{
-					sendMessage: () => {},
-					sendUserMessage: () => {},
-					appendEntry: () => {},
-					setLabel: () => {},
-					getActiveTools: () => [],
-					getAllTools: () => [],
-					setActiveTools: async () => {},
-					getCommands: () => [],
-					setModel: async () => false,
-					getThinkingLevel: () => undefined,
-					setThinkingLevel: () => {},
-					getSessionName: () => sessionManager.getSessionName(),
-					setSessionName: async () => {},
-				},
+				createTestExtensionActions({
+					runtimeMode: "noninteractive",
+					refreshRegisteredTools: createRecordingRefreshDelegate(),
+					overrides: {
+						getSessionName: () => sessionManager.getSessionName(),
+					},
+				}),
 				{
 					getModel: () => undefined,
 					isIdle: () => true,

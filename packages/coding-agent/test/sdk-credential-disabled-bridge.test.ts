@@ -12,6 +12,7 @@ import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extens
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createRecordingRefreshDelegate, createTestExtensionActions } from "./utils/extension-actions-fixture";
 
 interface SessionDirs {
 	cwd: string;
@@ -48,21 +49,10 @@ const failOAuthRefresh = (): void => {
 const initializeRunnerForTest = (runner: ExtensionRunner | undefined): void => {
 	if (!runner) return;
 	runner.initialize(
-		{
-			sendMessage: () => {},
-			sendUserMessage: () => {},
-			appendEntry: () => {},
-			setLabel: () => {},
-			getActiveTools: () => [],
-			getAllTools: () => [],
-			setActiveTools: async () => {},
-			getCommands: () => [],
-			setModel: async () => false,
-			getThinkingLevel: () => undefined,
-			setThinkingLevel: () => {},
-			getSessionName: () => undefined,
-			setSessionName: async () => {},
-		},
+		createTestExtensionActions({
+			runtimeMode: "noninteractive",
+			refreshRegisteredTools: createRecordingRefreshDelegate(),
+		}),
 		{
 			getModel: () => undefined,
 			isIdle: () => true,
@@ -515,21 +505,10 @@ describe("createAgentSession credential_disabled subscription", () => {
 
 			// 2. initialize(); the flush is queued as a microtask.
 			runner.initialize(
-				{
-					sendMessage: () => {},
-					sendUserMessage: () => {},
-					appendEntry: () => {},
-					setLabel: () => {},
-					getActiveTools: () => [],
-					getAllTools: () => [],
-					setActiveTools: async () => {},
-					getCommands: () => [],
-					setModel: async () => false,
-					getThinkingLevel: () => undefined,
-					setThinkingLevel: () => {},
-					getSessionName: () => undefined,
-					setSessionName: async () => {},
-				},
+				createTestExtensionActions({
+					runtimeMode: "noninteractive",
+					refreshRegisteredTools: createRecordingRefreshDelegate(),
+				}),
 				{
 					getModel: () => undefined,
 					isIdle: () => true,

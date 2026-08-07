@@ -16,7 +16,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolCallEventResult } from "./types";
+import { type RegisteredTool, snapshotRegisteredTool, type ToolCallEventResult } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -31,25 +31,33 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 	renderCall?: (args: any, options: any, theme: any) => any;
 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
 	readonly loadMode: ToolLoadMode;
+	private registeredTool: RegisteredTool;
 
 	constructor(
-		private registeredTool: RegisteredTool,
+		registeredTool: RegisteredTool,
 		private runner: ExtensionRunner,
 	) {
-		applyToolProxy(registeredTool.definition, this);
-		this.loadMode = defaultLoadModeForToolName(registeredTool.definition.name, registeredTool.definition.loadMode);
+		this.registeredTool = snapshotRegisteredTool(registeredTool);
+		Object.defineProperty(this, "parameters", {
+			value: this.registeredTool.definition.parameters,
+			enumerable: true,
+		});
+		applyToolProxy(this.registeredTool.definition, this);
+		this.loadMode = defaultLoadModeForToolName(
+			this.registeredTool.definition.name,
+			this.registeredTool.definition.loadMode,
+		);
 
 		// Only define render methods when the underlying definition provides them.
 		// If these exist unconditionally on the prototype, ToolExecutionComponent
 		// enters the custom-renderer path, gets undefined back, and silently
-		// discards tool result text (extensions without renderers show blank).
-		if (registeredTool.definition.renderCall) {
+		if (this.registeredTool.definition.renderCall) {
 			this.renderCall = (args: any, options: any, theme: any) =>
-				registeredTool.definition.renderCall!(args, options, theme as Theme);
+				this.registeredTool.definition.renderCall!(args, options, theme as Theme);
 		}
-		if (registeredTool.definition.renderResult) {
+		if (this.registeredTool.definition.renderResult) {
 			this.renderResult = (result: any, options: any, theme: any, args?: any) =>
-				registeredTool.definition.renderResult!(
+				this.registeredTool.definition.renderResult!(
 					result,
 					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
 					theme as Theme,

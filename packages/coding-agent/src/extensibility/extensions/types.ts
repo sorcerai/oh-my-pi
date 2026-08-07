@@ -1126,8 +1126,26 @@ export interface ExtensionAPI {
 	// Tool Registration
 	// =========================================================================
 
-	/** Register a tool that the LLM can call. */
+	/** Register a tool that the LLM can call. Registration alone is inert: the
+	 *  tool does not enter the live session registry or the model's active set
+	 *  until the host calls {@link refreshRegisteredTools}. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
+
+	/**
+	 * Import every tool registered since the last refresh into the live session
+	 * registry and rebuild the prompt/tool state, then atomically apply an
+	 * activation delta against the current active set.
+	 *
+	 * The host (mode controller) snapshots `ExtensionRunner.getAllRegisteredTools()`
+	 * and delegates the snapshot plus this delta through the single required
+	 * runtime action. There is no optional/no-op fallback: a session that cannot
+	 * apply the refresh must reject. Duplicate identical refresh/delta is
+	 * idempotent; a changed same-name definition fails closed.
+	 *
+	 * `activate` names become part of the next active set; `deactivate` names are
+	 * removed. Neither list may contain built-in, MCP, RPC, or SDK-owned names.
+	 */
+	refreshRegisteredTools(delta: ExtensionToolActivationDelta): Promise<void>;
 
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
@@ -1177,6 +1195,24 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	// =========================================================================
+	// Trusted Runtime Provenance
+	// =========================================================================
+
+	/**
+	 * Trusted runtime mode supplied by the host at `ExtensionRunner.initialize`.
+	 *
+	 * Extensions MUST NOT infer approval authority from `hasUI`, process UID,
+	 * ACP form/confirm capability, or any extension-controlled value. Only a
+	 * `local-interactive` host is authorized to approve side-effecting or
+	 * credential-bearing operations; `acp` (including form/confirm-capable ACP),
+	 * `task`, and `noninteractive` runtimes must refuse before eliciting.
+	 *
+	 * Before `initialize` runs the value is `noninteractive`; a host that needs a
+	 * different mode MUST wire it through `ExtensionActions.runtimeMode`.
+	 */
+	readonly runtimeMode: ExtensionRuntimeMode;
 
 	// =========================================================================
 	// Actions
@@ -1352,10 +1388,305 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 // ============================================================================
 // Loaded Extension Types
 // ============================================================================
-
 export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	definition: ToolDefinition<TParams, TDetails>;
 	extensionPath: string;
+}
+
+const canonicalRegisteredTool = Symbol("canonicalRegisteredTool");
+const registeredToolSnapshots = new WeakMap<object, RegisteredTool<any, any>>();
+const registeredToolSourceFingerprints = new WeakMap<object, string | undefined>();
+const canonicalRegisteredToolMetadata = Symbol("canonicalRegisteredToolMetadata");
+interface CanonicalRegisteredToolMetadata {
+	readonly source: CallableArkSchema;
+	readonly fingerprint: string;
+}
+const ARKTYPE_INTERNAL_KEYS = new Set([
+	"id",
+	"kind",
+	"impl",
+	"inner",
+	"innerEntries",
+	"innerJson",
+	"innerHash",
+	"meta",
+	"metaJson",
+	"json",
+	"hash",
+	"collapsibleJson",
+	"children",
+	"attachments",
+	"$",
+	"onFail",
+	"includesTransform",
+	"includesContextualPredicate",
+	"isCyclic",
+	"allowsRequiresContext",
+	"rootApplyStrategy",
+	"contextFreeMorph",
+	"rootApply",
+	"referencesById",
+	"shallowReferences",
+	"flatRefs",
+	"flatMorphs",
+	"allows",
+	"compiledMeta",
+	"precedence",
+	"precompilation",
+	"assert",
+	"branches",
+	"_keyof",
+	"pipe",
+	" arkKind",
+	"basis",
+	"prestructurals",
+	"refinements",
+	"structure",
+	"expression",
+	"traverseAllows",
+	"traverseApply",
+]);
+const ARKTYPE_SEMANTIC_KEYS: Record<string, true> = {
+	includesTransform: true,
+	includesContextualPredicate: true,
+	rootApplyStrategy: true,
+	contextFreeMorph: true,
+	rootApply: true,
+	assert: true,
+};
+
+const callableFunctionFingerprints = new WeakMap<object, number>();
+let nextCallableFunctionFingerprint = 0;
+
+function callableFunctionFingerprint(value: unknown): string {
+	if (value === undefined) return "undefined";
+	if (typeof value !== "function") return stableFingerprint(value);
+	let id = callableFunctionFingerprints.get(value);
+	if (id === undefined) {
+		id = nextCallableFunctionFingerprint++;
+		callableFunctionFingerprints.set(value, id);
+	}
+	return `function#${id}`;
+}
+
+function cloneJsonSchemaAndFreeze<T>(
+	value: T,
+	seen = new WeakMap<object, unknown>(),
+	active = new WeakSet<object>(),
+): T {
+	if (value === null) return value;
+	switch (typeof value) {
+		case "string":
+		case "boolean":
+			return value;
+		case "number":
+			if (!Number.isFinite(value)) throw new TypeError("Callable schema JSON Schema contains a non-JSON number");
+			return value;
+		case "function":
+		case "bigint":
+		case "symbol":
+		case "undefined":
+			throw new TypeError("Callable schema JSON Schema contains a non-JSON value");
+	}
+	if (typeof value !== "object") throw new TypeError("Callable schema JSON Schema contains an unsupported value");
+	if (active.has(value)) throw new TypeError("Callable schema JSON Schema contains a cycle");
+	const existing = seen.get(value);
+	if (existing !== undefined) return existing as T;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null && !Array.isArray(value)) {
+		throw new TypeError("Callable schema JSON Schema contains an unsupported object");
+	}
+	const clone: Record<string, unknown> | unknown[] = Array.isArray(value) ? [] : {};
+	seen.set(value, clone);
+	active.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		if (typeof key !== "string") throw new TypeError("Callable schema JSON Schema contains a symbol key");
+		if (Array.isArray(value) && key === "length") continue;
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+			throw new TypeError("Callable schema JSON Schema contains an accessor or hidden property");
+		}
+		Object.defineProperty(clone, key, {
+			value: cloneJsonSchemaAndFreeze(descriptor.value, seen, active),
+			enumerable: true,
+			writable: false,
+			configurable: false,
+		});
+	}
+	active.delete(value);
+	return Object.freeze(clone) as T;
+}
+
+function normalizeCallableSchema(value: CallableArkSchema): Record<string, unknown> {
+	let jsonSchema: unknown;
+	try {
+		jsonSchema = value.toJsonSchema({ target: "draft-2020-12" });
+	} catch (error) {
+		throw new TypeError(
+			`Callable parameter schema cannot be represented as JSON Schema: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (jsonSchema === null || typeof jsonSchema !== "object" || Array.isArray(jsonSchema)) {
+		throw new TypeError("Callable parameter schema must materialize to a JSON Schema object");
+	}
+	return cloneJsonSchemaAndFreeze(jsonSchema) as Record<string, unknown>;
+}
+
+function cloneAndFreeze<T>(value: T, seen = new WeakMap<object, unknown>(), cloneParameterSchema = false): T {
+	if (value === null) return value;
+	if (typeof value === "function") {
+		if (cloneParameterSchema) return normalizeCallableSchema(value as unknown as CallableArkSchema) as T;
+		return Object.freeze(value) as T;
+	}
+	if (typeof value !== "object") return value;
+	const existing = seen.get(value);
+	if (existing !== undefined) return existing as T;
+	const clone = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+	seen.set(value, clone);
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) continue;
+		Object.defineProperty(clone, key, {
+			...descriptor,
+			value: cloneAndFreeze(descriptor.value, seen, key === "parameters"),
+		});
+	}
+	return Object.freeze(clone) as T;
+}
+
+function stableFingerprint(value: unknown, seen = new WeakMap<object, number>(), nextId = { value: 0 }): string {
+	if (value === null || typeof value !== "object") {
+		if (typeof value === "function") throw new TypeError("Callable schema has an unsafe function-valued property");
+		const encoded = JSON.stringify(value);
+		if (encoded === undefined) throw new TypeError("Callable schema has an unsafe non-JSON property");
+		return encoded;
+	}
+	const existing = seen.get(value);
+	if (existing !== undefined) return `@${existing}`;
+	const id = nextId.value++;
+	seen.set(value, id);
+	if (
+		!(
+			Array.isArray(value) ||
+			Object.getPrototypeOf(value) === Object.prototype ||
+			Object.getPrototypeOf(value) === null
+		)
+	) {
+		throw new TypeError("Callable schema has an unsupported mutable object property");
+	}
+	const entries: string[] = [];
+	for (const key of Reflect.ownKeys(value).sort((a, b) => String(a).localeCompare(String(b)))) {
+		if (typeof key !== "string") throw new TypeError("Callable schema has a symbol property");
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) throw new TypeError("Callable schema has an accessor property");
+		entries.push(`${JSON.stringify(key)}:${stableFingerprint(descriptor.value, seen, nextId)}`);
+	}
+	return `${Array.isArray(value) ? "[" : "{"}${entries.join(",")}${Array.isArray(value) ? "]" : "}"}`;
+}
+
+type CallableArkSchema = ((...args: unknown[]) => unknown) & {
+	toJsonSchema: (options?: unknown) => unknown;
+	assert: (...args: unknown[]) => unknown;
+};
+
+function callableSchemaSnapshot(
+	value: unknown,
+): { fingerprint: string; normalized: Record<string, unknown> } | undefined {
+	if (typeof value !== "function") return undefined;
+	if (!isArkTypeCallable(value)) {
+		throw new TypeError("Callable parameter schemas must be ArkType schemas or a JSON-schema object");
+	}
+	const source = value as CallableArkSchema;
+	const ownState: string[] = [];
+	for (const key of Reflect.ownKeys(source).sort((a, b) => String(a).localeCompare(String(b)))) {
+		if (typeof key !== "string") throw new TypeError("Callable schema has a symbol property");
+		if (ARKTYPE_INTERNAL_KEYS.has(key) && !Object.hasOwn(ARKTYPE_SEMANTIC_KEYS, key)) continue;
+		const descriptor = Object.getOwnPropertyDescriptor(source, key);
+		if (!descriptor || !("value" in descriptor)) throw new TypeError("Callable schema has an accessor property");
+		ownState.push(`${JSON.stringify(key)}:${callableFunctionFingerprint(descriptor.value)}`);
+	}
+	const normalized = normalizeCallableSchema(source);
+	return {
+		normalized,
+		fingerprint: `${stableFingerprint(normalized)}|${ownState.join(",")}`,
+	};
+}
+
+function isArkTypeCallable(value: unknown): value is CallableArkSchema {
+	if (typeof value !== "function") return false;
+	const candidate = value as {
+		toJsonSchema?: unknown;
+		assert?: unknown;
+		rootApply?: unknown;
+	};
+	return (
+		typeof candidate.toJsonSchema === "function" &&
+		typeof candidate.assert === "function" &&
+		typeof candidate.rootApply === "function"
+	);
+}
+
+/** Capture one immutable, canonical extension definition for the session lifetime. */
+export function snapshotRegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown>(
+	registeredTool: RegisteredTool<TParams, TDetails>,
+): RegisteredTool<TParams, TDetails> {
+	const canonical = registeredTool as RegisteredTool & {
+		[canonicalRegisteredTool]?: true;
+		[canonicalRegisteredToolMetadata]?: CanonicalRegisteredToolMetadata;
+	};
+	if (canonical[canonicalRegisteredTool]) {
+		const metadata = canonical[canonicalRegisteredToolMetadata];
+		if (!metadata) return registeredTool;
+		const current = callableSchemaSnapshot(metadata.source);
+		if (current?.fingerprint === metadata.fingerprint) return registeredTool;
+		const changed = {
+			...registeredTool,
+			definition: cloneAndFreeze(registeredTool.definition),
+		} as RegisteredTool<TParams, TDetails> & { [canonicalRegisteredTool]: true };
+		Object.defineProperty(changed, canonicalRegisteredTool, { value: true });
+		if (current) {
+			Object.defineProperty(changed, canonicalRegisteredToolMetadata, {
+				value: Object.freeze({
+					source: metadata.source,
+					fingerprint: current.fingerprint,
+				}) satisfies CanonicalRegisteredToolMetadata,
+			});
+		}
+		Object.freeze(changed);
+		return changed;
+	}
+
+	const callableSnapshot = callableSchemaSnapshot(registeredTool.definition.parameters);
+	const sourceFingerprint = callableSnapshot?.fingerprint;
+	const cached = registeredToolSnapshots.get(registeredTool);
+	if (cached) {
+		if (registeredToolSourceFingerprints.get(registeredTool) !== sourceFingerprint) {
+			throw new Error(
+				`Extension tool "${registeredTool.definition.name}" changed its callable parameter schema after registration`,
+			);
+		}
+		return cached as RegisteredTool<TParams, TDetails>;
+	}
+	const definition = callableSnapshot
+		? { ...registeredTool.definition, parameters: callableSnapshot.normalized as TParams }
+		: registeredTool.definition;
+	const snapshot = {
+		...registeredTool,
+		definition: cloneAndFreeze(definition),
+	} as RegisteredTool<TParams, TDetails> & { [canonicalRegisteredTool]: true };
+	Object.defineProperty(snapshot, canonicalRegisteredTool, { value: true });
+	if (callableSnapshot) {
+		Object.defineProperty(snapshot, canonicalRegisteredToolMetadata, {
+			value: Object.freeze({
+				source: registeredTool.definition.parameters as unknown as CallableArkSchema,
+				fingerprint: callableSnapshot.fingerprint,
+			}) satisfies CanonicalRegisteredToolMetadata,
+		});
+	}
+	Object.freeze(snapshot);
+	registeredToolSourceFingerprints.set(registeredTool, sourceFingerprint);
+	registeredToolSnapshots.set(registeredTool, snapshot);
+	return snapshot;
 }
 
 export interface ExtensionFlag {
@@ -1406,6 +1737,43 @@ export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
 
 export type SetThinkingLevelHandler = (level: ThinkingLevel, persist?: boolean) => void;
 
+// ============================================================================
+// Trusted Runtime Provenance & Dynamic Tool Refresh
+// ============================================================================
+
+/**
+ * Trusted runtime mode owning approval authority. Supplied by the host at
+ * `ExtensionRunner.initialize`; never inferred from `hasUI`, process UID, ACP
+ * form/confirm capability, or extension-controlled values.
+ *
+ * - `local-interactive`: a real local interactive terminal — the only mode that
+ *   may approve side-effecting or credential-bearing operations.
+ * - `acp`: Agent Client Protocol session (including form/confirm-capable ACP).
+ * - `task`: a `/task` subagent executor session.
+ * - `noninteractive`: any other headless runtime (print, RPC, uninit).
+ */
+export type ExtensionRuntimeMode = "local-interactive" | "acp" | "task" | "noninteractive";
+
+/**
+ * Activation delta applied atomically against the current active tool set when
+ * {@link ExtensionAPI.refreshRegisteredTools} runs. `activate` names are added;
+ * `deactivate` names are removed. Both are applied in one linearized step.
+ */
+export interface ExtensionToolActivationDelta {
+	activate?: string[];
+	deactivate?: string[];
+}
+
+/**
+ * Required action that imports a snapshot of newly registered extension tools
+ * into the live session registry and atomically applies an activation delta.
+ * The host (mode controller) composes this from
+ * `ExtensionRunner.getAllRegisteredTools()` plus the delta argument so the
+ * snapshot is always runner-sourced. No optional/no-op fallback: a session
+ * that cannot apply the refresh rejects.
+ */
+export type RefreshRegisteredToolsHandler = (delta: ExtensionToolActivationDelta) => Promise<void>;
+
 /** Shared state created by loader, used during registration and runtime. */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
@@ -1428,6 +1796,10 @@ export interface ExtensionActions {
 	setThinkingLevel: SetThinkingLevelHandler;
 	getSessionName: () => string | undefined;
 	setSessionName: (name: string) => Promise<void>;
+	/** Trusted host-supplied runtime mode; see {@link ExtensionRuntimeMode}. */
+	runtimeMode: ExtensionRuntimeMode;
+	/** Dynamic extension-tool refresh + activation delta; see {@link ExtensionAPI.refreshRegisteredTools}. */
+	refreshRegisteredTools: RefreshRegisteredToolsHandler;
 }
 
 /** Actions for ExtensionContext (ctx.* in event handlers). */

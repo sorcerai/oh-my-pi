@@ -21,6 +21,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { createLocalInteractiveExtensionRuntimeActions } from "../../extensibility/extensions/runtime-actions";
 import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask-dialog";
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
@@ -147,6 +148,7 @@ export class ExtensionUiController {
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
+			...createLocalInteractiveExtensionRuntimeActions(this.ctx.session, extensionRunner),
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolNames(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
@@ -367,6 +369,7 @@ export class ExtensionUiController {
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
+			...createLocalInteractiveExtensionRuntimeActions(this.ctx.session, extensionRunner),
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
 			getAllTools: () => this.ctx.session.getAllToolNames(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),

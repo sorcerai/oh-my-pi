@@ -240,8 +240,14 @@ import type {
 } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
-import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
+import type {
+	CompactOptions,
+	ContextUsage,
+	ExtensionToolActivationDelta,
+	RegisteredTool,
+} from "../extensibility/extensions/types";
+import { snapshotRegisteredTool } from "../extensibility/extensions/types";
+import { ExtensionToolWrapper, wrapRegisteredTool } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { RecoveredRetryError } from "../extensibility/shared-events";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
@@ -322,7 +328,7 @@ import { formatTitleConversationContext, type TitleConversationTurn } from "../t
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
-import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { normalizeToolNames } from "../tools/builtin-names";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -909,6 +915,8 @@ export interface AgentSessionConfig {
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
 	toolRegistry?: Map<string, AgentTool>;
+	/** Explicit MCP-owned names already present in the startup registry, including pending placeholders. */
+	mcpToolNames?: Iterable<string>;
 	/** Creates the tools registered only while `/vibe` mode is active. */
 	createVibeTools?: () => AgentTool[];
 	/** Tool names whose current registry entry is still the built-in implementation. */
@@ -1843,6 +1851,34 @@ function titleConversationTurnFromMessage(message: AgentMessage): TitleConversat
 	return { role: message.role, ...(text ? { text } : {}), ...(thinking ? { thinking } : {}) };
 }
 
+interface ToolMutationState {
+	registry: Map<string, AgentTool>;
+	builtInToolNames: Set<string>;
+	rpcHostToolNames: Set<string>;
+	mcpToolNames: Set<string>;
+	extensionTools: Map<string, RegisteredTool>;
+	installedVibeToolNames: Set<string>;
+	vibeModeBaselineToolNames: Set<string> | undefined;
+	vibeModeDesiredToolNames: Set<string> | undefined;
+	vibeModeRequiredToolNames: Set<string>;
+	vibeModeTransition: boolean;
+	activeTools: AgentTool[];
+	activeToolNames: string[];
+	mountedXdevToolNames: Set<string>;
+	mountedXdevTools: AgentTool[];
+	runtimeSelectedToolNames: Set<string> | undefined;
+	baseSystemPrompt: string[];
+	baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
+	systemPrompt: string[];
+	lastAppliedToolSignature: string | undefined;
+	promptModelKey: string | undefined;
+	pendingXdevMountDelta:
+		| {
+				added: Set<string>;
+				removed: Set<string>;
+		  }
+		| undefined;
+}
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -2055,12 +2091,14 @@ export class AgentSession {
 	#skillsReloadable: boolean;
 
 	// Model registry for API key resolution
-	#modelRegistry: ModelRegistry;
-
-	// Tool registry and prompt builder for extensions
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
+	#modelRegistry: ModelRegistry;
 	#installedVibeToolNames = new Set<string>();
+	#vibeModeBaselineToolNames: Set<string> | undefined;
+	#vibeModeDesiredToolNames: Set<string> | undefined;
+	#vibeModeTransition = false;
+	#vibeModeRequiredToolNames = new Set<string>();
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	#onResponse: SimpleStreamOptions["onResponse"] | undefined;
@@ -2084,9 +2122,9 @@ export class AgentSession {
 	#baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
 	/**
 	 * Signature of the (toolNames, tool descriptions) tuple passed to the most
-	 * recent successful `rebuildSystemPrompt` call. Used to skip redundant rebuilds
-	 * when MCP servers reconnect without changing their tool definitions, which is
-	 * the dominant cause of prompt-cache invalidation in long sessions.
+	 * recent successful `rebuildSystemPrompt` call. Used to skip redundant
+	 * rebuilds when MCP servers reconnect without changing their tool definitions,
+	 * which is the dominant cause of prompt-cache invalidation in long sessions.
 	 */
 	#lastAppliedToolSignature: string | undefined;
 	/**
@@ -2098,6 +2136,20 @@ export class AgentSession {
 	#promptModelKey: string | undefined;
 	#builtInToolNames = new Set<string>();
 	#rpcHostToolNames = new Set<string>();
+	#mcpToolNames = new Set<string>();
+	/** Registered extension definitions currently imported into the session. */
+	#extensionTools = new Map<string, RegisteredTool>();
+	/** Serialized promise chain that linearizes every shared-state tool mutation:
+	 *  {@link setActiveToolsByName}, {@link refreshMCPTools}, {@link refreshRpcHostTools},
+	 *  {@link activateVibeTools}, {@link deactivateVibeTools}, and {@link refreshExtensionTools}.
+	 *  These methods read/modify/write the same registry, built-in-name set, active set,
+	 *  and prompt signature, so concurrent execution would let a get/modify/set
+	 *  interleave lose collision checks, rollback, or activation deltas. */
+	#toolMutationChain: Promise<unknown> = Promise.resolve();
+	/** Monotonic counter bumped after each successfully applied tool mutation.
+	 *  Observers (tests, staleness guards) compare a previously-read value to
+	 *  detect that the tool/prompt state changed since. */
+	#toolMutationRevision = 0;
 	/** Session-owned `xd://` device registry (built-ins + dynamic mounts); `undefined` when the transport is off. */
 	#xdevRegistry: XdevRegistry | undefined;
 	/** Names of discoverable tools currently mounted under `xd://` (dynamic mounts only, not built-in devices). */
@@ -2713,7 +2765,27 @@ export class AgentSession {
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#createVibeTools = config.createVibeTools;
 		this.#builtInToolNames = new Set(config.builtInToolNames ?? []);
+		this.#mcpToolNames = new Set(config.mcpToolNames ?? []);
 		this.#presentationPinnedToolNames = config.presentationPinnedToolNames;
+		for (const [name, tool] of this.#toolRegistry) {
+			const mcpMetadata = tool as AgentTool & { mcpServerName?: string; mcpToolName?: string };
+			if (mcpMetadata.mcpServerName !== undefined || mcpMetadata.mcpToolName !== undefined) {
+				this.#mcpToolNames.add(name);
+			}
+		}
+		if (this.#extensionRunner) {
+			for (const registeredTool of this.#extensionRunner.getAllRegisteredTools?.() ?? []) {
+				const name = registeredTool.definition.name;
+				const isSyntheticMcp =
+					this.#mcpToolNames.has(name) ||
+					registeredTool.definition.mcpServerName !== undefined ||
+					registeredTool.definition.mcpToolName !== undefined;
+				if (this.#toolRegistry.has(name) && !this.#builtInToolNames.has(name) && !isSyntheticMcp) {
+					const snapshot = snapshotRegisteredTool(registeredTool);
+					this.#extensionTools.set(name, snapshot);
+				}
+			}
+		}
 		this.#ensureWriteRegistered = config.ensureWriteRegistered;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#transformProviderContext = config.transformProviderContext;
@@ -7099,7 +7171,8 @@ export class AgentSession {
 	}
 
 	#getActiveNonMCPToolNames(): string[] {
-		return this.getEnabledToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
+		const enabled = this.#vibeModeDesiredToolNames ? [...this.#vibeModeDesiredToolNames] : this.getEnabledToolNames();
+		return enabled.filter(name => !this.#mcpToolNames.has(name) && this.#toolRegistry.has(name));
 	}
 
 	/**
@@ -7155,41 +7228,144 @@ export class AgentSession {
 		return this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped;
 	}
 
-	/**
-	 * Registers the ephemeral vibe tools and activates them alongside `baseToolNames`.
-	 *
-	 * @throws When this session cannot create vibe tools or the factory returns duplicate names.
-	 */
-	async activateVibeTools(baseToolNames: string[]): Promise<void> {
-		const createVibeTools = this.#createVibeTools;
-		if (!createVibeTools) {
-			throw new Error("Vibe tools are unavailable in this session.");
-		}
-
-		const tools = createVibeTools();
-		const vibeToolNames = tools.map(tool => tool.name);
-		if (new Set(vibeToolNames).size !== vibeToolNames.length) {
-			throw new Error("Vibe tool names must be unique.");
-		}
-
-		for (const tool of tools) {
-			if (this.#toolRegistry.has(tool.name)) continue;
-			this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));
-			this.#builtInToolNames.add(tool.name);
-			this.#installedVibeToolNames.add(tool.name);
-		}
-
-		await this.#applyActiveToolsByName([...new Set([...baseToolNames, ...vibeToolNames])]);
+	#captureToolMutationState(): ToolMutationState {
+		return {
+			registry: new Map(this.#toolRegistry),
+			builtInToolNames: new Set(this.#builtInToolNames),
+			rpcHostToolNames: new Set(this.#rpcHostToolNames),
+			mcpToolNames: new Set(this.#mcpToolNames),
+			extensionTools: new Map(this.#extensionTools),
+			installedVibeToolNames: new Set(this.#installedVibeToolNames),
+			vibeModeBaselineToolNames: this.#vibeModeBaselineToolNames
+				? new Set(this.#vibeModeBaselineToolNames)
+				: undefined,
+			vibeModeDesiredToolNames: this.#vibeModeDesiredToolNames ? new Set(this.#vibeModeDesiredToolNames) : undefined,
+			vibeModeRequiredToolNames: new Set(this.#vibeModeRequiredToolNames),
+			vibeModeTransition: this.#vibeModeTransition,
+			activeTools: [...this.agent.state.tools],
+			activeToolNames: this.getActiveToolNames(),
+			mountedXdevToolNames: new Set(this.#mountedXdevToolNames),
+			mountedXdevTools: [...this.#mountedXdevToolNames].flatMap(name => {
+				const tool = this.#xdevRegistry?.get(name);
+				return tool ? [tool] : [];
+			}),
+			runtimeSelectedToolNames: this.#runtimeSelectedToolNames ? new Set(this.#runtimeSelectedToolNames) : undefined,
+			baseSystemPrompt: [...this.#baseSystemPrompt],
+			baseSystemPromptBeforeMemoryPromotion: this.#baseSystemPromptBeforeMemoryPromotion
+				? [...this.#baseSystemPromptBeforeMemoryPromotion]
+				: undefined,
+			systemPrompt: [...this.agent.state.systemPrompt],
+			lastAppliedToolSignature: this.#lastAppliedToolSignature,
+			promptModelKey: this.#promptModelKey,
+			pendingXdevMountDelta: this.#pendingXdevMountDelta
+				? {
+						added: new Set(this.#pendingXdevMountDelta.added),
+						removed: new Set(this.#pendingXdevMountDelta.removed),
+					}
+				: undefined,
+		};
 	}
 
-	/** Removes tools installed by {@link activateVibeTools} and activates `nextToolNames`. */
+	#restoreToolMutationState(snapshot: ToolMutationState): void {
+		this.#toolRegistry.clear();
+		for (const [name, tool] of snapshot.registry) this.#toolRegistry.set(name, tool);
+		this.#builtInToolNames = new Set(snapshot.builtInToolNames);
+		this.#rpcHostToolNames = new Set(snapshot.rpcHostToolNames);
+		this.#mcpToolNames = new Set(snapshot.mcpToolNames);
+		this.#extensionTools = new Map(snapshot.extensionTools);
+		this.#installedVibeToolNames = new Set(snapshot.installedVibeToolNames);
+		this.#vibeModeBaselineToolNames = snapshot.vibeModeBaselineToolNames
+			? new Set(snapshot.vibeModeBaselineToolNames)
+			: undefined;
+		this.#vibeModeDesiredToolNames = snapshot.vibeModeDesiredToolNames
+			? new Set(snapshot.vibeModeDesiredToolNames)
+			: undefined;
+		this.#vibeModeRequiredToolNames = new Set(snapshot.vibeModeRequiredToolNames);
+		this.#vibeModeTransition = snapshot.vibeModeTransition;
+		this.#runtimeSelectedToolNames = snapshot.runtimeSelectedToolNames
+			? new Set(snapshot.runtimeSelectedToolNames)
+			: undefined;
+		this.#mountedXdevToolNames = new Set(snapshot.mountedXdevToolNames);
+		this.#xdevRegistry?.reconcile(snapshot.mountedXdevTools);
+		this.agent.setTools(snapshot.activeTools);
+		this.#setActiveToolNames?.(snapshot.activeToolNames);
+		this.#baseSystemPrompt = [...snapshot.baseSystemPrompt];
+		this.#baseSystemPromptBeforeMemoryPromotion = snapshot.baseSystemPromptBeforeMemoryPromotion
+			? [...snapshot.baseSystemPromptBeforeMemoryPromotion]
+			: undefined;
+		this.agent.setSystemPrompt(snapshot.systemPrompt);
+		this.#lastAppliedToolSignature = snapshot.lastAppliedToolSignature;
+		this.#promptModelKey = snapshot.promptModelKey;
+		this.#pendingXdevMountDelta = snapshot.pendingXdevMountDelta
+			? {
+					added: new Set(snapshot.pendingXdevMountDelta.added),
+					removed: new Set(snapshot.pendingXdevMountDelta.removed),
+				}
+			: undefined;
+	}
+
+	async activateVibeTools(baseToolNames: string[]): Promise<void> {
+		return this.#runToolMutation(async () => {
+			const snapshot = this.#captureToolMutationState();
+			try {
+				const createVibeTools = this.#createVibeTools;
+				if (!createVibeTools) {
+					throw new Error("Vibe tools are unavailable in this session.");
+				}
+
+				const tools = createVibeTools();
+				const vibeToolNames = tools.map(tool => tool.name);
+				if (new Set(vibeToolNames).size !== vibeToolNames.length) {
+					throw new Error("Vibe tool names must be unique.");
+				}
+
+				const currentEnabled = this.getEnabledToolNames();
+				this.#vibeModeBaselineToolNames = new Set(currentEnabled);
+				this.#vibeModeDesiredToolNames = new Set(currentEnabled);
+				this.#vibeModeRequiredToolNames = new Set(baseToolNames);
+				for (const tool of tools) {
+					if (this.#toolRegistry.has(tool.name)) continue;
+					this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));
+					this.#builtInToolNames.add(tool.name);
+					this.#installedVibeToolNames.add(tool.name);
+				}
+
+				this.#vibeModeTransition = true;
+				await this.#applyActiveToolsByName([...new Set([...baseToolNames, ...vibeToolNames])]);
+				this.#vibeModeTransition = false;
+			} catch (error) {
+				this.#restoreToolMutationState(snapshot);
+				throw error;
+			}
+		});
+	}
+
+	/** Removes tools installed by {@link activateVibeTools} and restores the updated post-vibe baseline. */
 	async deactivateVibeTools(nextToolNames: string[]): Promise<void> {
-		for (const name of this.#installedVibeToolNames) {
-			this.#toolRegistry.delete(name);
-			this.#builtInToolNames.delete(name);
-		}
-		this.#installedVibeToolNames.clear();
-		await this.#applyActiveToolsByName(nextToolNames);
+		return this.#runToolMutation(async () => {
+			const snapshot = this.#captureToolMutationState();
+			try {
+				const vibeNames = new Set(this.#installedVibeToolNames);
+				for (const name of vibeNames) {
+					this.#toolRegistry.delete(name);
+					this.#builtInToolNames.delete(name);
+				}
+				this.#installedVibeToolNames.clear();
+				const desiredToolNames =
+					this.#vibeModeDesiredToolNames ??
+					this.#vibeModeBaselineToolNames ??
+					new Set(normalizeToolNames(nextToolNames));
+				this.#vibeModeTransition = true;
+				await this.#applyActiveToolsByName([...desiredToolNames]);
+				this.#vibeModeTransition = false;
+				this.#vibeModeBaselineToolNames = undefined;
+				this.#vibeModeDesiredToolNames = undefined;
+				this.#vibeModeRequiredToolNames.clear();
+			} catch (error) {
+				this.#restoreToolMutationState(snapshot);
+				throw error;
+			}
+		});
 	}
 
 	#getEditModeSession() {
@@ -7223,7 +7399,7 @@ export class AgentSession {
 	getSelectedMCPToolNames(): string[] {
 		// Every connected MCP tool is enabled; presentation (top-level vs xd://) is
 		// decided by loadMode. Return the enabled MCP tools in the current set.
-		return this.getEnabledToolNames().filter(name => isMCPToolName(name) && this.#toolRegistry.has(name));
+		return this.getEnabledToolNames().filter(name => this.#mcpToolNames.has(name) && this.#toolRegistry.has(name));
 	}
 
 	/**
@@ -7346,6 +7522,9 @@ export class AgentSession {
 
 	async #applyActiveToolsByName(toolNames: string[]): Promise<void> {
 		toolNames = normalizeToolNames(toolNames);
+		if (this.#vibeModeDesiredToolNames && !this.#vibeModeTransition) {
+			toolNames = normalizeToolNames([...this.#vibeModeRequiredToolNames, ...this.#installedVibeToolNames]);
+		}
 		const selectedTools = toolNames.flatMap(name => {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
@@ -7530,34 +7709,77 @@ export class AgentSession {
 	}
 
 	/**
+	 * Serialize a tool-set mutation through {@link #toolMutationChain} so that
+	 * {@link setActiveToolsByName}, {@link refreshMCPTools}, {@link refreshRpcHostTools},
+	 * {@link activateVibeTools}, {@link deactivateVibeTools}, and {@link refreshExtensionTools}
+	 * never interleave. They all read/modify/write the shared registry, built-in-name set,
+	 * active set, and prompt signature; without linearization, a concurrent mode change, vibe
+	 * toggle, MCP/RPC refresh, or extension refresh could invalidate collision checks, rollback
+	 * snapshots, or activation deltas.
+	 *
+	 * The returned promise resolves with `fn`'s result. The chain itself never rejects — each
+	 * step runs whether or not the previous succeeded, and the revision bumps on success so
+	 * observers can detect stale snapshots. A rejection from `fn` propagates to the caller
+	 * without breaking the chain for the next queued mutation.
+	 */
+	async #runToolMutation<T>(fn: () => Promise<T>): Promise<T> {
+		const result = this.#toolMutationChain.then(fn, fn);
+		// Swallow rejection on the chain handle so a failed mutation does not poison
+		// subsequent queued mutations. The caller still sees `result`'s rejection.
+		this.#toolMutationChain = result.then(
+			() => {
+				this.#toolMutationRevision++;
+			},
+			() => {
+				// State was rolled back by `fn`; do not bump the revision.
+			},
+		);
+		return result;
+	}
+
+	/** Monotonic counter of successfully applied tool-set mutations since session start. */
+	getToolMutationRevision(): number {
+		return this.#toolMutationRevision;
+	}
+
+	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
 	 * Also rebuilds the system prompt to reflect the new tool set.
 	 * Changes take effect before the next model call.
 	 */
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
-		const mounted = this.#mountedXdevToolNames;
-		const normalized = normalizeToolNames(toolNames);
-		const transportWriteActive =
-			this.#builtInToolNames.has("write") &&
-			this.getActiveToolNames().includes("write") &&
-			this.#presentationPinnedToolNames?.has("write") !== true &&
-			this.#runtimeSelectedToolNames?.has("write") !== true &&
-			(mounted.size > 0 || this.#planModeState?.enabled === true);
-		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
-		this.#runtimeSelectedToolNames = new Set(
-			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
-		);
-		try {
-			await this.#applyActiveToolsByName(normalized);
-		} catch (error) {
-			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
-			throw error;
-		}
+		return this.#runToolMutation(async () => {
+			const mounted = this.#mountedXdevToolNames;
+			const normalized = normalizeToolNames(toolNames);
+			const transportWriteActive =
+				this.#builtInToolNames.has("write") &&
+				this.getActiveToolNames().includes("write") &&
+				this.#presentationPinnedToolNames?.has("write") !== true &&
+				this.#runtimeSelectedToolNames?.has("write") !== true &&
+				(mounted.size > 0 || this.#planModeState?.enabled === true);
+			const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
+			const previousVibeDesiredToolNames = this.#vibeModeDesiredToolNames;
+			if (this.#vibeModeDesiredToolNames) this.#vibeModeDesiredToolNames = new Set(normalized);
+			this.#runtimeSelectedToolNames = new Set(
+				normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
+			);
+			try {
+				await this.#applyActiveToolsByName(normalized);
+			} catch (error) {
+				this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
+				this.#vibeModeDesiredToolNames = previousVibeDesiredToolNames;
+				throw error;
+			}
+		});
 	}
 
 	/** Rebuild the base system prompt using the current active tool set. */
 	async refreshBaseSystemPrompt(): Promise<void> {
+		return this.#runToolMutation(() => this.#refreshBaseSystemPromptUnqueued());
+	}
+
+	async #refreshBaseSystemPromptUnqueued(): Promise<void> {
 		if (!this.#rebuildSystemPrompt) return;
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
@@ -7695,107 +7917,249 @@ export class AgentSession {
 	 * effect without restarting the session.
 	 */
 	async refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
-		const existingNames = Array.from(this.#toolRegistry.keys());
-		const previousMcpTools = new Map(
-			existingNames.flatMap(name => {
-				const tool = this.#toolRegistry.get(name);
-				return isMCPToolName(name) && tool ? [[name, tool] as const] : [];
-			}),
-		);
-		for (const name of existingNames) {
-			if (isMCPToolName(name)) {
-				this.#toolRegistry.delete(name);
+		return this.#runToolMutation(async () => {
+			const snapshot = this.#captureToolMutationState();
+			const previousNonMCPToolNames = this.#getActiveNonMCPToolNames();
+			const incomingNames = mcpTools.map(tool => tool.name);
+			if (new Set(incomingNames).size !== incomingNames.length) {
+				throw new Error("MCP tool names must be unique");
 			}
-		}
+			for (const name of incomingNames) {
+				if (this.#toolRegistry.has(name) && !this.#mcpToolNames.has(name)) {
+					throw new Error(`MCP tool "${name}" conflicts with an existing tool`);
+				}
+			}
+			try {
+				for (const name of this.#mcpToolNames) this.#toolRegistry.delete(name);
+				this.#mcpToolNames.clear();
 
-		const getCustomToolContext = (): CustomToolContext => ({
-			sessionManager: this.sessionManager,
-			modelRegistry: this.#modelRegistry,
-			model: this.model,
-			isIdle: () => !this.isStreaming,
-			hasQueuedMessages: () => this.queuedMessageCount > 0,
-			abort: () => {
-				this.agent.abort();
-			},
-			settings: this.settings,
-			localProtocolOptions: this.#localProtocolOptions(),
+				const getCustomToolContext = (): CustomToolContext => ({
+					sessionManager: this.sessionManager,
+					modelRegistry: this.#modelRegistry,
+					model: this.model,
+					isIdle: () => !this.isStreaming,
+					hasQueuedMessages: () => this.queuedMessageCount > 0,
+					abort: () => {
+						this.agent.abort();
+					},
+					settings: this.settings,
+					localProtocolOptions: this.#localProtocolOptions(),
+				});
+
+				for (const customTool of mcpTools) {
+					const wrapped = wrapToolWithMetaNotice(
+						CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool,
+					);
+					const finalTool = (
+						this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
+					) as AgentTool;
+					this.#toolRegistry.set(finalTool.name, finalTool);
+					this.#mcpToolNames.add(finalTool.name);
+				}
+
+				const nextActive = [...new Set([...previousNonMCPToolNames, ...incomingNames])];
+				if (this.#vibeModeDesiredToolNames) this.#vibeModeDesiredToolNames = new Set(nextActive);
+				await this.#applyActiveToolsByName(nextActive);
+			} catch (error) {
+				const lazyWrite = !snapshot.registry.has("write") ? this.#toolRegistry.get("write") : undefined;
+				this.#restoreToolMutationState(snapshot);
+				if (lazyWrite) {
+					this.#toolRegistry.set("write", lazyWrite);
+					this.#builtInToolNames.add("write");
+				}
+				throw error;
+			}
 		});
-
-		for (const customTool of mcpTools) {
-			const wrapped = wrapToolWithMetaNotice(CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool);
-			const finalTool = (
-				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
-			) as AgentTool;
-			this.#toolRegistry.set(finalTool.name, finalTool);
-		}
-
-		// Every connected MCP tool is selected; centralized repartitioning owns
-		// presentation pins and write-transport activation/removal.
-		const nextActive = [...new Set([...this.#getActiveNonMCPToolNames(), ...mcpTools.map(tool => tool.name)])];
-		try {
-			await this.#applyActiveToolsByName(nextActive);
-		} catch (error) {
-			for (const name of this.#toolRegistry.keys()) {
-				if (isMCPToolName(name)) this.#toolRegistry.delete(name);
-			}
-			for (const [name, tool] of previousMcpTools) this.#toolRegistry.set(name, tool);
-			throw error;
-		}
 	}
 
 	/**
 	 * Replace RPC host-owned tools and refresh the active tool set before the next model call.
 	 */
 	async refreshRpcHostTools(rpcTools: AgentTool[]): Promise<void> {
-		const nextToolNames = rpcTools.map(tool => tool.name);
-		const uniqueToolNames = new Set(nextToolNames);
-		if (uniqueToolNames.size !== nextToolNames.length) {
-			throw new Error("RPC host tool names must be unique");
+		return this.#runToolMutation(async () => {
+			const nextToolNames = rpcTools.map(tool => tool.name);
+			const uniqueToolNames = new Set(nextToolNames);
+			if (uniqueToolNames.size !== nextToolNames.length) {
+				throw new Error("RPC host tool names must be unique");
+			}
+
+			for (const name of uniqueToolNames) {
+				if (this.#toolRegistry.has(name) && !this.#rpcHostToolNames.has(name)) {
+					throw new Error(`RPC host tool "${name}" conflicts with an existing tool`);
+				}
+			}
+
+			const previousRpcHostToolNames = new Set(this.#rpcHostToolNames);
+			const previousVibeDesiredToolNames = this.#vibeModeDesiredToolNames;
+			const previousActiveToolNames = this.#vibeModeDesiredToolNames
+				? [...this.#vibeModeDesiredToolNames]
+				: this.getEnabledToolNames();
+			const previousRpcHostTools = new Map(
+				[...previousRpcHostToolNames].flatMap(name => {
+					const tool = this.#toolRegistry.get(name);
+					return tool ? [[name, tool] as const] : [];
+				}),
+			);
+			for (const name of previousRpcHostToolNames) {
+				this.#toolRegistry.delete(name);
+			}
+			this.#rpcHostToolNames.clear();
+
+			for (const tool of rpcTools) {
+				const metaWrapped = wrapToolWithMetaNotice(tool);
+				const finalTool = (
+					this.#extensionRunner ? new ExtensionToolWrapper(metaWrapped, this.#extensionRunner) : metaWrapped
+				) as AgentTool;
+				this.#toolRegistry.set(finalTool.name, finalTool);
+				this.#rpcHostToolNames.add(finalTool.name);
+			}
+
+			const activeNonRpcToolNames = previousActiveToolNames.filter(name => !previousRpcHostToolNames.has(name));
+			const preservedRpcToolNames = previousActiveToolNames.filter(
+				name => previousRpcHostToolNames.has(name) && this.#rpcHostToolNames.has(name),
+			);
+			const autoActivatedRpcToolNames = rpcTools
+				.filter(tool => !tool.hidden && !previousRpcHostToolNames.has(tool.name))
+				.map(tool => tool.name);
+			const nextActiveToolNames = Array.from(
+				new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames]),
+			);
+			if (this.#vibeModeDesiredToolNames) this.#vibeModeDesiredToolNames = new Set(nextActiveToolNames);
+			try {
+				await this.#applyActiveToolsByName(nextActiveToolNames);
+			} catch (error) {
+				for (const name of this.#rpcHostToolNames) this.#toolRegistry.delete(name);
+				this.#rpcHostToolNames = previousRpcHostToolNames;
+				for (const [name, tool] of previousRpcHostTools) this.#toolRegistry.set(name, tool);
+				this.#vibeModeDesiredToolNames = previousVibeDesiredToolNames;
+				throw error;
+			}
+		});
+	}
+
+	/**
+	 * Import a snapshot of newly registered extension tools into the live session
+	 * registry and atomically apply an activation delta. Backed by
+	 * {@link #runToolMutation}, so this transaction linearizes against every other
+	 * shared-state tool mutation (mode change, vibe toggle, MCP/RPC refresh).
+	 *
+	 * Invariants (enforced inside the transaction, before any prompt rebuild):
+	 *  - Registration alone (via `ExtensionAPI.registerTool`) is inert; only this
+	 *    method makes the tool callable.
+	 *  - Built-in, SDK, MCP, RPC, and existing extension definitions are never
+	 *    mutated. A `registered` name that collides with a non-extension registry
+	 *    entry rejects. A changed same-name extension definition rejects.
+	 *  - A duplicate identical refresh/delta is idempotent (no registry write, no
+	 *    prompt rebuild).
+	 *  - The activation delta is applied atomically against the current active set:
+	 *    `deactivate` names are removed, `activate` names are added, in one step.
+	 *  - On failure the registry is rolled back to its pre-transaction snapshot.
+	 */
+	async refreshExtensionTools(registered: RegisteredTool[], delta: ExtensionToolActivationDelta): Promise<void> {
+		return this.#runToolMutation(() => this.#applyExtensionToolsRefresh(registered, delta));
+	}
+
+	#sameRegisteredTool(previous: RegisteredTool, next: RegisteredTool): boolean {
+		// `snapshotRegisteredTool` canonicalizes loader output (including ordinary
+		// object schemas), so identity is the complete definition comparison.
+		return previous === next;
+	}
+
+	/**
+	 * Body of {@link refreshExtensionTools}. Runs inside the linearized mutation
+	 * chain so collision checks, rollback, and the activation delta all observe a
+	 * quiescent registry.
+	 */
+	async #applyExtensionToolsRefresh(registered: RegisteredTool[], delta: ExtensionToolActivationDelta): Promise<void> {
+		const runner = this.#extensionRunner;
+		const snapshot = this.#captureToolMutationState();
+		if (!runner) {
+			throw new Error("Cannot refresh extension tools without an extension runner");
 		}
 
-		for (const name of uniqueToolNames) {
-			if (this.#toolRegistry.has(name) && !this.#rpcHostToolNames.has(name)) {
-				throw new Error(`RPC host tool "${name}" conflicts with an existing tool`);
+		// Partition registered tools: new inserts vs. idempotent duplicates vs.
+		// collisions/replacements. Every check runs against the live registry
+		// inside the transaction so a concurrent mutation cannot widen the gap.
+		const toInsert: RegisteredTool[] = [];
+		const canonicalRegistered = registered
+			.map(snapshotRegisteredTool)
+			.filter(
+				tool =>
+					!this.#mcpToolNames.has(tool.definition.name) &&
+					tool.definition.mcpServerName === undefined &&
+					tool.definition.mcpToolName === undefined,
+			);
+		const pendingByName = new Map<string, RegisteredTool>();
+		for (const rt of canonicalRegistered) {
+			const name = rt.definition.name;
+			const existing = this.#toolRegistry.get(name);
+			const existingExtension = this.#extensionTools.get(name);
+			if (existing === undefined) {
+				const pending = pendingByName.get(name);
+				if (pending) {
+					if (!this.#sameRegisteredTool(pending, rt)) {
+						throw new Error(
+							`Extension tool "${name}" is already registered with a different definition; refusing replacement`,
+						);
+					}
+					continue;
+				}
+				pendingByName.set(name, rt);
+				toInsert.push(rt);
+				continue;
+			}
+			if (existingExtension) {
+				// Already an extension tool — idempotent only if the complete
+				// definition is unchanged. Changed schemas, handlers, or metadata
+				// fail closed rather than silently replacing a live tool.
+				if (this.#sameRegisteredTool(existingExtension, rt)) continue;
+				throw new Error(
+					`Extension tool "${name}" is already registered with a different definition; refusing replacement`,
+				);
+			}
+			// Name owned by a built-in, MCP, RPC, or SDK tool — hard collision.
+			throw new Error(`Extension tool "${name}" conflicts with an existing tool`);
+		}
+
+		// Early idempotency exit: nothing new to insert and no explicit delta.
+		const activate = delta.activate ?? [];
+		const deactivate = delta.deactivate ?? [];
+		const stagedExtensionNames = new Set([...this.#extensionTools.keys(), ...pendingByName.keys()]);
+		for (const name of [...activate, ...deactivate]) {
+			if (!stagedExtensionNames.has(name)) {
+				throw new Error(`Tool "${name}" is not extension-owned; refusing activation delta`);
 			}
 		}
-
-		const previousRpcHostToolNames = new Set(this.#rpcHostToolNames);
-		const previousActiveToolNames = this.getEnabledToolNames();
-		const previousRpcHostTools = new Map(
-			[...previousRpcHostToolNames].flatMap(name => {
-				const tool = this.#toolRegistry.get(name);
-				return tool ? [[name, tool] as const] : [];
-			}),
-		);
-		for (const name of previousRpcHostToolNames) {
-			this.#toolRegistry.delete(name);
-		}
-		this.#rpcHostToolNames.clear();
-
-		for (const tool of rpcTools) {
-			const metaWrapped = wrapToolWithMetaNotice(tool);
-			const finalTool = (
-				this.#extensionRunner ? new ExtensionToolWrapper(metaWrapped, this.#extensionRunner) : metaWrapped
-			) as AgentTool;
-			this.#toolRegistry.set(finalTool.name, finalTool);
-			this.#rpcHostToolNames.add(finalTool.name);
+		if (toInsert.length === 0 && activate.length === 0 && deactivate.length === 0) {
+			return;
 		}
 
-		const activeNonRpcToolNames = previousActiveToolNames.filter(name => !previousRpcHostToolNames.has(name));
-		const preservedRpcToolNames = previousActiveToolNames.filter(
-			name => previousRpcHostToolNames.has(name) && this.#rpcHostToolNames.has(name),
-		);
-		const autoActivatedRpcToolNames = rpcTools
-			.filter(tool => !tool.hidden && !previousRpcHostToolNames.has(tool.name))
-			.map(tool => tool.name);
+		// Insert new tools with the same wrapper stack as refreshMCPTools /
+		// refreshRpcHostTools: metaNotice → ExtensionToolWrapper.
 		try {
-			await this.#applyActiveToolsByName(
-				Array.from(new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames])),
+			for (const rt of toInsert) {
+				const snapshotRegistered = snapshotRegisteredTool(rt);
+				const name = snapshotRegistered.definition.name;
+				const adapted = wrapRegisteredTool(snapshotRegistered, runner);
+				const metaWrapped = wrapToolWithMetaNotice(adapted);
+				const finalTool = new ExtensionToolWrapper(metaWrapped, runner) as AgentTool;
+				this.#toolRegistry.set(name, finalTool);
+				this.#extensionTools.set(name, snapshotRegistered);
+			}
+
+			// Apply the activation delta atomically against the desired post-vibe
+			// baseline when vibe mode is active, not the restricted live set.
+			const currentActive = this.#vibeModeDesiredToolNames
+				? [...this.#vibeModeDesiredToolNames]
+				: this.getEnabledToolNames();
+			const deactivateSet = new Set(deactivate);
+			const nextActive = Array.from(
+				new Set([...currentActive.filter(name => !deactivateSet.has(name)), ...activate]),
 			);
+			if (this.#vibeModeDesiredToolNames) this.#vibeModeDesiredToolNames = new Set(nextActive);
+			await this.#applyActiveToolsByName(nextActive);
 		} catch (error) {
-			for (const name of this.#rpcHostToolNames) this.#toolRegistry.delete(name);
-			this.#rpcHostToolNames = previousRpcHostToolNames;
-			for (const [name, tool] of previousRpcHostTools) this.#toolRegistry.set(name, tool);
+			this.#restoreToolMutationState(snapshot);
 			throw error;
 		}
 	}
