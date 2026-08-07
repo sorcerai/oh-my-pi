@@ -147,7 +147,12 @@ import type {
 import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type {
+	CompactOptions,
+	ContextUsage,
+	ExtensionToolActivationDelta,
+	RegisteredTool,
+} from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
@@ -5069,6 +5074,19 @@ export class AgentSession {
 	/** Replaces host-owned RPC tools before the next model call. */
 	refreshRpcHostTools(rpcTools: AgentTool[]): Promise<void> {
 		return this.#tools.refreshRpcHostTools(rpcTools);
+	}
+
+	/**
+	 * Imports newly registered extension tools into the live session registry and
+	 * atomically applies an activation delta (see {@link SessionTools.refreshExtensionTools}).
+	 */
+	refreshExtensionTools(registered: RegisteredTool[], delta: ExtensionToolActivationDelta): Promise<void> {
+		return this.#tools.refreshExtensionTools(registered, delta);
+	}
+
+	/** Monotonic counter of successfully applied tool-set mutations since session start. */
+	getToolMutationRevision(): number {
+		return this.#tools.getToolMutationRevision();
 	}
 
 	/** Whether auto-compaction is currently running */

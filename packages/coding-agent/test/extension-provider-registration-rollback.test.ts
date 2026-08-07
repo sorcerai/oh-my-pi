@@ -196,6 +196,8 @@ describe("extension provider registration rollback", () => {
 			);
 			runner.initialize(
 				{
+					runtimeMode: "noninteractive" as const,
+					refreshRegisteredTools: async () => {},
 					sendMessage: () => {},
 					sendUserMessage: () => {},
 					appendEntry: () => {},

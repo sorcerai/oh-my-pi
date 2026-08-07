@@ -46,6 +46,7 @@ import type {
 	ExtensionFlag,
 	ExtensionMode,
 	ExtensionRuntime,
+	ExtensionRuntimeMode,
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -675,6 +676,8 @@ export class ExtensionRunner {
 		this.runtime.unregisterProvider = name => {
 			this.modelRegistry.unregisterProvider(name);
 		};
+		this.runtime.runtimeMode = actions.runtimeMode;
+		this.runtime.refreshRegisteredTools = actions.refreshRegisteredTools;
 
 		// Context actions (required)
 		this.#getModel = contextActions.getModel;
@@ -986,6 +989,14 @@ export class ExtensionRunner {
 			for (const [id, shape] of extension.composerShapes) shapes.set(id, shape);
 		}
 		return [...shapes.values()];
+	}
+
+	/**
+	 * Trusted runtime mode owning approval authority, set by the host at
+	 * {@link initialize}. Pre-init value is `noninteractive`.
+	 */
+	getRuntimeMode(): ExtensionRuntimeMode {
+		return this.runtime.runtimeMode;
 	}
 
 	/**
