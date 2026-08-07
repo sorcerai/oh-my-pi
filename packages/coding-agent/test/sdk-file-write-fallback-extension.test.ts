@@ -45,6 +45,8 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 function initializeRunnerForTest(runner: ExtensionRunner | undefined): void {
 	if (!runner) return;
 	const actions: ExtensionActions = {
+		runtimeMode: "noninteractive" as const,
+		refreshRegisteredTools: async () => {},
 		sendMessage: () => {},
 		sendUserMessage: () => {},
 		appendEntry: () => {},
