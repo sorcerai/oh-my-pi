@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { type PrimeBridgeConfig, resolveBridgeConfig } from "./config";
 import { PrimeDaemonClient } from "./prime/client";
 import { type PrimeBridgeLogger, type PrimeBridgeServer, startPrimeBridgeServer } from "./server";
+import { runSessionCommand, type SessionConvertDependencies } from "./session/convert";
 import { BridgeStore } from "./store";
 
 const PRIME_SKILL_MARKER = ".omp-managed";
@@ -19,6 +20,7 @@ export interface PrimeBridgeCliDependencies {
 	peers?: () => unknown | Promise<unknown>;
 	startServer?: typeof startPrimeBridgeServer;
 	installPrimeSkill?: typeof installPrimeSkill;
+	session?: SessionConvertDependencies;
 }
 
 export interface RunningPrimeBridge {
@@ -222,31 +224,44 @@ export async function main(
 }
 
 if (import.meta.main) {
-	let running: RunningPrimeBridge | undefined;
-	let stopping: Promise<void> | undefined;
-	const shutdown = async (): Promise<void> => {
-		if (stopping !== undefined) return stopping;
-		if (running === undefined) return;
-		stopping = running.stop();
+	const commandArgs = Bun.argv.slice(2);
+	if (commandArgs[0] === "session") {
 		try {
-			await stopping;
+			await runSessionCommand(commandArgs, {
+				writeOut: (text: string) => console.log(text),
+				writeErr: (text: string) => console.error(text),
+			});
 		} catch (error) {
-			console.error("Prime bridge shutdown failed:", error instanceof Error ? error.message : String(error));
+			console.error("Prime bridge session command failed:", error instanceof Error ? error.message : String(error));
 			process.exitCode = 1;
 		}
-	};
+	} else {
+		let running: RunningPrimeBridge | undefined;
+		let stopping: Promise<void> | undefined;
+		const shutdown = async (): Promise<void> => {
+			if (stopping !== undefined) return stopping;
+			if (running === undefined) return;
+			stopping = running.stop();
+			try {
+				await stopping;
+			} catch (error) {
+				console.error("Prime bridge shutdown failed:", error instanceof Error ? error.message : String(error));
+				process.exitCode = 1;
+			}
+		};
 
-	try {
-		running = await main();
-		console.log(running.url);
-		process.once("SIGINT", () => {
-			void shutdown();
-		});
-		process.once("SIGTERM", () => {
-			void shutdown();
-		});
-	} catch (error) {
-		console.error("Prime bridge startup failed:", error instanceof Error ? error.message : String(error));
-		process.exitCode = 1;
+		try {
+			running = await main();
+			console.log(running.url);
+			process.once("SIGINT", () => {
+				void shutdown();
+			});
+			process.once("SIGTERM", () => {
+				void shutdown();
+			});
+		} catch (error) {
+			console.error("Prime bridge startup failed:", error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
+		}
 	}
 }

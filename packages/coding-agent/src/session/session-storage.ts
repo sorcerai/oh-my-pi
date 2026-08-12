@@ -72,8 +72,13 @@ export interface SessionStorage {
 
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
-	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/** Persist a staged file before it can be published. */
+	fsyncFile?(path: string): Promise<void>;
+	/** Persist directory metadata after a create-only publication. */
+	fsyncDirectory?(path: string): Promise<void>;
+	/** Atomically publish a sibling staged file without replacing an existing destination. */
+	publishCreateOnly?(source: string, destination: string): Promise<void>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextCreateOnly?(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
@@ -299,6 +304,29 @@ export class FileSessionStorage implements SessionStorage {
 			if (failure === undefined) throw closeError;
 		}
 		if (failure !== undefined) throw failure;
+	}
+
+	async fsyncFile(fpath: string): Promise<void> {
+		const handle = await fs.promises.open(fpath, "r");
+		try {
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	}
+
+	async fsyncDirectory(dir: string): Promise<void> {
+		const handle = await fs.promises.open(dir, "r");
+		try {
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	}
+
+	async publishCreateOnly(source: string, destination: string): Promise<void> {
+		await fs.promises.link(source, destination);
+		await fs.promises.unlink(source);
 	}
 
 	async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
@@ -761,6 +789,19 @@ export class MemorySessionStorage implements SessionStorage {
 		return Promise.resolve();
 	}
 
+	async fsyncFile(_path: string): Promise<void> {}
+
+	async fsyncDirectory(_path: string): Promise<void> {}
+
+	async publishCreateOnly(source: string, destination: string): Promise<void> {
+		if (this.#files.has(destination))
+			throw Object.assign(new Error(`File exists: ${destination}`), { code: "EEXIST" });
+		const entry = this.#files.get(source);
+		if (!entry) throw Object.assign(new Error(`File not found: ${source}`), { code: "ENOENT" });
+		this.#files.set(destination, entry);
+		this.#files.delete(source);
+	}
+
 	writeTextCreateOnly(path: string, content: string): Promise<void> {
 		if (this.#files.has(path)) {
 			return Promise.reject(Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" }));
@@ -787,7 +828,8 @@ export class MemorySessionStorage implements SessionStorage {
 		this.#files.delete(path);
 		return Promise.resolve();
 	}
-	deleteSessionWithArtifacts(_sessionPath: string): Promise<void> {
+	deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+		this.#files.delete(sessionPath);
 		return Promise.resolve();
 	}
 

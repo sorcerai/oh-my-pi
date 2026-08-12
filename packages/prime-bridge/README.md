@@ -80,3 +80,78 @@ The OMP launch broker starts one machine-global bridge named `prime-bridge` with
 `restart: "always"` only works while the launch broker has its lifecycle record. If the bridge crashes while the broker is down, OMP does not promise an immediate restart. The bridge starts again when the broker recovers and OMP calls the ensure path. Use an external supervisor when you need restart guarantees during broker downtime.
 
 The bridge is not an OMP session. OMP external Prime peers stay outside `AgentRegistry`, and the bridge cannot access live OMP tools. A disconnected OMP session can therefore make a target unavailable without damaging Prime or OMP session state.
+
+
+## Session resume proof and limits
+
+Session resume supports the public Prime v3 JSONL reader/projector and OMP
+session-v3 reader/projector APIs. The deterministic offline proof covers the
+fixture revisions `prime-v3.jsonl` and `omp-v3.jsonl`, including every branch
+tip, role ordering, tool-call/result ID and name continuity, exact historical
+CAS bytes, and projection loss parity. Each fixture completes an A-to-B-to-A
+projection through both native formats.
+
+OMP continuation opens the imported file with `SessionManager.open()`,
+navigates a tool-bearing native branch, and sends a follow-up through the
+public OpenAI-compatible adapter. True resume means destination-native open
+and navigation, followed by a real follow-up prompt whose complete provider
+request is locally schema-validated. Historical tool calls and results must
+remain paired. The proof uses a loopback-only faux OpenAI-compatible server
+and never needs a provider key or a paid request.
+
+Prime-native continuation is optional in the default package test because the
+bridge workspace does not bundle a Prime executable. Without
+`PRIME_AGENT_BIN`, Bun skips only the native Prime RPC case.
+
+Run the explicit required native gate with an installed Prime Agent binary:
+
+```sh
+PRIME_AGENT_BIN=/path/to/prime-agent bun run test:session-resume:native
+```
+
+The required gate fails before the integration test if `PRIME_AGENT_BIN` is
+absent. With the binary, it exercises `switch_session`, a follow-up RPC prompt,
+and the complete tool-bearing loopback provider request after a
+Prime-to-OMP-to-Prime projection.
+
+The remaining default cases still prove destination JSONL projection, trusted
+bridge metadata, CAS read-back, exhaustive branch validation, OMP-native
+continuation, and both A-to-B-to-A paths. An upstream `pi` binary is not a
+substitute for the Prime Agent fork.
+
+### Inspect and convert sessions
+
+The bridge CLI detects the source format by running both strict native readers:
+
+```sh
+omp-prime-bridge session inspect /path/to/session.jsonl
+omp-prime-bridge session inspect /path/to/session.jsonl --json
+omp-prime-bridge session convert /path/to/session.jsonl --to omp
+omp-prime-bridge session convert /path/to/session.jsonl --to prime --output /safe/new-directory
+```
+
+Conversion is create-only and refuses an existing output path. It stages the
+native session and CAS data before one atomic rename. Use
+`--loss-policy reject` to fail before publication when the canonical reader or
+destination projector records any loss. Use `--activate` to preserve and select
+the source active leaf in destination-native metadata. Without `--activate`,
+the complete branch tree is retained but the destination uses its native
+default leaf selection. Neither mode changes a live harness process.
+
+Import is create-only. Keep the source session and its CAS/state directory as
+the backup before importing. The bridge writes destination files below the
+configured Prime home or OMP session directory and never overwrites an
+existing destination. Unsupported roles, unavailable provider payloads, and
+unrepresentable metadata stay in the loss ledger. They are not silently
+reconstructed.
+
+The public OMP tree importer generates its own 256-byte title slot. It cannot
+reproduce the exact source title-slot bytes. The OMP projector records this as
+an `entry_metadata_unrepresentable` loss with source type `title`.
+
+Provider and model continuity is limited to the destination adapter. A
+historical provider/model identity is metadata unless the destination has a
+compatible configured model. Provider-native opaque payloads are replayed only
+when retained in CAS and accepted by the destination adapter. The proof uses
+OpenAI Chat Completions wire history and does not prove provider-side cache,
+server-side conversation, credential, or model-account continuity.

@@ -19,9 +19,14 @@
     "lint": "biome lint .",
     "fix": "biome check --write --unsafe .",
     "fmt": "biome format --write .",
-    "test": "bun test --parallel"
+    "test": "bun test --parallel",
+    "test:session-resume:native": "bun -e 'if (!process.env.PRIME_AGENT_BIN) throw new Error(\"PRIME_AGENT_BIN is required for the native Prime continuation gate\")' && bun test test/integration/session-resume.test.ts"
   },
   "dependencies": {
+    "@oh-my-pi/omptype": "catalog:",
+    "@oh-my-pi/pi-ai": "workspace:*",
+    "@oh-my-pi/pi-coding-agent": "workspace:*",
+    "@oh-my-pi/pi-utils": "workspace:*",
     "@oh-my-pi/prime-bridge-protocol": "workspace:*"
   },
   "devDependencies": {
