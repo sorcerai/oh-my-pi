@@ -167,6 +167,40 @@ export interface StoredAuthCredential {
 	disabledCause: string | null;
 }
 
+/**
+ * Store-level result for an atomic create-only credential insertion.
+ * The rows are internal state used to refresh {@link AuthStorage}'s cache.
+ */
+export interface StoredCredentialInsertResult {
+	inserted: boolean;
+	rows: StoredAuthCredential[];
+}
+
+/**
+ * Public result for {@link AuthStorage.insertCredentialsIfProviderAbsent}.
+ * Contains row identity and type only; credential values are intentionally omitted.
+ */
+export interface CredentialInsertResult {
+	inserted: boolean;
+	provider: string;
+	rows: Array<{ id: number; type: AuthCredential["type"] }>;
+}
+
+/**
+ * Public result for an atomic create-only credential batch.
+ * Provider values and credential payloads are intentionally omitted.
+ */
+export interface CredentialBatchInsertResult {
+	inserted: string[];
+	skipped: string[];
+}
+
+/** One provider's create-only credential payload for a batch insert. */
+export interface CredentialBatchInsert {
+	provider: string;
+	credentials: AuthCredential[];
+}
+
 /** One persisted rate-limit block: credential row id + provider-type key + optional scope. */
 export interface StoredCredentialBlock {
 	/** SQLite row id of the credential (auth_credentials.id). */
@@ -393,6 +427,16 @@ export interface AuthCredentialStore {
 	/** Optional hook to notify the underlying store that usage report cache is stale. */
 	invalidateUsageCache?(signal?: AbortSignal): Promise<void>;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
+	/**
+	 * Atomically insert all supplied credentials only when the provider has no
+	 * active credentials. Stores that cannot provide this guarantee omit it.
+	 */
+	/**
+	 * Atomically process multiple providers: active providers are skipped and
+	 * every absent provider is inserted, or the entire batch is rolled back.
+	 */
+	insertCredentialsIfProvidersAbsent?(batch: CredentialBatchInsert[]): CredentialBatchInsertResult;
+	insertCredentialsIfProviderAbsent?(provider: string, credentials: AuthCredential[]): StoredCredentialInsertResult;
 	/**
 	 * Optional store hook to re-hydrate the credential snapshot from its
 	 * backing source. Remote broker stores re-fetch `GET /v1/snapshot` so a
@@ -1211,6 +1255,14 @@ type OAuthCandidate = UsageCandidate<OAuthCredential>;
 type ApiKeyCandidate = UsageCandidate<ApiKeyCredential>;
 type UsageRankingResult<T extends AuthCredential> = UsageCandidate<T> & { blockedUntil: number | undefined };
 
+type CredentialBlockRouting = {
+	providerKey: string;
+	strategy: CredentialRankingStrategy | undefined;
+	rankingContext: CredentialRankingContext;
+	blockScope: string | undefined;
+	siblingBlockScopes: readonly string[];
+};
+
 type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blocked: boolean;
 	blockedUntil?: number;
@@ -1295,26 +1347,28 @@ export class AuthStorage {
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	#closed = false;
 
-	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
+	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}, skipStoreHygiene = false) {
 		this.#store = store;
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
-		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
-		// cache rows (24h last-good retention). A cheap indexed DELETE;
-		// failures must never block construction.
-		try {
-			this.#store.cleanExpiredCache();
-		} catch {
-			// Best-effort.
-		}
-		try {
-			this.#store.cleanExpiredCredentialBlocks?.(Date.now());
-		} catch (err) {
-			// Best-effort, but init-time corruption must latch the block store
-			// immediately so the first evaluation doesn't re-query a broken DB.
-			this.#handlePersistedBlockStoreError(err);
+		if (!skipStoreHygiene) {
+			// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
+			// cache rows (24h last-good retention). A cheap indexed DELETE;
+			// failures must never block construction.
+			try {
+				this.#store.cleanExpiredCache();
+			} catch {
+				// Best-effort.
+			}
+			try {
+				this.#store.cleanExpiredCredentialBlocks?.(Date.now());
+			} catch (err) {
+				// Best-effort, but init-time corruption must latch the block store
+				// immediately so the first evaluation doesn't re-query a broken DB.
+				this.#handlePersistedBlockStoreError(err);
+			}
 		}
 		this.#usageFetch = options.usageFetch ?? fetch;
 		this.#usageRequestTimeoutMs = options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS;
@@ -1342,6 +1396,18 @@ export class AuthStorage {
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		return new AuthStorage(store, options);
+	}
+	/**
+	 * Open an already validated database without schema initialization or
+	 * constructor hygiene writes.
+	 */
+	static async createExisting(
+		dbPath: string,
+		options: AuthStorageOptions = {},
+		expectedIdentity?: { readonly dev: number; readonly ino: number },
+	): Promise<AuthStorage> {
+		const store = await SqliteAuthCredentialStore.openExisting(dbPath, expectedIdentity);
+		return new AuthStorage(store, options, true);
 	}
 
 	/**
@@ -2330,6 +2396,54 @@ export class AuthStorage {
 			stored.map(record => ({ id: record.id, credential: record.credential })),
 		);
 		this.#resetProviderAssignments(provider);
+	}
+
+	/**
+	 * Insert credentials only when the provider has no active credentials.
+	 *
+	 * This deliberately requires a store-level atomic capability: a
+	 * read-then-write fallback would be unsafe for remote or concurrent stores.
+	 */
+	insertCredentialsIfProviderAbsent(provider: string, credentials: AuthCredential[]): CredentialInsertResult {
+		const insert = this.#store.insertCredentialsIfProviderAbsent;
+		if (!insert) {
+			throw new AIError.ConfigurationError("Credential store lacks atomic create-only credential insertion");
+		}
+		const deduped = this.#dedupeOAuthCredentials(provider, credentials);
+		const outcome = insert.call(this.#store, provider, deduped);
+		this.#setStoredCredentials(
+			provider,
+			outcome.rows.map(record => ({ id: record.id, credential: record.credential })),
+		);
+		if (outcome.inserted) this.#resetProviderAssignments(provider);
+		return {
+			inserted: outcome.inserted,
+			provider,
+			rows: outcome.rows.map(record => ({ id: record.id, type: record.credential.type })),
+		};
+	}
+	/**
+	 * Atomically insert every absent provider in a credential batch.
+	 */
+	insertCredentialsIfProvidersAbsent(batch: CredentialBatchInsert[]): CredentialBatchInsertResult {
+		const insert = this.#store.insertCredentialsIfProvidersAbsent;
+		if (!insert) {
+			throw new AIError.ConfigurationError("Credential store lacks atomic create-only credential batch insertion");
+		}
+		const deduped = batch.map(entry => ({
+			provider: entry.provider,
+			credentials: this.#dedupeOAuthCredentials(entry.provider, entry.credentials),
+		}));
+		const outcome = insert.call(this.#store, deduped);
+		for (const provider of outcome.inserted) {
+			const rows = this.#store.listAuthCredentials(provider);
+			this.#setStoredCredentials(
+				provider,
+				rows.map(record => ({ id: record.id, credential: record.credential })),
+			);
+			this.#resetProviderAssignments(provider);
+		}
+		return outcome;
 	}
 
 	/**
@@ -4271,6 +4385,58 @@ export class AuthStorage {
 		return sessionCredential ? { ...sessionCredential, explicit: false } : undefined;
 	}
 
+	#credentialBlockRouting(
+		provider: string,
+		credentialType: AuthCredential["type"],
+		modelId: string | undefined,
+	): CredentialBlockRouting {
+		const providerKey = this.#getProviderTypeKey(provider, credentialType);
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const rankingContext: CredentialRankingContext = { modelId };
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		return {
+			providerKey,
+			strategy,
+			rankingContext,
+			blockScope,
+			siblingBlockScopes: strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []),
+		};
+	}
+
+	#blockCredentialForRotation(
+		provider: string,
+		credentialType: AuthCredential["type"],
+		targetIndex: number,
+		blockedUntil: number,
+		routing: CredentialBlockRouting,
+	): UsageLimitMarkResult {
+		if (targetIndex >= 0) {
+			this.#markCredentialBlocked(provider, routing.providerKey, targetIndex, blockedUntil, routing.blockScope);
+		}
+
+		const remainingCredentials = this.#getCredentialsForProvider(provider)
+			.map((credential, index) => ({ credential, index }))
+			.filter(
+				(entry): entry is { credential: AuthCredential; index: number } =>
+					entry.credential.type === credentialType && entry.index !== targetIndex,
+			);
+
+		let retryAtMs: number | undefined;
+		for (const candidate of remainingCredentials) {
+			// Sibling availability must use the same scope set selection reads, or
+			// this reports a sibling as free that selection will then refuse.
+			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				routing.providerKey,
+				candidate.index,
+				routing.siblingBlockScopes,
+			);
+			if (candidateBlockedUntil === undefined) return { switched: true };
+			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+		}
+		return { switched: false, retryAtMs };
+	}
+
 	/**
 	 * Marks the current session's credential as temporarily blocked due to usage limits.
 	 * Uses usage reports to determine accurate reset time when available.
@@ -4313,21 +4479,17 @@ export class AuthStorage {
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
 
-		const providerKey = this.#getProviderTypeKey(provider, credentialType);
-		const strategy = this.#rankingStrategyResolver?.(provider);
-		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
-		const blockScope = strategy?.blockScope?.(rankingContext);
-		const siblingBlockScopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
+		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 
-		if (credentialType === "oauth" && target.credential.type === "oauth" && strategy) {
+		if (credentialType === "oauth" && target.credential.type === "oauth" && routing.strategy) {
 			const report = await raceUsageWithSignal(
 				this.#getUsageReport(provider, target.credential, options),
 				options?.signal,
 			);
 			if (report) {
-				const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
+				const scopedLimits = this.#getScopedUsageLimits(routing.strategy, report, routing.rankingContext);
 				if (this.#isUsageLimitReached(scopedLimits)) {
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, Date.now());
 					if (resetAtMs && resetAtMs > blockedUntil) {
@@ -4343,32 +4505,7 @@ export class AuthStorage {
 		const targetIndex = this.#getStoredCredentials(provider).findIndex(
 			entry => entry.id === targetCredentialId && entry.credential.type === credentialType,
 		);
-		if (targetIndex >= 0) {
-			this.#markCredentialBlocked(provider, providerKey, targetIndex, blockedUntil, blockScope);
-		}
-
-		const remainingCredentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter(
-				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === credentialType && entry.index !== targetIndex,
-			);
-
-		let retryAtMs: number | undefined;
-		for (const candidate of remainingCredentials) {
-			// Sibling availability must use the same scope set selection reads, or
-			// this reports a sibling as free that selection will then refuse, most
-			// visibly when the sibling still carries a legacy shared block.
-			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
-				provider,
-				providerKey,
-				candidate.index,
-				siblingBlockScopes,
-			);
-			if (candidateBlockedUntil === undefined) return { switched: true };
-			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
-		}
-		return { switched: false, retryAtMs };
+		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -6078,6 +6215,8 @@ export class AuthStorage {
 	 * - usage-limit / account-rate-limit error → {@link AuthStorage.markUsageLimitReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
+	 * - account-scoped policy denial → temporarily block that account without
+	 *   marking its credential suspect, then rotate through eligible siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
@@ -6113,6 +6252,17 @@ export class AuthStorage {
 			apiKey: options?.apiKey,
 		});
 		if (!sessionCredential) return false;
+
+		if (AIError.isAccountPolicyError(error)) {
+			const routing = this.#credentialBlockRouting(provider, sessionCredential.type, options?.modelId);
+			return this.#blockCredentialForRotation(
+				provider,
+				sessionCredential.type,
+				sessionCredential.index,
+				Date.now() + AuthStorage.#defaultBackoffMs,
+				routing,
+			).switched;
+		}
 
 		const providerKey = this.#getProviderTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting

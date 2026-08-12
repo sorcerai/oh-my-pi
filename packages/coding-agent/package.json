@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
-  "version": "17.2.11",
+  "version": "17.2.13",
   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
@@ -31,7 +31,8 @@
     "omp": "src/cli.ts"
   },
   "scripts": {
-    "build": "bun scripts/build-binary.ts",
+		"build": "bun scripts/build-binary.ts",
+		"build:stt-worker": "bun scripts/build-stt-worker.ts",
     "check": "biome check . && bun run check:types",
     "check:types": "tsgo -p tsconfig.json --noEmit",
     "lint": "biome lint .",
@@ -61,6 +62,8 @@
     "@oh-my-pi/pi-tui": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
+    "@oh-my-pi/prime-bridge": "workspace:*",
+    "@oh-my-pi/prime-bridge-protocol": "workspace:*",
     "@oh-my-pi/snapcompact": "catalog:",
     "@opentelemetry/api": "catalog:",
     "@opentelemetry/api-logs": "catalog:",

@@ -1,11 +1,16 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ClaudeSessionStore } from "../src/session/claude-session-store";
 import { CodexSessionStore } from "../src/session/codex-session-store";
-import { persistForeignSession } from "../src/session/foreign-session-import";
+import {
+	createForeignSessionStore,
+	foreignSessionSourceName,
+	persistConvertedSession,
+	persistForeignSession,
+} from "../src/session/foreign-session-import";
 import type { ForeignSessionInfo } from "../src/session/foreign-session-store";
 import { buildSessionContext } from "../src/session/session-context";
 import { SessionManager } from "../src/session/session-manager";
@@ -302,6 +307,226 @@ describe("CodexSessionStore", () => {
 });
 
 describe("foreign session persistence", () => {
+	it("keeps interactive source selection limited to Claude and Codex", () => {
+		expect(foreignSessionSourceName("claude")).toBe("Claude");
+		expect(foreignSessionSourceName("codex")).toBe("Codex");
+		expect(createForeignSessionStore("claude")).toBeInstanceOf(ClaudeSessionStore);
+		expect(createForeignSessionStore("codex")).toBeInstanceOf(CodexSessionStore);
+	});
+
+	it("persists a converted Prime session with a fresh identity and exact provenance", async () => {
+		const cwd = path.join(tempRoot, "prime-project");
+		const sourceDir = path.join(tempRoot, "converted-source");
+		const sessionDir = path.join(tempRoot, "omp-sessions");
+		await fs.mkdir(cwd, { recursive: true });
+		const converted = SessionManager.create(cwd, sourceDir);
+		await converted.setSessionName("Imported Prime");
+		converted.appendCustomEntry("converted_source_entry", { value: "unchanged" });
+		await converted.ensureOnDisk();
+		const sourceId = converted.getSessionId();
+		const sourceFile = converted.getSessionFile();
+		if (!sourceFile) throw new Error("Converted source session was not persisted");
+		const sourceEntries = converted.getEntries();
+
+		const persisted = await persistConvertedSession(
+			converted,
+			{
+				source: "prime",
+				sourceId: "prime-session-1",
+				sourcePath: "/prime/sessions/prime-session-1.jsonl",
+				sourceCwd: cwd,
+			},
+			{ sessionDir, suppressBreadcrumb: true },
+		);
+		const sessionFile = persisted.getSessionFile();
+		if (!sessionFile) throw new Error("Converted session was not persisted");
+		expect(sessionFile).not.toBe(sourceFile);
+		expect(persisted.getSessionId()).not.toBe(sourceId);
+		await persisted.close();
+		await converted.close();
+
+		const sourceReopened = await SessionManager.open(sourceFile, sourceDir, new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(sourceReopened.getCwd()).toBe(cwd);
+			expect(sourceReopened.getSessionFile()).toBe(sourceFile);
+			expect(sourceReopened.getEntries()).toEqual(sourceEntries);
+		} finally {
+			await sourceReopened.close();
+		}
+
+		const reopened = await SessionManager.open(sessionFile, sessionDir, new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(reopened.getSessionId()).not.toBe(sourceId);
+			expect(reopened.getSessionName()).toBe("Imported Prime");
+			const provenanceEntries = reopened
+				.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === "foreign_session_import");
+			expect(provenanceEntries).toHaveLength(1);
+			const provenance = provenanceEntries[0];
+			if (provenance?.type !== "custom") throw new Error("Missing Prime provenance");
+			expect(provenance.data).toEqual({
+				source: "prime",
+				sourceId: "prime-session-1",
+				sourcePath: "/prime/sessions/prime-session-1.jsonl",
+				sourceCwd: cwd,
+			});
+		} finally {
+			await reopened.close();
+		}
+	});
+
+	it("removes a converted destination when the staged manager close fails", async () => {
+		const cwd = path.join(tempRoot, "prime-project");
+		const sourceDir = path.join(tempRoot, "converted-source");
+		const sessionDir = path.join(tempRoot, "staged-close-failure-sessions");
+		await fs.mkdir(cwd, { recursive: true });
+		const converted = SessionManager.create(cwd, sourceDir);
+		converted.appendCustomEntry("converted_source_entry", { value: "unchanged" });
+		await converted.ensureOnDisk();
+
+		const stagedCloseError = new Error("staged close failed");
+		const originalClose = SessionManager.prototype.close;
+		let stagedCloseSawDestination = false;
+		const closeSpy = vi.spyOn(SessionManager.prototype, "close").mockImplementation(async function (
+			this: SessionManager,
+		) {
+			if (this !== converted && this.getSessionFile() === undefined) {
+				const destinationEntries = await fs.readdir(sessionDir);
+				stagedCloseSawDestination = destinationEntries.some(entry => entry.endsWith(".jsonl"));
+				throw stagedCloseError;
+			}
+			return originalClose.call(this);
+		});
+
+		try {
+			await expect(
+				persistConvertedSession(
+					converted,
+					{
+						source: "prime",
+						sourceId: "prime-session-staged-close-failure",
+						sourcePath: "/prime/sessions/staged-close-failure.jsonl",
+						sourceCwd: cwd,
+					},
+					{ sessionDir, suppressBreadcrumb: true },
+				),
+			).rejects.toBe(stagedCloseError);
+			expect(stagedCloseSawDestination).toBe(true);
+			const remainingEntries = await fs.readdir(sessionDir);
+			expect(remainingEntries.filter(entry => entry.endsWith(".jsonl"))).toEqual([]);
+		} finally {
+			closeSpy.mockRestore();
+			await converted.close();
+		}
+	});
+	it("preserves the original post-persist failure when exact cleanup also fails", async () => {
+		const cwd = path.join(tempRoot, "prime-project");
+		const sourceDir = path.join(tempRoot, "converted-source");
+		const sessionDir = path.join(tempRoot, "post-persist-cleanup-failure-sessions");
+		await fs.mkdir(cwd, { recursive: true });
+		const converted = SessionManager.create(cwd, sourceDir);
+		converted.appendCustomEntry("converted_source_entry", { value: "unchanged" });
+		await converted.ensureOnDisk();
+
+		const primaryError = new Error("post-persist flush failed");
+		const cleanupError = new Error("exact destination cleanup failed");
+		let cleanupArmed = false;
+		let cleanupPublication:
+			| { readonly path: string; readonly identity: { readonly dev: number; readonly ino: number } }
+			| undefined;
+		const originalFlush = SessionManager.prototype.flush;
+		const flushSpy = vi.spyOn(SessionManager.prototype, "flush").mockImplementation(async function (
+			this: SessionManager,
+		) {
+			if (this !== converted && this.getSessionFile() !== undefined) {
+				cleanupArmed = true;
+				throw primaryError;
+			}
+			return originalFlush.call(this);
+		});
+		const originalUnlink = fs.unlink;
+		const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation((async (...args: Parameters<typeof fs.unlink>) => {
+			const candidate = path.resolve(String(args[0]));
+			if (cleanupArmed && candidate.startsWith(`${path.resolve(sessionDir)}${path.sep}`)) throw cleanupError;
+			return originalUnlink(...args);
+		}) as typeof fs.unlink);
+		let rejection: unknown;
+		try {
+			await persistConvertedSession(
+				converted,
+				{
+					source: "prime",
+					sourceId: "prime-session-post-persist-cleanup-failure",
+					sourcePath: "/prime/sessions/post-persist-cleanup-failure.jsonl",
+					sourceCwd: cwd,
+				},
+				{
+					sessionDir,
+					suppressBreadcrumb: true,
+					onCleanupFailure: publication => {
+						cleanupPublication = publication;
+					},
+				},
+			);
+		} catch (error) {
+			rejection = error;
+		} finally {
+			flushSpy.mockRestore();
+			unlinkSpy.mockRestore();
+			await converted.close();
+		}
+		expect(rejection).toBe(primaryError);
+		expect(cleanupArmed).toBe(true);
+		expect(cleanupPublication).toBeDefined();
+		expect(cleanupPublication?.identity.dev).toBeTypeOf("number");
+		expect(cleanupPublication?.identity.ino).toBeTypeOf("number");
+	});
+
+	it("uses fallback CWD only on the destination and preserves explicit sessionDir", async () => {
+		const sourceCwd = path.join(tempRoot, "missing-prime-project");
+		const fallbackCwd = path.join(tempRoot, "prime-fallback");
+		const sourceDir = path.join(tempRoot, "converted-source");
+		const sessionDir = path.join(tempRoot, "explicit-omp-sessions");
+		const converted = SessionManager.create(sourceCwd, sourceDir);
+		converted.appendCustomEntry("converted_source_entry", { value: "unchanged" });
+		await converted.ensureOnDisk();
+		const sourceFile = converted.getSessionFile();
+		if (!sourceFile) throw new Error("Converted source session was not persisted");
+		const sourceEntries = converted.getEntries();
+
+		const persisted = await persistConvertedSession(
+			converted,
+			{
+				source: "prime",
+				sourceId: "prime-session-fallback",
+				sourcePath: "/prime/sessions/fallback.jsonl",
+				sourceCwd,
+			},
+			{ fallbackCwd, sessionDir, suppressBreadcrumb: true },
+		);
+		const destinationFile = persisted.getSessionFile();
+		if (!destinationFile) throw new Error("Fallback session was not persisted");
+		expect(path.dirname(destinationFile)).toBe(sessionDir);
+		expect(persisted.getCwd()).toBe(path.resolve(fallbackCwd));
+		await persisted.close();
+		await converted.close();
+
+		const sourceReopened = await SessionManager.open(sourceFile, sourceDir, new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(sourceReopened.getHeader()?.cwd).toBe(sourceCwd);
+			expect(sourceReopened.getSessionFile()).toBe(sourceFile);
+			expect(sourceReopened.getEntries()).toEqual(sourceEntries);
+		} finally {
+			await sourceReopened.close();
+		}
+	});
+
 	it("writes a fresh OMP identity with source provenance", async () => {
 		const { info, store } = await createClaudeFixture();
 		const sessionDir = path.join(tempRoot, "omp-sessions");
