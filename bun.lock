@@ -93,7 +93,6 @@
         "@oh-my-pi/pi-tui": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",
-        "@oh-my-pi/prime-bridge": "workspace:*",
         "@oh-my-pi/prime-bridge-protocol": "workspace:*",
         "@oh-my-pi/snapcompact": "catalog:",
         "@opentelemetry/api": "catalog:",
@@ -232,6 +231,10 @@
         "omp-prime-bridge": "./src/cli.ts",
       },
       "dependencies": {
+        "@oh-my-pi/omptype": "catalog:",
+        "@oh-my-pi/pi-ai": "workspace:*",
+        "@oh-my-pi/pi-coding-agent": "workspace:*",
+        "@oh-my-pi/pi-utils": "workspace:*",
         "@oh-my-pi/prime-bridge-protocol": "workspace:*",
       },
       "devDependencies": {

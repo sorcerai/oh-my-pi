@@ -90,3 +90,9 @@ packages/coding-agent/bench/boot-baseline.json
 /bazel-pi
 /bazel-oh-my-pi
 /.bazelrc.user
+
+# OMP Shepherd artifacts (raw traces/proposals)
+.omp/shepherd/traces/
+.omp/shepherd/proposals/
+.omp/shepherd/*.trace.jsonl
+.omp/shepherd/*.proposal.json
