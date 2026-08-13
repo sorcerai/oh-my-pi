@@ -24,6 +24,9 @@
     "fmt": "biome format --write .",
     "test": "bun test --parallel"
   },
+  "dependencies": {
+    "@oh-my-pi/omptype": "catalog:"
+  },
   "devDependencies": {
     "@types/bun": "catalog:"
   },

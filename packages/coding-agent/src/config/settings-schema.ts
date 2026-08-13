@@ -314,6 +314,7 @@ export interface ModelTagsSettings {
 
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
+
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
@@ -321,6 +322,23 @@ const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
+export const PRIME_BRIDGE_APPROVAL_TIMEOUT_MIN_MS = 1;
+export const PRIME_BRIDGE_APPROVAL_TIMEOUT_MAX_MS = 60_000;
+
+export function validatePrimeBridgeApprovalTimeoutMs(value: unknown): void {
+	if (
+		value !== undefined &&
+		(typeof value !== "number" ||
+			!Number.isFinite(value) ||
+			value < PRIME_BRIDGE_APPROVAL_TIMEOUT_MIN_MS ||
+			value > PRIME_BRIDGE_APPROVAL_TIMEOUT_MAX_MS)
+	) {
+		throw new Error(
+			`Prime bridge approvalTimeoutMs must be between ${PRIME_BRIDGE_APPROVAL_TIMEOUT_MIN_MS} and ${PRIME_BRIDGE_APPROVAL_TIMEOUT_MAX_MS} milliseconds`,
+		);
+	}
+}
+
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
@@ -397,11 +415,13 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
-	// Prime bridge — disabled by default; all values are hidden from the UI.
 	"primeBridge.enabled": { type: "boolean", default: false },
 	"primeBridge.url": { type: "string", default: undefined },
 	"primeBridge.tokenPath": { type: "string", default: undefined },
 	"primeBridge.autoStart": { type: "boolean", default: false },
+	"primeBridge.toolHost.enabled": { type: "boolean", default: false },
+	"primeBridge.toolHost.allowTools": { type: "array", default: EMPTY_STRING_ARRAY },
+	"primeBridge.toolHost.approvalTimeoutMs": { type: "number", default: PRIME_BRIDGE_APPROVAL_TIMEOUT_MAX_MS },
 
 	autoResume: {
 		type: "boolean",

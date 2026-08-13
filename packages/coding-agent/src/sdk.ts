@@ -104,7 +104,12 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
-import { createExternalPeerProvider, type ExternalPeerProvider } from "./integrations/prime-bridge";
+import {
+	createExternalPeerProvider,
+	type ExternalPeerProvider,
+	PrimeBridgeHostAdapter,
+	type PrimeBridgeHostAdapterConfig,
+} from "./integrations/prime-bridge";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -1589,6 +1594,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	let agent: Agent;
 	let session!: AgentSession;
+	let primeBridgeHostAdapter: PrimeBridgeHostAdapter | undefined;
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
@@ -2597,6 +2603,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const snapshot = Array.from(names);
 			setActiveToolNames(snapshot);
 			toolContextStore.setToolNames(snapshot);
+			primeBridgeHostAdapter?.refreshTools();
 		};
 		// Native built-in implementations backing same-tool `ctx.invokeTool`, so a tool that
 		// re-registers a built-in (e.g. wrapping `write`) can delegate to the original — reaching the
@@ -3470,6 +3477,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		primeBridgeHostAdapter = new PrimeBridgeHostAdapter();
+		const primeBridgeToolHostConfig: PrimeBridgeHostAdapterConfig = {
+			enabled: settings.get("primeBridge.toolHost.enabled"),
+			url: settings.get("primeBridge.url"),
+			tokenPath: settings.get("primeBridge.tokenPath"),
+			allowTools: settings.get("primeBridge.toolHost.allowTools"),
+			approvalTimeoutMs: settings.get("primeBridge.toolHost.approvalTimeoutMs"),
+		};
+		disposeCallbacks.add(() => {
+			void primeBridgeHostAdapter?.stop();
+			primeBridgeHostAdapter = undefined;
+		});
+		try {
+			await primeBridgeHostAdapter.start(
+				{
+					agentSession: session,
+					toolSession,
+					getToolContext: () => toolContextStore.getContext(),
+				},
+				primeBridgeToolHostConfig,
+			);
+		} catch (error) {
+			await primeBridgeHostAdapter.stop();
+			primeBridgeHostAdapter = undefined;
+			logger.warn("Prime bridge tool host unavailable; continuing without attached tools", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a
 		// session_start handler. Install those late registrations into the live

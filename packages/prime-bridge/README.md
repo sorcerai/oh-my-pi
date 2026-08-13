@@ -79,8 +79,52 @@ The OMP launch broker starts one machine-global bridge named `prime-bridge` with
 
 `restart: "always"` only works while the launch broker has its lifecycle record. If the bridge crashes while the broker is down, OMP does not promise an immediate restart. The bridge starts again when the broker recovers and OMP calls the ensure path. Use an external supervisor when you need restart guarantees during broker downtime.
 
-The bridge is not an OMP session. OMP external Prime peers stay outside `AgentRegistry`, and the bridge cannot access live OMP tools. A disconnected OMP session can therefore make a target unavailable without damaging Prime or OMP session state.
+OMP external Prime peers stay outside `AgentRegistry`; the control mesh does not
+turn a Prime session into an OMP session. A disconnected target can become
+unavailable without damaging Prime or OMP session state.
 
+## Prime access to live OMP tools
+
+Tool access is separate from control-mesh messaging and is disabled by default.
+Enable the attached host for the OMP sessions that may expose tools:
+
+```sh
+omp config set primeBridge.toolHost.enabled true
+```
+
+The attached host registers only tools that are both enabled in that OMP
+session and allowed by the bridge policy. The default allowlist is `read`,
+`grep`, `glob`, and `web_search`. Add other exact tool names to
+`primeBridge.toolHost.allowTools` in the active OMP configuration. An empty
+array does not remove the four read-only defaults. OMP `read` accepts HTTP(S)
+URLs, so its default exposure also grants Prime that outbound fetch surface.
+`bash`, `write`, `edit`, `eval`, `python`, `computer`, `delete`, and every
+other tool remain unavailable unless explicitly named.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `primeBridge.toolHost.enabled` | `false` | Connects the current OMP session to the authenticated bridge host endpoint. |
+| `primeBridge.toolHost.allowTools` | `[]` | Adds exact enabled tool names to the four read-only defaults. |
+| `primeBridge.toolHost.approvalTimeoutMs` | `60000` | Aborts a pending tool execution after this many milliseconds. |
+
+Prime uses the packaged `omp-tools` skill and its native
+`rlm.McpIntegration` client. `omp_tools.connect(session_id)` reads the bridge
+pointer and discovers the selected session's schemas from
+`/mcp/v1/sessions/<session-id>`. The MCP route is loopback-only, bearer-token
+authenticated, origin-checked, and scoped to one live OMP session. Same-name
+tools in different sessions do not share context.
+
+This contract is final-result-only. The stock Prime client currently propagates
+task cancellation to the OMP abort signal, but cancellation and progress
+notifications are not advertised as stable skill capabilities. Denial, timeout,
+disconnect, and tool failures return errors with fixed public messages. The
+bridge does not copy raw tool exceptions into its wire response or audit log.
+
+The tool host is optional at session startup. If the bridge is unavailable, OMP
+logs a warning and continues without attached Prime tool access. It does not
+reconnect that session automatically; restore the bridge and create or resume a
+new OMP session. Tool calls are not durable or retried. The durable messaging
+and session-resume guarantees below do not apply to live tool execution.
 
 ## Session resume proof and limits
 

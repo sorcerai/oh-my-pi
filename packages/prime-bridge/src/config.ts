@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 export const PRIME_BRIDGE_HOST = "127.0.0.1" as const;
 export const DEFAULT_PRIME_BRIDGE_PORT = 0;
+export const PRIME_BRIDGE_TOOL_HOST_PATH = "/v1/tool-host" as const;
 
 export interface PrimeBridgeConfig {
 	stateDir: string;

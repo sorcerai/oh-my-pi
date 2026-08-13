@@ -16,6 +16,7 @@ import { main } from "../src/cli";
 import type { PrimeBridgeConfig } from "../src/config";
 import { PrimeDaemonClient } from "../src/prime/client";
 import type { PrimeBridgeServer } from "../src/server";
+import { ToolHostServer } from "../src/tool-host/server";
 
 const temporaryDirectories: string[] = [];
 
@@ -80,6 +81,7 @@ describe("runtime hardening", () => {
 				token: "test-token",
 				config: configFor(stateDir),
 				tokenFile: path.join(stateDir, "token"),
+				toolHost: new ToolHostServer(),
 				stop: async () => {
 					events.push("bridge-stop-start");
 					await Promise.resolve();
