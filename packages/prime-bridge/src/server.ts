@@ -7,10 +7,11 @@ import {
 	provisionPrimeBridgeConfig,
 	resolveBridgeConfig,
 } from "./config";
+import { handleMcpRequest } from "./mcp/server";
 import { CommandResultUncertainError, PrimeDaemonClient } from "./prime/client";
 import { BridgeStore, type ClaimedInboxMessage, type ClaimedPendingMessage } from "./store";
 import { ensureBridgeToken } from "./token";
-
+import { ToolHostServer, type ToolHostServerOptions } from "./tool-host/server";
 export interface PrimeBridgeLogger {
 	error(message: string, context?: Record<string, unknown>): void;
 }
@@ -29,13 +30,14 @@ export interface PrimeBridgeServerOptions {
 	peers?: () => unknown | Promise<unknown>;
 	handleV1?: (request: Request) => Response | null | Promise<Response | null>;
 	logger?: PrimeBridgeLogger;
+	toolHost?: ToolHostServer | ToolHostServerOptions;
 }
-
 export interface PrimeBridgeServer {
 	readonly url: string;
 	readonly token: string;
 	readonly config: PrimeBridgeConfig;
 	readonly tokenFile: string;
+	readonly toolHost: ToolHostServer;
 	stop(): Promise<void>;
 }
 
@@ -316,7 +318,6 @@ function asReceipt(messageId: string, raw: unknown): BridgeReceipt {
 	if (status === undefined) throw new InvalidPrimeReceiptError("Prime returned a receipt without a status");
 	return { ...raw, meshMessageId: messageId, status } as BridgeReceipt;
 }
-
 export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions = {}): Promise<PrimeBridgeServer> {
 	const config = resolveOptions(options);
 	await fs.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
@@ -329,6 +330,45 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 	const ownsStore = options.store === undefined;
 	const primeClient = options.primeClient ?? new PrimeDaemonClient({ store });
 	const ownsPrimeClient = options.primeClient === undefined;
+	const callerAudit = options.toolHost instanceof ToolHostServer ? undefined : options.toolHost?.onAudit;
+	const toolHost =
+		options.toolHost instanceof ToolHostServer
+			? options.toolHost
+			: new ToolHostServer({
+					...options.toolHost,
+					onAudit: entry => {
+						store.appendAudit({
+							action: `tool_host_${entry.action}`,
+							direction: "inbound",
+							tokenIdentifier: auditTokenIdentifier,
+							originHarness: "prime",
+							...(entry.sessionId === undefined ? {} : { originSessionId: entry.sessionId }),
+							preview: {
+								...(entry.sessionId === undefined ? {} : { sessionId: entry.sessionId }),
+								...(entry.requestId === undefined ? {} : { requestId: entry.requestId }),
+								...(entry.toolName === undefined ? {} : { toolName: entry.toolName }),
+								...(entry.code === undefined ? {} : { code: entry.code }),
+							},
+						});
+						callerAudit?.(entry);
+					},
+				});
+	if (options.toolHost instanceof ToolHostServer) {
+		toolHost.subscribeAudit(entry => {
+			store.appendAudit({
+				action: `tool_host_${entry.action}`,
+				direction: "inbound",
+				tokenIdentifier: auditTokenIdentifier,
+				originHarness: "prime",
+				preview: {
+					...(entry.sessionId === undefined ? {} : { sessionId: entry.sessionId }),
+					...(entry.requestId === undefined ? {} : { requestId: entry.requestId }),
+					...(entry.toolName === undefined ? {} : { toolName: entry.toolName }),
+					...(entry.code === undefined ? {} : { code: entry.code }),
+				},
+			});
+		});
+	}
 	const waiters: Waiter[] = [];
 	let stopping = false;
 	let drainRunning = false;
@@ -497,247 +537,294 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 		return running;
 	};
 
-	const server = Bun.serve({
-		hostname: config.host,
-		port: config.port,
-		fetch: async (request): Promise<Response> => {
-			const url = new URL(request.url);
-			if (request.headers.get("host") !== new URL(server.url).host)
-				return new Response("Bad Request", { status: 400 });
-			if (url.pathname === "/health") return jsonResponse({ ok: true });
-
-			if (url.pathname.startsWith("/v1/")) {
-				const origin = request.headers.get("origin");
-				if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
-				let currentToken: string;
-				try {
-					currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
-				} catch {
-					return unauthorized();
+	let server: Bun.Server<unknown> | undefined;
+	let url: string;
+	try {
+		server = Bun.serve({
+			hostname: config.host,
+			port: config.port,
+			websocket: toolHost.websocket,
+			fetch: async (request, bunServer): Promise<Response | undefined> => {
+				const url = new URL(request.url);
+				if (server === undefined || request.headers.get("host") !== new URL(server.url).host)
+					return new Response("Bad Request", { status: 400 });
+				if (url.pathname === "/v1/tool-host") {
+					const origin = request.headers.get("origin");
+					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
+					let currentToken: string;
+					try {
+						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
+					} catch {
+						return unauthorized();
+					}
+					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
+						return unauthorized();
+					if (
+						bunServer.upgrade(request, {
+							data: { awaitingPong: false, closed: false, queue: [], queuedBytes: 0, backpressured: false },
+						})
+					)
+						return undefined;
+					return new Response("Upgrade failed", { status: 400 });
 				}
-				if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
-					return unauthorized();
-				try {
-					const custom = await options.handleV1?.(request);
-					if (custom !== null && custom !== undefined) return custom;
-					if (url.pathname === "/v1/peers" && request.method === "GET") {
-						let targetHarness: "omp" | "prime";
-						try {
-							targetHarness = parseTargetHarness(url.searchParams.get("targetHarness"));
-						} catch (error) {
-							return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
-						}
-						if (targetHarness === "omp") return jsonResponse(store.listOmpPeers());
-						const peers = options.peers ? await options.peers() : await primeClient.listSessions();
-						return jsonResponse(mapPrimePeers(peers));
+				if (url.pathname.startsWith("/mcp/")) {
+					const origin = request.headers.get("origin");
+					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
+					let currentToken: string;
+					try {
+						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
+					} catch {
+						return unauthorized();
 					}
-					if (url.pathname === "/v1/peers" && request.method === "POST") {
-						try {
-							const peer = parsePeerRegistration(await parseJson(request));
-							store.registerOmpPeer(peer);
-							return jsonResponse(peer);
-						} catch (error) {
-							return jsonResponse(
-								{ error: error instanceof Error ? error.message : String(error) },
-								error instanceof PayloadTooLargeError ? 413 : 400,
-							);
-						}
+					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
+						return unauthorized();
+					const prefix = "/mcp/v1/sessions/";
+					if (!url.pathname.startsWith(prefix)) return new Response("Not Found", { status: 404 });
+					let sessionId: string;
+					try {
+						sessionId = decodeURIComponent(url.pathname.slice(prefix.length));
+					} catch {
+						return new Response("Not Found", { status: 404 });
 					}
-					if (url.pathname === "/v1/messages" && request.method === "POST") {
-						let message: BridgeMessage;
-						try {
-							message = parseBridgeMessage(await parseJson(request));
-						} catch (error) {
-							return jsonResponse(
-								{ error: error instanceof Error ? error.message : String(error) },
-								error instanceof PayloadTooLargeError ? 413 : 400,
-							);
-						}
-						const existingMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
-						if (existingMessage !== null) {
-							if (!sameMessage(existingMessage, message))
-								return jsonResponse({ error: "idempotency key conflicts with an existing message" }, 409);
-							const existingReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
-							if (existingReceipt !== null) return jsonResponse(existingReceipt);
-							try {
-								await requestDrain();
-							} catch {
-								// A duplicate observes the durable pending state below.
-							}
-							const retriedReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
-							return retriedReceipt === null
-								? jsonResponse({ error: "message remains pending delivery" }, 503)
-								: jsonResponse(retriedReceipt);
-						}
+					return handleMcpRequest(request, toolHost, sessionId);
+				}
+				if (url.pathname === "/health") return jsonResponse({ ok: true });
 
-						if (message.targetHarness === "omp") {
-							const inserted = store.putInbox(message);
-							if (!inserted) return jsonResponse({ error: "meshMessageId already exists" }, 409);
-							const receipt = { meshMessageId: message.meshMessageId, status: "injected" } as BridgeReceipt;
-							store.recordReceipt(receipt);
-							wakeWaiters();
-							store.appendAudit({
-								action: "message_injected",
-								direction: "inbound",
-								tokenIdentifier: auditTokenIdentifier,
-								originHarness: message.originHarness,
-								originSessionId: message.originSessionId,
-								preview: {
-									meshMessageId: message.meshMessageId,
-									idempotencyKey: message.idempotencyKey,
+				if (url.pathname.startsWith("/v1/")) {
+					const origin = request.headers.get("origin");
+					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
+					let currentToken: string;
+					try {
+						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
+					} catch {
+						return unauthorized();
+					}
+					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
+						return unauthorized();
+					try {
+						const custom = await options.handleV1?.(request);
+						if (custom !== null && custom !== undefined) return custom;
+						if (url.pathname === "/v1/peers" && request.method === "GET") {
+							let targetHarness: "omp" | "prime";
+							try {
+								targetHarness = parseTargetHarness(url.searchParams.get("targetHarness"));
+							} catch (error) {
+								return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
+							}
+							if (targetHarness === "omp") return jsonResponse(store.listOmpPeers());
+							const peers = options.peers ? await options.peers() : await primeClient.listSessions();
+							return jsonResponse(mapPrimePeers(peers));
+						}
+						if (url.pathname === "/v1/peers" && request.method === "POST") {
+							try {
+								const peer = parsePeerRegistration(await parseJson(request));
+								store.registerOmpPeer(peer);
+								return jsonResponse(peer);
+							} catch (error) {
+								return jsonResponse(
+									{ error: error instanceof Error ? error.message : String(error) },
+									error instanceof PayloadTooLargeError ? 413 : 400,
+								);
+							}
+						}
+						if (url.pathname === "/v1/messages" && request.method === "POST") {
+							let message: BridgeMessage;
+							try {
+								message = parseBridgeMessage(await parseJson(request));
+							} catch (error) {
+								return jsonResponse(
+									{ error: error instanceof Error ? error.message : String(error) },
+									error instanceof PayloadTooLargeError ? 413 : 400,
+								);
+							}
+							const existingMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
+							if (existingMessage !== null) {
+								if (!sameMessage(existingMessage, message))
+									return jsonResponse({ error: "idempotency key conflicts with an existing message" }, 409);
+								const existingReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
+								if (existingReceipt !== null) return jsonResponse(existingReceipt);
+								try {
+									await requestDrain();
+								} catch {
+									// A duplicate observes the durable pending state below.
+								}
+								const retriedReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
+								return retriedReceipt === null
+									? jsonResponse({ error: "message remains pending delivery" }, 503)
+									: jsonResponse(retriedReceipt);
+							}
+
+							if (message.targetHarness === "omp") {
+								const inserted = store.putInbox(message);
+								if (!inserted) return jsonResponse({ error: "meshMessageId already exists" }, 409);
+								const receipt = { meshMessageId: message.meshMessageId, status: "injected" } as BridgeReceipt;
+								store.recordReceipt(receipt);
+								wakeWaiters();
+								store.appendAudit({
+									action: "message_injected",
+									direction: "inbound",
+									tokenIdentifier: auditTokenIdentifier,
 									originHarness: message.originHarness,
-									targetHarness: message.targetHarness,
-									targetId: message.targetId,
-								},
-							});
-							return jsonResponse(receipt);
-						}
+									originSessionId: message.originSessionId,
+									preview: {
+										meshMessageId: message.meshMessageId,
+										idempotencyKey: message.idempotencyKey,
+										originHarness: message.originHarness,
+										targetHarness: message.targetHarness,
+										targetId: message.targetId,
+									},
+								});
+								return jsonResponse(receipt);
+							}
 
-						if (!store.enqueueMessage(message)) {
-							const racedMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
-							if (racedMessage === null) return jsonResponse({ error: "meshMessageId already exists" }, 409);
-							if (!sameMessage(racedMessage, message))
-								return jsonResponse({ error: "idempotency key conflicts with an existing message" }, 409);
-							const racedReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
-							if (racedReceipt !== null) return jsonResponse(racedReceipt);
+							if (!store.enqueueMessage(message)) {
+								const racedMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
+								if (racedMessage === null) return jsonResponse({ error: "meshMessageId already exists" }, 409);
+								if (!sameMessage(racedMessage, message))
+									return jsonResponse({ error: "idempotency key conflicts with an existing message" }, 409);
+								const racedReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
+								if (racedReceipt !== null) return jsonResponse(racedReceipt);
+								try {
+									await requestDrain();
+								} catch {
+									// A concurrent winner may still be completing its durable attempt.
+								}
+								const retriedReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
+								return retriedReceipt === null
+									? jsonResponse({ error: "message remains pending delivery" }, 503)
+									: jsonResponse(retriedReceipt);
+							}
 							try {
 								await requestDrain();
-							} catch {
-								// A concurrent winner may still be completing its durable attempt.
+							} catch (error) {
+								const receipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
+								if (receipt !== null) return jsonResponse(receipt);
+								if (error instanceof InvalidPrimeReceiptError)
+									return jsonResponse({ error: error.message }, 502);
+								throw error;
 							}
-							const retriedReceipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
-							return retriedReceipt === null
-								? jsonResponse({ error: "message remains pending delivery" }, 503)
-								: jsonResponse(retriedReceipt);
-						}
-						try {
-							await requestDrain();
-						} catch (error) {
 							const receipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
-							if (receipt !== null) return jsonResponse(receipt);
-							if (error instanceof InvalidPrimeReceiptError) return jsonResponse({ error: error.message }, 502);
-							throw error;
+							return receipt === null
+								? jsonResponse({ error: "message remains pending delivery" }, 503)
+								: jsonResponse(receipt);
 						}
-						const receipt = store.getReceiptForIdempotencyKey(message.idempotencyKey);
-						return receipt === null
-							? jsonResponse({ error: "message remains pending delivery" }, 503)
-							: jsonResponse(receipt);
-					}
-					if (url.pathname === "/v1/inbox" && request.method === "GET") {
-						const peek = url.searchParams.get("peek");
-						const targetId = url.searchParams.get("targetId");
-						if (peek !== null && peek !== "true" && peek !== "false")
-							return jsonResponse({ error: "peek must be true or false" }, 400);
-						if (targetId === null || targetId.length === 0)
-							return jsonResponse({ error: "targetId is required" }, 400);
-						try {
-							assertBoundedString("targetId", targetId);
-						} catch (error) {
+						if (url.pathname === "/v1/inbox" && request.method === "GET") {
+							const peek = url.searchParams.get("peek");
+							const targetId = url.searchParams.get("targetId");
+							if (peek !== null && peek !== "true" && peek !== "false")
+								return jsonResponse({ error: "peek must be true or false" }, 400);
+							if (targetId === null || targetId.length === 0)
+								return jsonResponse({ error: "targetId is required" }, 400);
+							try {
+								assertBoundedString("targetId", targetId);
+							} catch (error) {
+								return jsonResponse(
+									{ error: error instanceof Error ? error.message : String(error) },
+									error instanceof PayloadTooLargeError ? 413 : 400,
+								);
+							}
 							return jsonResponse(
-								{ error: error instanceof Error ? error.message : String(error) },
-								error instanceof PayloadTooLargeError ? 413 : 400,
+								store.listInbox({
+									targetId,
+									peek: peek !== "false",
+									maxBytes: MAX_INBOX_RESPONSE_BYTES,
+								}),
 							);
 						}
-						return jsonResponse(
-							store.listInbox({
-								targetId,
-								peek: peek !== "false",
-								maxBytes: MAX_INBOX_RESPONSE_BYTES,
-							}),
-						);
-					}
-					if (url.pathname === "/v1/wait/ack" && request.method === "POST") {
-						try {
-							const claimToken = parseClaimToken(await parseJson(request));
-							return jsonResponse({ ok: store.ackInboxClaim(claimToken) });
-						} catch (error) {
-							return jsonResponse(
-								{ error: error instanceof Error ? error.message : String(error) },
-								error instanceof PayloadTooLargeError ? 413 : 400,
-							);
+						if (url.pathname === "/v1/wait/ack" && request.method === "POST") {
+							try {
+								const claimToken = parseClaimToken(await parseJson(request));
+								return jsonResponse({ ok: store.ackInboxClaim(claimToken) });
+							} catch (error) {
+								return jsonResponse(
+									{ error: error instanceof Error ? error.message : String(error) },
+									error instanceof PayloadTooLargeError ? 413 : 400,
+								);
+							}
 						}
-					}
-					if (url.pathname === "/v1/wait/release" && request.method === "POST") {
-						try {
-							const claimToken = parseClaimToken(await parseJson(request));
-							return jsonResponse({ ok: store.releaseInboxClaim(claimToken) });
-						} catch (error) {
-							return jsonResponse(
-								{ error: error instanceof Error ? error.message : String(error) },
-								error instanceof PayloadTooLargeError ? 413 : 400,
-							);
+						if (url.pathname === "/v1/wait/release" && request.method === "POST") {
+							try {
+								const claimToken = parseClaimToken(await parseJson(request));
+								return jsonResponse({ ok: store.releaseInboxClaim(claimToken) });
+							} catch (error) {
+								return jsonResponse(
+									{ error: error instanceof Error ? error.message : String(error) },
+									error instanceof PayloadTooLargeError ? 413 : 400,
+								);
+							}
 						}
-					}
-					if (url.pathname === "/v1/wait" && request.method === "POST") {
-						let waitRequest: { targetId: string; from?: string; timeoutMs: number };
-						try {
-							waitRequest = parseWaitRequest(await parseJson(request));
-						} catch (error) {
-							return jsonResponse(
-								{ error: error instanceof Error ? error.message : String(error) },
-								error instanceof PayloadTooLargeError ? 413 : 400,
-							);
-						}
-						const existing = store.claimInboxForTarget(waitRequest.targetId, waitRequest.from);
-						if (existing !== null) return jsonResponse(existing);
-						if (waiters.length >= MAX_ACTIVE_WAITERS)
-							return jsonResponse({ error: "too many active waiters" }, 429);
-						return new Promise<Response>(resolve => {
-							const waiter: Waiter = {
-								targetId: waitRequest.targetId,
-								...(waitRequest.from === undefined ? {} : { from: waitRequest.from }),
-								resolve: claim => resolve(jsonResponse(claim)),
-							};
-							const onAbort = (): void => {
-								removeWaiter(waiter);
-								resolve(jsonResponse(null));
-							};
-							waiter.abort = () => request.signal.removeEventListener("abort", onAbort);
-							request.signal.addEventListener("abort", onAbort, { once: true });
-							if (waitRequest.timeoutMs > 0) {
-								waiter.timer = setTimeout(() => {
+						if (url.pathname === "/v1/wait" && request.method === "POST") {
+							let waitRequest: { targetId: string; from?: string; timeoutMs: number };
+							try {
+								waitRequest = parseWaitRequest(await parseJson(request));
+							} catch (error) {
+								return jsonResponse(
+									{ error: error instanceof Error ? error.message : String(error) },
+									error instanceof PayloadTooLargeError ? 413 : 400,
+								);
+							}
+							const existing = store.claimInboxForTarget(waitRequest.targetId, waitRequest.from);
+							if (existing !== null) return jsonResponse(existing);
+							if (waiters.length >= MAX_ACTIVE_WAITERS)
+								return jsonResponse({ error: "too many active waiters" }, 429);
+							return new Promise<Response>(resolve => {
+								const waiter: Waiter = {
+									targetId: waitRequest.targetId,
+									...(waitRequest.from === undefined ? {} : { from: waitRequest.from }),
+									resolve: claim => resolve(jsonResponse(claim)),
+								};
+								const onAbort = (): void => {
 									removeWaiter(waiter);
 									resolve(jsonResponse(null));
-								}, waitRequest.timeoutMs);
-							}
-							waiters.push(waiter);
-							if (request.signal.aborted) {
-								onAbort();
-								return;
-							}
-							const raced = store.claimInboxForTarget(waitRequest.targetId, waitRequest.from);
-							if (raced !== null) {
-								removeWaiter(waiter);
-								waiter.resolve(raced);
-							}
+								};
+								waiter.abort = () => request.signal.removeEventListener("abort", onAbort);
+								request.signal.addEventListener("abort", onAbort, { once: true });
+								if (waitRequest.timeoutMs > 0) {
+									waiter.timer = setTimeout(() => {
+										removeWaiter(waiter);
+										resolve(jsonResponse(null));
+									}, waitRequest.timeoutMs);
+								}
+								waiters.push(waiter);
+								if (request.signal.aborted) {
+									onAbort();
+									return;
+								}
+								const raced = store.claimInboxForTarget(waitRequest.targetId, waitRequest.from);
+								if (raced !== null) {
+									removeWaiter(waiter);
+									waiter.resolve(raced);
+								}
+							});
+						}
+						if (url.pathname === "/v1/audit" && request.method === "GET") return jsonResponse(store.listAudit());
+						return new Response("Not Found", { status: 404 });
+					} catch (error) {
+						options.logger?.error("Prime bridge request failed", {
+							error: sanitizeLogText(error),
 						});
+						return jsonResponse({ error: "internal server error" }, 500);
 					}
-					if (url.pathname === "/v1/audit" && request.method === "GET") return jsonResponse(store.listAudit());
-					return new Response("Not Found", { status: 404 });
-				} catch (error) {
-					options.logger?.error("Prime bridge request failed", {
-						error: sanitizeLogText(error),
-					});
-					return jsonResponse({ error: "internal server error" }, 500);
 				}
-			}
 
-			return new Response("Not Found", { status: 404 });
-		},
-	});
+				return new Response("Not Found", { status: 404 });
+			},
+		});
 
-	const url = server.url.origin;
-	try {
+		url = server.url.origin;
 		await provisionPrimeBridgeConfig(options.primeConfigFile ?? config.primeConfigFile, {
 			url,
 			tokenFile: config.tokenFile,
 		});
 	} catch (error) {
-		await server.stop(true);
+		toolHost.close();
+		if (server !== undefined) await server.stop(true);
 		if (ownsPrimeClient) primeClient.close();
 		if (ownsStore) store.close();
 		throw error;
 	}
+	if (server === undefined) throw new Error("Prime bridge listener was not created");
+	const runningServer = server;
 
 	void requestDrain().catch(error => {
 		options.logger?.error("Prime bridge outbox drain failed", { error: sanitizeLogText(error) });
@@ -748,6 +835,7 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 		token,
 		config,
 		tokenFile: config.tokenFile,
+		toolHost,
 		stop(): Promise<void> {
 			if (stopPromise !== undefined) return stopPromise;
 			stopping = true;
@@ -761,8 +849,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 			}
 			stopPromise = (async () => {
 				try {
-					await server.stop(false);
-					if (drainPromise !== undefined) await drainPromise;
+					toolHost.close();
+					runningServer.stop(false);
+					await runningServer.stop(true);
 				} finally {
 					if (ownsPrimeClient) primeClient.close();
 					if (ownsStore) store.close();

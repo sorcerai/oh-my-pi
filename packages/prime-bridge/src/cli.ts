@@ -11,7 +11,8 @@ import { BridgeStore } from "./store";
 
 const PRIME_SKILL_MARKER = ".omp-managed";
 const PRIME_SKILL_MARKER_CONTENT = "omp-prime-bridge-skill-v1\n";
-const PRIME_SKILL_DIRECTORY = "omp-message";
+const PRIME_MESSAGE_SKILL_DIRECTORY = "omp-message";
+const PRIME_TOOLS_SKILL_DIRECTORY = "omp-tools";
 export interface PrimeBridgeCliDependencies {
 	config?: PrimeBridgeConfig;
 	store?: BridgeStore;
@@ -48,6 +49,7 @@ function parsePort(argv: readonly string[]): number | undefined {
 export interface PrimeSkillInstallOptions {
 	homeDir?: string;
 	sourceDir?: string;
+	toolsSourceDir?: string;
 }
 
 function isNotFound(error: unknown): boolean {
@@ -99,18 +101,8 @@ async function isManagedSkill(directory: string): Promise<boolean> {
 	}
 }
 
-/**
- * Installs the bundled Prime `omp-message` skill without following or replacing
- * user-owned symlinks. Existing unmanaged skills are left untouched.
- */
-export async function installPrimeSkill(options: PrimeSkillInstallOptions = {}): Promise<string> {
-	const homeDir = options.homeDir ?? os.homedir();
-	const sourceDir = options.sourceDir ?? path.resolve(import.meta.dir, "..", "prime-skill");
-	const agentsDir = path.join(homeDir, ".agents");
-	const skillsDir = path.join(agentsDir, "skills");
-	const targetDir = path.join(skillsDir, PRIME_SKILL_DIRECTORY);
-	await assertDirectory(agentsDir, true);
-	await assertDirectory(skillsDir, true);
+async function installManagedPrimeSkill(skillsDir: string, sourceDir: string, skillDirectory: string): Promise<string> {
+	const targetDir = path.join(skillsDir, skillDirectory);
 
 	let targetExists = false;
 	try {
@@ -122,7 +114,7 @@ export async function installPrimeSkill(options: PrimeSkillInstallOptions = {}):
 	} catch (error) {
 		if (!isNotFound(error)) throw error;
 	}
-	const stagingDir = path.join(skillsDir, `.${PRIME_SKILL_DIRECTORY}.tmp-${process.pid}-${randomUUID()}`);
+	const stagingDir = path.join(skillsDir, `.${skillDirectory}.tmp-${process.pid}-${randomUUID()}`);
 	try {
 		await copySkillTree(sourceDir, stagingDir);
 		const marker = path.join(stagingDir, PRIME_SKILL_MARKER);
@@ -138,10 +130,7 @@ export async function installPrimeSkill(options: PrimeSkillInstallOptions = {}):
 		if (!targetExists) {
 			await fs.rename(stagingDir, targetDir);
 		} else {
-			const candidateBackupDir = path.join(
-				skillsDir,
-				`.${PRIME_SKILL_DIRECTORY}.old-${process.pid}-${randomUUID()}`,
-			);
+			const candidateBackupDir = path.join(skillsDir, `.${skillDirectory}.old-${process.pid}-${randomUUID()}`);
 			await fs.rename(targetDir, candidateBackupDir);
 			backupDir = candidateBackupDir;
 			try {
@@ -163,6 +152,23 @@ export async function installPrimeSkill(options: PrimeSkillInstallOptions = {}):
 		throw error;
 	}
 	return targetDir;
+}
+
+/**
+ * Installs both bundled Prime bridge skills without following or replacing
+ * user-owned symlinks. Existing unmanaged skills are left untouched.
+ */
+export async function installPrimeSkill(options: PrimeSkillInstallOptions = {}): Promise<string> {
+	const homeDir = options.homeDir ?? os.homedir();
+	const messageSourceDir = options.sourceDir ?? path.resolve(import.meta.dir, "..", "prime-skill");
+	const toolsSourceDir = options.toolsSourceDir ?? path.resolve(import.meta.dir, "..", "prime-skill-tools");
+	const agentsDir = path.join(homeDir, ".agents");
+	const skillsDir = path.join(agentsDir, "skills");
+	await assertDirectory(agentsDir, true);
+	await assertDirectory(skillsDir, true);
+	const messageTargetDir = await installManagedPrimeSkill(skillsDir, messageSourceDir, PRIME_MESSAGE_SKILL_DIRECTORY);
+	await installManagedPrimeSkill(skillsDir, toolsSourceDir, PRIME_TOOLS_SKILL_DIRECTORY);
+	return messageTargetDir;
 }
 
 export async function main(

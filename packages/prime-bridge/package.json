@@ -23,6 +23,7 @@
     "test:session-resume:native": "bun -e 'if (!process.env.PRIME_AGENT_BIN) throw new Error(\"PRIME_AGENT_BIN is required for the native Prime continuation gate\")' && bun test test/integration/session-resume.test.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-ai": "workspace:*",
     "@oh-my-pi/pi-coding-agent": "workspace:*",
@@ -38,6 +39,7 @@
   "files": [
     "src",
     "prime-skill",
+    "prime-skill-tools",
     "test"
   ],
   "exports": {

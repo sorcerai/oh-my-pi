@@ -18,3 +18,9 @@ export {
 	type PrimeBridgeLifecycleDependencies,
 	type PrimeBridgeLifecycleSettings,
 } from "./lifecycle";
+export {
+	PrimeBridgeHostAdapter,
+	type PrimeBridgeHostAdapterConfig,
+	type PrimeBridgeHostSession,
+	type PrimeBridgeHostWebSocket,
+} from "./tool-host-adapter";

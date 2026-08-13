@@ -8,6 +8,7 @@
 - Fixed invalid Prime model definitions blocking `--config-only` from importing valid settings and credentials.
 - Added end-to-end Prime bridge control-mesh coverage for bidirectional delivery, durable restart recovery, deduplication, and event cursor continuity.
 - Added public-API session-resume integration coverage for OMP SessionManager continuation and the loopback OpenAI-compatible provider, with explicit Prime-native runtime-gate limits.
+- Added optional per-session Prime tool hosting with a read-only default allowlist, fixed approval timeouts, cancellation isolation, and offline startup degradation.
 
 ## [17.2.13] - 2026-08-11
 

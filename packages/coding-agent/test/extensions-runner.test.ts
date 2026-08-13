@@ -23,6 +23,7 @@ import type {
 	ExtensionError,
 	ExtensionServiceTier,
 	ExtensionUIContext,
+	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -1833,7 +1834,11 @@ describe("ExtensionRunner", () => {
 	describe("tool approval lifecycle", () => {
 		const initializeRunner = (
 			runner: ExtensionRunner,
-			select: (title: string, options: string[]) => Promise<string | undefined>,
+			select: (
+				title: string,
+				options: string[],
+				dialogOptions?: ExtensionUIDialogOptions,
+			) => Promise<string | undefined>,
 		) => {
 			runner.initialize(
 				{
@@ -1948,10 +1953,11 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Deny",
-			]);
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Deny"],
+				{ signal: undefined },
+			);
 			delete globalState.__approvalEvents;
 		});
 
@@ -2003,6 +2009,55 @@ describe("ExtensionRunner", () => {
 			preview.resolve();
 			await execution;
 			expect(order).toEqual(["preview_wait:call-preview", "preview_ready", "ui_select"]);
+		});
+		it("does not execute after approval is cancelled while the selector waits", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const selectStarted = Promise.withResolvers<ExtensionUIDialogOptions | undefined>();
+			const lateApproval = Promise.withResolvers<string | undefined>();
+			const select = async (
+				_title: string,
+				_options: string[],
+				dialogOptions?: ExtensionUIDialogOptions,
+			): Promise<string | undefined> => {
+				selectStarted.resolve(dialogOptions);
+				return lateApproval.promise;
+			};
+			initializeRunner(runner, select);
+
+			let executions = 0;
+			const tool = {
+				...approvalTool,
+				execute: async () => {
+					executions += 1;
+					return { content: [{ type: "text" as const, text: "ok" }] };
+				},
+			};
+			const wrapper = new ExtensionToolWrapper(tool, runner);
+			const controller = new AbortController();
+			const execution = wrapper.execute("call-cancelled", {} as never, controller.signal, undefined, {
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+			});
+
+			const dialogOptions = await selectStarted.promise;
+			expect(dialogOptions?.signal).toBe(controller.signal);
+			controller.abort();
+			lateApproval.resolve("Approve");
+
+			await expect(execution).rejects.toThrow("Aborted");
+			expect(executions).toBe(0);
 		});
 
 		it("emits resolved false when approval is denied", async () => {
