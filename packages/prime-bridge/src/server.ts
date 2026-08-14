@@ -56,6 +56,42 @@ function forbidden(): Response {
 	return new Response("Forbidden", { status: 403 });
 }
 
+/**
+ * An authenticated caller.
+ *
+ * Every route resolves one of these before doing any work, so authority has a
+ * single place to live. Fields are derived server-side only: nothing a caller
+ * puts in a request may widen what its principal is allowed to do.
+ */
+export interface BridgePrincipal {
+	readonly token: string;
+}
+
+type AuthenticationOutcome =
+	| { readonly ok: true; readonly principal: BridgePrincipal }
+	| { readonly ok: false; readonly response: Response };
+
+/**
+ * Resolve the caller of a request, or the response that rejects it.
+ *
+ * The token file is re-read per request so an out-of-band rotation takes effect
+ * without a restart.
+ */
+async function authenticate(request: Request, config: PrimeBridgeConfig): Promise<AuthenticationOutcome> {
+	const origin = request.headers.get("origin");
+	if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin))
+		return { ok: false, response: forbidden() };
+	let currentToken: string;
+	try {
+		currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
+	} catch {
+		return { ok: false, response: unauthorized() };
+	}
+	if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
+		return { ok: false, response: unauthorized() };
+	return { ok: true, principal: { token: currentToken } };
+}
+
 function resolveOptions(options: PrimeBridgeServerOptions): PrimeBridgeConfig {
 	if (options.config) return options.config;
 	const overrides: PrimeBridgeConfigOverrides = {
@@ -549,16 +585,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 				if (server === undefined || request.headers.get("host") !== new URL(server.url).host)
 					return new Response("Bad Request", { status: 400 });
 				if (url.pathname === "/v1/tool-host") {
-					const origin = request.headers.get("origin");
-					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
-					let currentToken: string;
-					try {
-						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
-					} catch {
-						return unauthorized();
-					}
-					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
-						return unauthorized();
+					const auth = await authenticate(request, config);
+					if (!auth.ok) return auth.response;
 					if (
 						bunServer.upgrade(request, {
 							data: { awaitingPong: false, closed: false, queue: [], queuedBytes: 0, backpressured: false },
@@ -568,16 +596,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 					return new Response("Upgrade failed", { status: 400 });
 				}
 				if (url.pathname.startsWith("/mcp/")) {
-					const origin = request.headers.get("origin");
-					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
-					let currentToken: string;
-					try {
-						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
-					} catch {
-						return unauthorized();
-					}
-					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
-						return unauthorized();
+					const auth = await authenticate(request, config);
+					if (!auth.ok) return auth.response;
 					const prefix = "/mcp/v1/sessions/";
 					if (!url.pathname.startsWith(prefix)) return new Response("Not Found", { status: 404 });
 					let sessionId: string;
@@ -591,16 +611,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 				if (url.pathname === "/health") return jsonResponse({ ok: true });
 
 				if (url.pathname.startsWith("/v1/")) {
-					const origin = request.headers.get("origin");
-					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
-					let currentToken: string;
-					try {
-						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
-					} catch {
-						return unauthorized();
-					}
-					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
-						return unauthorized();
+					const auth = await authenticate(request, config);
+					if (!auth.ok) return auth.response;
 					try {
 						const custom = await options.handleV1?.(request);
 						if (custom !== null && custom !== undefined) return custom;
