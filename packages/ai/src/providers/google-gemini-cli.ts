@@ -8,7 +8,6 @@ import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
-	ANTIGRAVITY_SYSTEM_INSTRUCTION,
 	getAntigravityModelWireProfile,
 	getAntigravityUserAgent,
 	getGeminiCliHeaders,
@@ -36,6 +35,7 @@ import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTim
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
 import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/stream-markup-healing";
+import forcedToolDirective from "./google-antigravity-forced-tool.md" with { type: "text" };
 import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./google-shared";
 import {
 	convertMessages,
@@ -315,13 +315,6 @@ const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const ANTIGRAVITY_ENDPOINT_FALLBACKS = [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_SANDBOX_ENDPOINT] as const;
 
-export {
-	ANTIGRAVITY_SYSTEM_INSTRUCTION,
-	getAntigravityUserAgent,
-	getGeminiCliHeaders,
-	getGeminiCliUserAgent,
-} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-
 // Retry configuration
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
@@ -339,11 +332,6 @@ function isClaudeModel(modelId: string): boolean {
 
 function needsClaudeThinkingBetaHeader(model: Model<"google-gemini-cli">): boolean {
 	return model.provider === "google-antigravity" && model.id.startsWith("claude-") && model.reasoning;
-}
-
-function shouldInjectAntigravitySystemInstruction(modelId: string): boolean {
-	const normalized = modelId.toLowerCase();
-	return normalized.includes("claude") || normalized.includes("gemini-3");
 }
 
 const optionalCredentialString = type("unknown").pipe(raw => {
@@ -634,6 +622,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			const isFlashLeakModel = model.id.includes("flash");
 
 			let started = false;
+			// Tracks whether *visible* content (text delta or tool call) has been
+			// pushed downstream. `started` alone is a poor failover guard because a
+			// hidden thought part also flips it (via `ensureStarted`); a thinking-only
+			// STOP must still fail over to the alternate Antigravity endpoint (#8480).
+			let emittedVisibleContent = false;
 			let sawFinishReason = false;
 			let lastResponseId: string | undefined;
 			const ensureStarted = () => {
@@ -712,6 +705,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 				const emitVisibleText = (delta: string, thoughtSignature?: string): void => {
 					if (!delta) return;
+					emittedVisibleContent = true;
 					const block = startTextBlock();
 					block.text += delta;
 					block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
@@ -870,6 +864,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								};
 
 								output.content.push(toolCall);
+								emittedVisibleContent = true;
 								ensureStarted();
 								pushToolCallEvents(toolCall, blockIndex(), output, stream);
 							}
@@ -943,6 +938,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				const isLastEndpoint = i === endpoints.length - 1;
 				try {
 					started = false;
+					emittedVisibleContent = false;
 					resetOutput();
 
 					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
@@ -1085,7 +1081,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const status = extractHttpStatusFromError(error);
 					if (
 						!isLastEndpoint &&
-						!started &&
+						!emittedVisibleContent &&
 						(AIError.isTransientStatus(status) ||
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
@@ -1319,14 +1315,6 @@ export function buildRequest(
 		};
 	}
 
-	if (isAntigravity && shouldInjectAntigravitySystemInstruction(model.id)) {
-		const existingParts = request.systemInstruction?.parts ?? [];
-		request.systemInstruction = {
-			role: "user",
-			parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, ...existingParts],
-		};
-	}
-
 	if (context.tools && context.tools.length > 0) {
 		const convertedTools = convertTools(context.tools, model);
 		request.tools = isAntigravity ? normalizeAntigravityTools(convertedTools) : convertedTools;
@@ -1346,6 +1334,13 @@ export function buildRequest(
 						allowedFunctionNames: [...choice.allowedFunctionNames],
 					},
 				};
+			}
+			// Cloud Code Assist drops `toolConfig` on Antigravity's Gemini routes:
+			// the backend answers in text under `mode: "ANY"` and still emits calls
+			// under `"NONE"`. Claude routes implement it, so only Gemini needs the
+			// forced choice restated in the transcript.
+			if (isAntigravity && !isClaudeModel(model.id) && request.toolConfig?.functionCallingConfig.mode === "ANY") {
+				contents.push({ role: "user", parts: [{ text: forcedToolDirective }] });
 			}
 		}
 		// Antigravity's default tool mode is VALIDATED (verified for Gemini and
