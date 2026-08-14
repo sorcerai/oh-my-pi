@@ -216,3 +216,27 @@ describe("mesh identity", () => {
 		expect(refused.status).toBe(403);
 	});
 });
+
+describe("peer discovery scope", () => {
+	const register = (server: PrimeBridgeServer, id: string) =>
+		fetch(`${server.url}/v1/peers`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${SUPERVISOR_TOKEN}`, "content-type": "application/json" },
+			body: JSON.stringify({ targetHarness: "omp", id }),
+		});
+
+	it("shows a worker only the peers it was granted", async () => {
+		const server = await createServer();
+		expect((await register(server, GRANTED_SESSION)).status).toBe(200);
+		expect((await register(server, UNGRANTED_SESSION)).status).toBe(200);
+
+		const peerIds = async (token: string): Promise<string[]> => {
+			const response = await v1(server, "/v1/peers?targetHarness=omp", token);
+			expect(response.status).toBe(200);
+			return ((await response.json()) as { id: string }[]).map(peer => peer.id);
+		};
+
+		expect(await peerIds(WORKER_TOKEN)).toEqual([GRANTED_SESSION]);
+		expect((await peerIds(SUPERVISOR_TOKEN)).sort()).toEqual([GRANTED_SESSION, UNGRANTED_SESSION].sort());
+	});
+});

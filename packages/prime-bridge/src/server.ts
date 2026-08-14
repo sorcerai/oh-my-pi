@@ -651,9 +651,14 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 							} catch (error) {
 								return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
 							}
-							if (targetHarness === "omp") return jsonResponse(store.listOmpPeers());
+							// Discovery is scoped like every other surface: an unscoped worker
+							// would otherwise enumerate every session id on the machine. Peer
+							// ids share the namespace grants name, so the same gate applies.
+							const visible = <TPeer extends { id: string }>(entries: readonly TPeer[]): TPeer[] =>
+								entries.filter(entry => grantAllowsSession(auth.principal, entry.id));
+							if (targetHarness === "omp") return jsonResponse(visible(store.listOmpPeers()));
 							const peers = options.peers ? await options.peers() : await primeClient.listSessions();
-							return jsonResponse(mapPrimePeers(peers));
+							return jsonResponse(visible(mapPrimePeers(peers)));
 						}
 						if (url.pathname === "/v1/peers" && request.method === "POST") {
 							try {
