@@ -83,6 +83,7 @@
   },
   "scripts": {
     "setup": "bun install && bun run build:native && bun --cwd=packages/coding-agent link && sh scripts/link-omp.sh",
+    "install:local": "sh scripts/install-local-omp.sh",
     "dev": "bun --cwd=packages/coding-agent src/cli.ts",
     "dev:timing": "PI_TIMING=x bun --cwd=packages/coding-agent --preload ../utils/src/module-timer.ts src/cli.ts",
     "stats": "bun --cwd=packages/coding-agent src/cli.ts stats",
