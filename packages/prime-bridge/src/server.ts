@@ -7,7 +7,7 @@ import {
 	provisionPrimeBridgeConfig,
 	resolveBridgeConfig,
 } from "./config";
-import { type BridgeGrant, parseBridgeGrants, primaryBridgeToken } from "./grants";
+import { type BridgeGrant, grantAllowsSession, parseBridgeGrants, primaryBridgeToken } from "./grants";
 import { handleMcpRequest } from "./mcp/server";
 import { CommandResultUncertainError, PrimeDaemonClient } from "./prime/client";
 import { BridgeStore, type ClaimedInboxMessage, type ClaimedPendingMessage } from "./store";
@@ -599,6 +599,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 				if (url.pathname === "/v1/tool-host") {
 					const auth = await authenticate(request, config);
 					if (!auth.ok) return auth.response;
+					// Registering a tool host publishes tools into every session, so it is
+					// administrative regardless of which sessions the caller was granted.
+					if (auth.principal.role !== "supervisor") return forbidden();
 					if (
 						bunServer.upgrade(request, {
 							data: { awaitingPong: false, closed: false, queue: [], queuedBytes: 0, backpressured: false },
@@ -618,6 +621,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 					} catch {
 						return new Response("Not Found", { status: 404 });
 					}
+					// Scope comes from the grant, never from the path. A worker naming a
+					// session it was not granted is refused before the tool host sees it.
+					if (!grantAllowsSession(auth.principal, sessionId)) return forbidden();
 					return handleMcpRequest(request, toolHost, sessionId);
 				}
 				if (url.pathname === "/health") return jsonResponse({ ok: true });
@@ -625,6 +631,16 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 				if (url.pathname.startsWith("/v1/")) {
 					const auth = await authenticate(request, config);
 					if (!auth.ok) return auth.response;
+					// Administrative surfaces. The messaging routes below (/v1/messages,
+					// /v1/inbox, /v1/wait*) stay open to any authenticated principal:
+					// scoping a worker's reachable targets is a separate decision, tracked
+					// as its own issue, and gating them here would sever the mesh.
+					if (
+						(url.pathname === "/v1/peers" && request.method === "POST") ||
+						(url.pathname === "/v1/audit" && request.method === "GET")
+					) {
+						if (auth.principal.role !== "supervisor") return forbidden();
+					}
 					try {
 						const custom = await options.handleV1?.(request);
 						if (custom !== null && custom !== undefined) return custom;
