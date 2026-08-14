@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -24,7 +24,7 @@ describe("AgentSession advisor toggle", () => {
 	let modelRegistry: ModelRegistry;
 	let model: Model;
 	let replacementModel: Model;
-
+	let strongModel: Model;
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -37,6 +37,9 @@ describe("AgentSession advisor toggle", () => {
 		if (!replacement) throw new Error("Expected built-in OpenAI model to exist");
 		model = bundled;
 		replacementModel = replacement;
+		const strong = getBundledModel("openai", "gpt-5-mini");
+		if (!strong) throw new Error("Expected built-in GPT-5 model to exist");
+		strongModel = strong;
 	});
 
 	afterAll(() => {
@@ -206,6 +209,63 @@ describe("AgentSession advisor toggle", () => {
 			(session.getAdvisorAgent()?.state.model.compat as { openRouterRouting?: { only?: string[] } } | undefined)
 				?.openRouterRouting?.only,
 		).toEqual(["fireworks"]);
+	});
+
+	it("rebuilds executor guidance when the primary model changes", async () => {
+		const firstAdvisor = enableAdvisor();
+		expect(firstAdvisor.state.systemPrompt.join("\n")).toContain('profile="conservative"');
+
+		await session.setModel(strongModel);
+
+		const rebuiltAdvisor = session.getAdvisorAgent();
+		expect(rebuiltAdvisor).not.toBe(firstAdvisor);
+		expect(rebuiltAdvisor?.state.systemPrompt.join("\n")).toContain(
+			`<executor-guidance model="${strongModel.provider}/${strongModel.id}" profile="efficient">`,
+		);
+	});
+
+	it("rebuilds executor guidance when only primary model routing changes", async () => {
+		const routed = getBundledModel<"openrouter">("openrouter", "z-ai/glm-4.7");
+		if (!routed) throw new Error("Expected built-in routed model to exist");
+		const cerebras: Model = {
+			...routed,
+			compat: { ...routed.compat, openRouterRouting: { only: ["cerebras"] } },
+		};
+		const fireworks: Model = {
+			...routed,
+			compat: { ...routed.compat, openRouterRouting: { only: ["fireworks"] } },
+		};
+		await session.setModel(cerebras);
+		const firstAdvisor = enableAdvisor();
+		expect(firstAdvisor.state.systemPrompt.join("\n")).toContain("openrouter/z-ai/glm-4.7@cerebras");
+		let modelChangedCount = 0;
+		session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
+		const completionsCloseSpy = vi.fn();
+		const completionsStateKey = `openai-completions:${cerebras.provider}:${cerebras.baseUrl}:${cerebras.id}`;
+		session.providerSessionState.set(completionsStateKey, {
+			close: completionsCloseSpy,
+		} satisfies ProviderSessionState);
+		const responsesCloseSpy = vi.fn();
+		const responsesStateKey = `openai-responses:${cerebras.provider}`;
+		session.providerSessionState.set(responsesStateKey, { close: responsesCloseSpy } satisfies ProviderSessionState);
+		await session.setModel(cerebras);
+		expect(session.getAdvisorAgent()).toBe(firstAdvisor);
+		expect(modelChangedCount).toBe(0);
+		expect(completionsCloseSpy).not.toHaveBeenCalled();
+		expect(responsesCloseSpy).not.toHaveBeenCalled();
+
+		await session.setModel(fireworks);
+
+		const rebuiltAdvisor = session.getAdvisorAgent();
+		expect(rebuiltAdvisor).not.toBe(firstAdvisor);
+		expect(modelChangedCount).toBe(1);
+		expect(completionsCloseSpy).toHaveBeenCalledTimes(1);
+		expect(session.providerSessionState.has(completionsStateKey)).toBe(false);
+		expect(responsesCloseSpy).toHaveBeenCalledTimes(1);
+		expect(session.providerSessionState.has(responsesStateKey)).toBe(false);
+		expect(rebuiltAdvisor?.state.systemPrompt.join("\n")).toContain("openrouter/z-ai/glm-4.7@fireworks");
 	});
 
 	it("refreshes the live advisor after project model-role reloads", async () => {
@@ -435,6 +495,35 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.getAdvisorCost()).toBeCloseTo(0.75, 8);
 		await session.dispose();
 		expect((await loadAdvisorTranscriptCosts(previousSessionFile)).get("")).toBeCloseTo(0.75, 8);
+	});
+
+	it("restores previous executor guidance when a session switch rolls back", async () => {
+		const firstAdvisor = enableAdvisor();
+		expect(firstAdvisor.state.systemPrompt.join("\n")).toContain('profile="conservative"');
+
+		const targetSessionFile = SessionManager.createEmptySessionFile(tempDir.path());
+		const targetManager = await SessionManager.open(targetSessionFile, tempDir.path());
+		targetManager.appendModelChange(`${strongModel.provider}/${strongModel.id}`);
+		await targetManager.flush();
+		await targetManager.close();
+
+		const failure = new Error("switch failed after target model restore");
+		let injected = false;
+		const getSessionId = sessionManager.getSessionId.bind(sessionManager);
+		vi.spyOn(sessionManager, "getSessionId").mockImplementation(() => {
+			if (!injected && session.model?.id === strongModel.id) {
+				injected = true;
+				throw failure;
+			}
+			return getSessionId();
+		});
+
+		await expect(session.switchSession(targetSessionFile)).rejects.toThrow(failure);
+
+		expect(session.model?.id).toBe(model.id);
+		expect(session.getAdvisorAgent()?.state.systemPrompt.join("\n")).toContain(
+			`<executor-guidance model="${model.provider}/${model.id}" profile="conservative">`,
+		);
 	});
 	it("adopts only the target session's recorded advisor cost after a switch", async () => {
 		const advisor = enableAdvisor();

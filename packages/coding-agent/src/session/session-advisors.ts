@@ -60,6 +60,7 @@ import {
 	resolveAdvisorDeliveryChannel,
 	slugifyAdvisorName,
 } from "../advisor";
+import { classifyExecutorGuidance, formatExecutorGuidancePrompt } from "../advisor/executor-guidance";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -350,6 +351,16 @@ export class SessionAdvisors {
 
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
 	onModelRolesChanged(): void {
+		this.#refreshAdvisorRuntimeInputs();
+	}
+
+	/** Rebuilds live advisors when the primary executor model changes. */
+	onPrimaryModelChanged(): void {
+		this.#refreshAdvisorRuntimeInputs();
+	}
+
+	/** Refreshes live advisors when a runtime input changes. */
+	#refreshAdvisorRuntimeInputs(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
@@ -638,9 +649,15 @@ export class SessionAdvisors {
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
-			"\u001f",
-		);
+		return [
+			config.name,
+			slug,
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+			formatModelStringWithRouting(this.#host.agent.state.model),
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -694,7 +711,9 @@ export class SessionAdvisors {
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
+			const executorIdentity = formatModelStringWithRouting(this.#host.agent.state.model);
 			const systemPrompt = [advisorSystemPrompt];
+			systemPrompt.push(formatExecutorGuidancePrompt(executorIdentity, classifyExecutorGuidance(executorIdentity)));
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
 			if (this.#advisorSharedInstructions) systemPrompt.push(this.#advisorSharedInstructions);
