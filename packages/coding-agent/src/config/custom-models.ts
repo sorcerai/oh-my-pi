@@ -78,6 +78,7 @@ export function buildCustomModelOverlay(
 	if (!api) return undefined;
 	return {
 		id: modelDef.id,
+		authRef: modelDef.authRef,
 		provider: providerName,
 		api,
 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
@@ -124,6 +125,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
 		provider: resolvedModel.provider,
+		authRef: resolvedModel.authRef,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
 		thinking: inheritReferenceThinking(resolvedModel.thinking, reference, resolvedModel.provider),
@@ -131,7 +133,10 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		imageInputDecoder: resolvedModel.imageInputDecoder,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
-		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
+		contextWindow:
+			resolvedModel.contextWindow !== undefined
+				? resolvedModel.contextWindow
+				: (reference?.contextWindow ?? (options.useDefaults ? 128000 : null)),
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
 		headers: resolvedModel.headers,
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,

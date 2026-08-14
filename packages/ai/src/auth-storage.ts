@@ -845,10 +845,10 @@ type AuthApiKeyOptions = {
 	 */
 	signal?: AbortSignal;
 	/**
-	 * Force a re-mint of the session-preferred OAuth credential's access token,
-	 * bypassing the not-yet-expired short-circuit. Powers step (b) of the
-	 * auth-retry policy ("refresh the SAME account") so a locally-cached token
-	 * that a peer/broker rotated out from under us is replaced before retrying.
+	 * Force a re-mint of the selected OAuth credential's access token,
+	 * bypassing the not-yet-expired short-circuit. Normal provider resolution
+	 * targets the session-preferred account. Exact-row resolution targets only
+	 * its durable credential id.
 	 */
 	forceRefresh?: boolean;
 };
@@ -5083,9 +5083,11 @@ export class AuthStorage {
 		provider: string,
 		selection: { credential: OAuthCredential; index: number },
 		options: AuthApiKeyOptions | undefined,
+		credentialId?: number,
 	): Promise<boolean> {
 		const stored = this.#getStoredCredentials(provider);
-		const selected = stored[selection.index];
+		const selected =
+			credentialId === undefined ? stored[selection.index] : stored.find(candidate => candidate.id === credentialId);
 		if (selected?.credential.type !== "oauth") return false;
 
 		const prepare = this.#store.prepareForRequest?.bind(this.#store);
@@ -5115,6 +5117,8 @@ export class AuthStorage {
 			blockScopes?: readonly string[];
 			/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 			allowFallback?: boolean;
+			/** Durable row id for target-only resolution. */
+			credentialId?: number;
 		},
 	): Promise<OAuthResolutionResult | undefined> {
 		const {
@@ -5129,6 +5133,7 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
+			credentialId: targetCredentialId,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -5137,14 +5142,14 @@ export class AuthStorage {
 			return undefined;
 		}
 
-		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
+		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options, targetCredentialId))) {
 			return undefined;
 		}
 		// Capture the row id once, immediately after #prepareOAuthCredentialForRequest
-		// resynced selection.index from the store. A concurrent disable during the
-		// usage/refresh awaits below can shift positional indices, so every later
-		// refresh / persist / CAS-disable addresses the row by this stable id.
-		const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+		// resynced selection.index from the store. Target-only resolution supplies
+		// its durable id directly so a concurrent reordering cannot select a sibling.
+		const credentialId = targetCredentialId ?? this.#getStoredCredentials(provider)[selection.index]?.id;
+		const forceRefresh = targetCredentialId !== undefined && options?.forceRefresh === true;
 
 		const planRequirement = providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
@@ -5188,7 +5193,7 @@ export class AuthStorage {
 			if (customProvider) {
 				const refreshedCredentials = await this.#refreshOAuthCredential(
 					provider,
-					selection.credential,
+					forceRefresh ? { ...selection.credential, expires: 0 } : selection.credential,
 					credentialId,
 					options?.signal,
 				);
@@ -5204,7 +5209,7 @@ export class AuthStorage {
 				// auth failure and soft-disable a still-valid credential.
 				const refreshedCredentials = await this.#refreshOAuthCredential(
 					provider,
-					selection.credential,
+					forceRefresh ? { ...selection.credential, expires: 0 } : selection.credential,
 					credentialId,
 					options?.signal,
 				);
@@ -5521,7 +5526,12 @@ export class AuthStorage {
 				providerKey,
 				undefined,
 				options,
-				{ checkUsage: false, allowBlocked: true, allowFallback: false },
+				{
+					checkUsage: false,
+					allowBlocked: true,
+					allowFallback: false,
+					credentialId: selection.credentialId,
+				},
 			);
 			if (!resolved) {
 				return {
@@ -5677,17 +5687,14 @@ export class AuthStorage {
 	 * requested row, preserving exact-account affinity for operations whose
 	 * provenance and policy boundary are tied to one workspace.
 	 *
-	 * Returns `undefined` when the row does not exist for `provider` or an
-	 * explicit runtime/config API-key override suppresses OAuth.
+	 * Returns `undefined` when the row does not exist for `provider`. Provider-wide
+	 * API-key overrides do not apply because this method explicitly addresses an OAuth row.
 	 */
 	async getOAuthAccessByCredentialId(
 		provider: string,
 		credentialId: number,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccessResolution | undefined> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
-			return undefined;
-		}
 		const selection = this.#getStoredOAuthSelections(provider).find(
 			candidate => candidate.credentialId === credentialId,
 		);

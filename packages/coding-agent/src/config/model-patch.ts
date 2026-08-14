@@ -48,6 +48,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
+		const authRef = model.authRef ?? existing.authRef;
 		return buildModel({
 			...model,
 			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
@@ -58,6 +59,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				providerOverride?.remoteCompaction,
 			),
 			...(supportsTools !== undefined ? { supportsTools } : {}),
+			...(authRef !== undefined ? { authRef } : {}),
 			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
 		} as ModelSpec<TApi>);
 	}
@@ -176,9 +178,10 @@ export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TAp
 /**
  * The patchable subset of `Model` fields shared by `modelOverrides` entries,
  * custom model definitions, and parsed custom-model overlays. `undefined`
- * always means "leave the base value alone".
+ * always means "leave the base value alone"; `contextWindow: null` explicitly preserves an unknown window.
  */
 export interface ModelPatch {
+	authRef?: string;
 	name?: string;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
@@ -186,7 +189,7 @@ export interface ModelPatch {
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
-	contextWindow?: number;
+	contextWindow?: number | null;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
 	headers?: Record<string, string>;
@@ -208,6 +211,7 @@ type ModelTransportPolicy = "merge" | "replace";
 export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
 	if (patch.name !== undefined) result.name = patch.name;
+	if (patch.authRef !== undefined) result.authRef = patch.authRef;
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;

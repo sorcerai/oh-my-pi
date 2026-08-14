@@ -6,6 +6,8 @@ import * as path from "node:path";
 import { getAgentDbPath, MAIN_CONFIG_FILENAMES, withFileLock } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { ModelRegistry } from "../../config/model-registry";
+import { modelSpecV1ToOmpModelRecord } from "../../config/model-spec-v1";
+
 import { ModelsConfigFile } from "../../config/models-config";
 import { type SettingPath, Settings, type SettingsCreateOnlyMutation, type SettingValue } from "../../config/settings";
 import { loadSkillsFromDir } from "../../extensibility/skills";
@@ -395,6 +397,9 @@ function modelShape(model: PrimeNormalizedModel | PrimeNormalizedModelOverride):
 			shape.cost = Object.fromEntries(Object.keys(model.cost).map(field => [field, true]));
 		else shape[key] = true;
 	}
+	if (model.modelSpecV1 !== undefined && Object.hasOwn(model.modelSpecV1, "contextLength")) shape.contextWindow = true;
+	if (model.modelSpecV1?.authRef !== undefined) shape.authRef = true;
+	if (model.modelSpecV1?.extensions !== undefined) shape.extensions = presenceShape(model.modelSpecV1.extensions);
 	return shape;
 }
 function absent(target: Record<string, unknown>, candidate: Record<string, unknown>): boolean {
@@ -476,10 +481,18 @@ function coalesceModelOperations(
 }
 
 function hydrateModel(
-	model: PrimeNormalizedModel | PrimeNormalizedModelOverride,
+	operation: PrimeNormalizedModelOperation,
 	config: PrimeConfigParserResult,
 ): Record<string, unknown> {
-	const value: Record<string, unknown> = { id: model.id };
+	const model = operation.model;
+	const modelSpec = model.modelSpecV1;
+	if (modelSpec === undefined) throw new DestinationValidationError("invalid model spec");
+	const runnable = modelSpecV1ToOmpModelRecord(modelSpec);
+	const value: Record<string, unknown> = { id: runnable.id };
+	if (runnable.authRef !== undefined) value.authRef = runnable.authRef;
+	if (runnable.extensions !== undefined) value.extensions = clone(runnable.extensions);
+	if (runnable.supportsTools !== undefined) value.supportsTools = runnable.supportsTools;
+	if (runnable.contextWindow !== undefined) value.contextWindow = runnable.contextWindow;
 	const modelRecord: Record<string, unknown> = Object.fromEntries(Object.entries(model));
 	for (const key of [
 		"name",
@@ -487,9 +500,7 @@ function hydrateModel(
 		"baseUrl",
 		"reasoning",
 		"input",
-		"supportsTools",
 		"cost",
-		"contextWindow",
 		"maxTokens",
 		"premiumMultiplier",
 		"omitMaxOutputTokens",
@@ -588,7 +599,7 @@ function mergeModel(
 			});
 	}
 	merge(provider, providerValue);
-	const model = hydrateModel(operation.model, config);
+	const model = hydrateModel(operation, config);
 	if (operation.modelKind === "definition") {
 		const rawModels = provider.models;
 		const models: Record<string, unknown>[] = Array.isArray(rawModels)
@@ -1027,13 +1038,24 @@ function validProviderConfig(value: unknown): boolean {
 	return true;
 }
 function validModelOperation(operation: PrimeNormalizedModelOperation): boolean {
-	return (
-		validModelProvider(operation.provider) &&
-		typeof operation.model.id === "string" &&
-		operation.model.id.length > 0 &&
-		(operation.modelKind !== "override" || validModelOverrideId(operation.model.id)) &&
-		validProviderConfig(operation.providerConfig)
-	);
+	const spec = operation.model.modelSpecV1;
+	if (
+		!validModelProvider(operation.provider) ||
+		typeof operation.model.id !== "string" ||
+		(operation.modelKind === "override" && !validModelOverrideId(operation.model.id)) ||
+		!validProviderConfig(operation.providerConfig) ||
+		spec === undefined ||
+		spec.providerId !== operation.provider ||
+		spec.modelId !== operation.model.id
+	) {
+		return false;
+	}
+	try {
+		modelSpecV1ToOmpModelRecord(spec);
+		return true;
+	} catch {
+		return false;
+	}
 }
 function parseModelItemId(
 	itemId: string,
@@ -1674,6 +1696,12 @@ async function validateModels(modelPath: string, config: PrimeConfigParserResult
 		if (loaded.status !== "ok") throw new ModelValidationError("invalid staged models");
 		const registry = new ModelRegistry(auth, modelPath);
 		if (registry.getError()) throw new ModelValidationError("invalid staged registry");
+		for (const operation of config.models) {
+			if (!validModelOperation(operation)) continue;
+			const runnable = modelSpecV1ToOmpModelRecord(operation.model.modelSpecV1);
+			if (registry.find(runnable.provider, runnable.id) === undefined)
+				throw new ModelValidationError("staged model is missing from registry");
+		}
 	} finally {
 		auth.close();
 	}

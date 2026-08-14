@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { primeModelRecordToModelSpecV1 } from "../../config/model-spec-v1";
 import type {
 	ApplyOnlySecretTable,
 	PrimeConfigOperation,
@@ -58,6 +59,7 @@ const MODEL_FIELDS = new Set([
 	"omitMaxOutputTokens",
 	"headers",
 	"compat",
+	"authRef",
 ]);
 
 const PROVIDER_FIELDS = new Set([
@@ -719,6 +721,22 @@ function normalizeCost(
 		cacheWrite: value.cacheWrite as number,
 	};
 }
+function normalizeModelSpec(
+	provider: string,
+	modelId: string,
+	modelValue: Record<string, unknown>,
+	sourceRef: string,
+	losses: PrimeImportLoss[],
+): PrimeNormalizedModel["modelSpecV1"] {
+	try {
+		return primeModelRecordToModelSpecV1({ ...modelValue, provider, id: modelId });
+	} catch {
+		// The whole model is dropped downstream, so the loss names the model rather
+		// than guessing which field the converter rejected.
+		losses.push(loss("models-invalid-value", "models", sourceRef, `${provider}.models.${modelId}`));
+		return undefined;
+	}
+}
 
 function normalizeModel(
 	provider: string,
@@ -747,6 +765,8 @@ function normalizeModel(
 		losses.push(loss("models-invalid-value", "models", sourceRef, `${provider}.models.id`));
 		return undefined;
 	}
+	const modelSpecV1 = normalizeModelSpec(provider, modelValue.id, modelValue, sourceRef, losses);
+
 	const cost =
 		modelValue.cost !== undefined
 			? normalizeCost(modelValue.cost, sourceRef, `${provider}.models.${modelValue.id}.cost`, losses)
@@ -777,6 +797,7 @@ function normalizeModel(
 			: undefined;
 	const model: PrimeNormalizedModel = {
 		id: modelValue.id,
+		...(modelSpecV1 ? { modelSpecV1 } : {}),
 		...(typeof modelValue.name === "string" && modelValue.name.length > 0 ? { name: modelValue.name } : {}),
 		...(api ? { api } : {}),
 		...(typeof baseUrl === "string" && baseUrl.length > 0 ? { baseUrl } : {}),
@@ -809,6 +830,7 @@ function normalizeModel(
 		losses.push(loss("models-invalid-value", "models", sourceRef, `${provider}.models.${modelValue.id}.input`));
 	if (
 		modelValue.contextWindow !== undefined &&
+		modelValue.contextWindow !== null &&
 		!(typeof modelValue.contextWindow === "number" && modelValue.contextWindow > 0)
 	)
 		losses.push(
@@ -843,11 +865,13 @@ const OVERRIDE_FIELDS = new Set([
 	"reasoning",
 	"thinkingLevelMap",
 	"input",
+	"supportsTools",
 	"cost",
 	"contextWindow",
 	"maxTokens",
 	"headers",
 	"compat",
+	"authRef",
 ]);
 
 function normalizeOverride(
@@ -888,7 +912,21 @@ function normalizeOverride(
 				`providers.${provider}.modelOverrides.${overrideId}.reasoning`,
 			),
 		);
-	if (value.contextWindow !== undefined && (typeof value.contextWindow !== "number" || value.contextWindow <= 0))
+	if (value.supportsTools !== undefined && typeof value.supportsTools !== "boolean")
+		losses.push(
+			loss(
+				"models-invalid-value",
+				"models",
+				sourceRef,
+				`providers.${provider}.modelOverrides.${overrideId}.supportsTools`,
+			),
+		);
+
+	if (
+		value.contextWindow !== undefined &&
+		value.contextWindow !== null &&
+		(typeof value.contextWindow !== "number" || value.contextWindow <= 0)
+	)
 		losses.push(
 			loss(
 				"models-invalid-value",
@@ -963,10 +1001,14 @@ function normalizeOverride(
 		losses.push(
 			loss("models-invalid-value", "models", sourceRef, `providers.${provider}.modelOverrides.${overrideId}.input`),
 		);
+	const modelSpecV1 = normalizeModelSpec(provider, overrideId, value, sourceRef, losses);
+
 	return {
 		id: overrideId,
 		...(typeof value.name === "string" && value.name.length > 0 ? { name: value.name } : {}),
 		...(typeof value.reasoning === "boolean" ? { reasoning: value.reasoning } : {}),
+		...(typeof value.supportsTools === "boolean" ? { supportsTools: value.supportsTools } : {}),
+		...(modelSpecV1 ? { modelSpecV1 } : {}),
 		...(thinking ? { thinking } : {}),
 		...(Array.isArray(value.input) && value.input.every(item => item === "text" || item === "image")
 			? { input: value.input }
