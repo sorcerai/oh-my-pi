@@ -380,6 +380,29 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	} as ModelSpec<Api>);
 }
 
+/** Resolve an exact selector from a persisted model-change entry, including optional upstream routing. */
+export function resolvePersistedModelSelector(
+	selector: string,
+	availableModels: Model<Api>[],
+): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+	const exact = availableModels.find(model => formatModelString(model) === selector);
+	if (exact) return { model: exact };
+	const routing = splitUpstreamRouting(selector);
+	const parsed = parseModelString(routing?.base ?? selector, {
+		allowMaxSuffix: true,
+		allowAutoAlias: true,
+		isLiteralModelId: (provider, id) => availableModels.some(model => model.provider === provider && model.id === id),
+	});
+	if (!parsed) return undefined;
+	const model = availableModels.find(
+		candidate => candidate.provider === parsed.provider && candidate.id === parsed.id,
+	);
+	if (!model) return undefined;
+	if (!routing) return { model, thinkingLevel: parsed.thinkingLevel };
+	if (!supportsUpstreamRouting(model)) return undefined;
+	return { model: applyUpstreamRouting(model, routing.upstream), thinkingLevel: parsed.thinkingLevel };
+}
+
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
 type ModelsWithProviderIndex = readonly Model<Api>[] & {
 	[kProviderModelIndex]?: Map<string, Model<Api> | null>;

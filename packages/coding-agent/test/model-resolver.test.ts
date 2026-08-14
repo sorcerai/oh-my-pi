@@ -20,6 +20,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolvePersistedModelSelector,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1851,6 +1852,53 @@ describe("extractExplicitThinkingSelector", () => {
 describe("provider routing selector (@upstream)", () => {
 	const openRouterOnly = (model: Model<Api> | undefined): string[] | undefined =>
 		(model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting?.only;
+
+	test("restores an exact routed selector", () => {
+		const result = resolvePersistedModelSelector("openrouter/z-ai/glm-4.7@cerebras", allModels);
+
+		expect(result?.model.id).toBe("z-ai/glm-4.7");
+		expect(result?.model.provider).toBe("openrouter");
+		expect(openRouterOnly(result?.model)).toEqual(["cerebras"]);
+	});
+
+	test("rejects persisted routing for a non-aggregator model", () => {
+		expect(resolvePersistedModelSelector("openai/gpt-4o@cerebras", allModels)).toBeUndefined();
+	});
+
+	test("does not fuzzy-match a missing persisted selector", () => {
+		expect(resolvePersistedModelSelector("openrouter/glm-4.7", allModels)).toBeUndefined();
+		expect(parseModelPattern("openrouter/glm-4.7", allModels).model?.id).toBe("z-ai/glm-4.7");
+	});
+
+	test("restores direct and routed thinking suffixes", () => {
+		const direct = resolvePersistedModelSelector("anthropic/claude-sonnet-4-5:high", allModels);
+		expect(direct?.model).toBe(mockModels[0]);
+		expect(direct?.thinkingLevel).toBe(Effort.High);
+
+		const routed = resolvePersistedModelSelector("openrouter/z-ai/glm-4.7@cerebras:max", allModels);
+		expect(routed?.model.id).toBe("z-ai/glm-4.7");
+		expect(routed?.thinkingLevel).toBe(Effort.Max);
+		expect(openRouterOnly(routed?.model)).toEqual(["cerebras"]);
+	});
+
+	test("restores an exact non-aggregator model id ending in @slug", () => {
+		const vertexModel: Model<"anthropic-messages"> = buildModel({
+			id: "claude-opus-4-8@default",
+			name: "Claude Opus 4.8",
+			api: "anthropic-messages",
+			provider: "google-vertex",
+			baseUrl: "https://us-aiplatform.googleapis.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+			contextWindow: 200000,
+			maxTokens: 32000,
+		});
+
+		const result = resolvePersistedModelSelector("google-vertex/claude-opus-4-8@default", [vertexModel]);
+
+		expect(result?.model).toBe(vertexModel);
+	});
 
 	test("pins an OpenRouter model to one upstream via @slug", () => {
 		const result = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", allModels);
