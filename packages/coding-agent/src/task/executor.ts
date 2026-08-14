@@ -41,7 +41,12 @@ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prom
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
+import {
+	type CreateAgentSessionOptions,
+	createAgentSession,
+	discoverAuthStorage,
+	loadCliExtensionProviders,
+} from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
@@ -1931,6 +1936,7 @@ async function driveSessionToYield(
 		}
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
+		const requiresYield = session.model?.api !== "pi-antigravity-bridge";
 
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
@@ -2009,7 +2015,7 @@ async function driveSessionToYield(
 		// injected turns just multiply the failure noise; the teardown reap
 		// still cancels and awaits their jobs before worktree capture.
 		let asyncPendingNoticeSent = false;
-		while (!abortSignal.aborted) {
+		while (requiresYield && !abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
 				// Ladder exhausted / terminal model error: classified below
@@ -2910,6 +2916,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry.refreshInBackground();
 			} else {
 				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
+			}
+			checkAbort();
+			// Child sessions receive only the parent-discovered extension paths. Load
+			// their provider registrations before resolving `modelOverride`, otherwise
+			// a forwarded extension provider cannot be selected for the child.
+			if (options.preloadedExtensionPaths !== undefined) {
+				await awaitAbortable(
+					loadCliExtensionProviders(modelRegistry, subagentSettings, worktree ?? cwd, {
+						disableExtensionDiscovery: true,
+						additionalExtensionPaths: options.preloadedExtensionPaths,
+					}),
+				);
 			}
 			checkAbort();
 

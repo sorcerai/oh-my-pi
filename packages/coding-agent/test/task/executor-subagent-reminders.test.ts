@@ -44,6 +44,7 @@ function createMockSession(
 		emit: (event: AgentSessionEvent) => void;
 		state: { messages: AssistantMessage[] };
 	}) => void | Promise<void>,
+	model: AgentSession["model"] = undefined,
 ): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const state = { messages: [] as AssistantMessage[] };
@@ -56,7 +57,7 @@ function createMockSession(
 	const session = {
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
-		model: undefined,
+		model,
 		extensionRunner: undefined,
 		sessionManager: {
 			appendSessionInit: () => {},
@@ -599,14 +600,42 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.thinkingLevel).toBe(Effort.High);
 	});
+
+	it("does not re-prompt the plain-text Pi bridge", async () => {
+		const prompts: string[] = [];
+		const session = createMockSession(
+			({ text, emit, state }) => {
+				prompts.push(text);
+				const assistant = createAssistantStopMessage("plain bridge result");
+				state.messages.push(assistant);
+				emit({ type: "message_end", message: assistant });
+			},
+			{ api: "pi-antigravity-bridge" } as AgentSession["model"],
+		);
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "pi-bridge-without-tool-calls",
+		});
+
+		expect(prompts).toEqual(["do work"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("plain bridge result");
+	});
+
 	it("fails after 3 reminders when yield is never called for a structured task", async () => {
 		const prompts: string[] = [];
-		const session = createMockSession(({ text, promptIndex, emit, state }) => {
-			prompts.push(text);
-			const assistant = createAssistantStopMessage(promptIndex === 1 ? "did work" : "still no yield");
-			state.messages.push(assistant);
-			emit({ type: "message_end", message: assistant });
-		});
+		const session = createMockSession(
+			({ text, promptIndex, emit, state }) => {
+				prompts.push(text);
+				const assistant = createAssistantStopMessage(promptIndex === 1 ? "did work" : "still no yield");
+				state.messages.push(assistant);
+				emit({ type: "message_end", message: assistant });
+			},
+			{ api: "openai-completions", supportsTools: false } as AgentSession["model"],
+		);
 
 		mockCreateAgentSession(session);
 
@@ -615,6 +644,7 @@ describe("runSubprocess yield reminders", () => {
 			id: "subagent-3",
 			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
 		});
+
 		expect(prompts).toHaveLength(4);
 		expect(result.exitCode).toBe(1);
 		expect(result.aborted).toBe(false);
