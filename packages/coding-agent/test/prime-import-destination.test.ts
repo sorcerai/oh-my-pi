@@ -5,9 +5,11 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { parsePrimeConfig } from "../src/import/prime/config-parser";
 import {
 	applyPrimeDestination,
 	type PrimeDestinationApplyResult,
@@ -17,8 +19,10 @@ import {
 } from "../src/import/prime/destination";
 import type {
 	PrimeConfigParserResult,
+	PrimeImportSourceDiscovery,
 	PrimeNormalizedCredentialOperation,
 	PrimeNormalizedModelOperation,
+	PrimeSourceFile,
 	PrimeSourceSnapshot,
 } from "../src/import/prime/types";
 import { ApplyOnlySecretTable } from "../src/import/prime/types";
@@ -52,6 +56,56 @@ async function sourceSnapshot(root: string): Promise<PrimeSourceSnapshot> {
 		treeEntries: [],
 	};
 }
+function addFixtureModelSpec(operation: PrimeNormalizedModelOperation): PrimeNormalizedModelOperation {
+	if (operation.model.modelSpecV1 !== undefined) return operation;
+	if (typeof operation.provider !== "string" || typeof operation.model.id !== "string") return operation;
+	return {
+		...operation,
+		model: {
+			...operation.model,
+			modelSpecV1: {
+				version: 1,
+				providerId: operation.provider,
+				modelId: operation.model.id,
+				...(operation.model.supportsTools === undefined ? {} : { supportsToolUse: operation.model.supportsTools }),
+				...(operation.model.contextWindow === undefined ? {} : { contextLength: operation.model.contextWindow }),
+			},
+		},
+	} as PrimeNormalizedModelOperation;
+}
+function parseModelConfig(content: string): PrimeConfigParserResult {
+	const sourceRef = "global/models.json";
+	const file: PrimeSourceFile = {
+		kind: "file",
+		domain: "models",
+		sourceRef,
+		canonicalPath: `/prime/${sourceRef}`,
+		mode: 0o600,
+		mtimeMs: 1,
+		size: Buffer.byteLength(content),
+		sha256: "0".repeat(64),
+		contentBase64: Buffer.from(content, "utf8").toString("base64"),
+	};
+	const { contentBase64: _contentBase64, ...metadata } = file;
+	const discovery: PrimeImportSourceDiscovery = {
+		snapshot: {
+			schemaVersion: 1,
+			files: [metadata],
+			snapshotId: "snapshot-1",
+			sourceRoot: "/prime",
+			cwd: "/project",
+			sessionRoot: "/prime/sessions",
+			maxFileBytes: 1_000_000,
+			maxTotalBytes: 1_000_000,
+			maxEntries: 100,
+			treeEntries: [],
+		},
+		inventory: { records: [file], files: [file], excluded: [] },
+		losses: [],
+	};
+	return parsePrimeConfig(discovery);
+}
+
 function config(overrides: Partial<PrimeConfigParserResult> = {}): PrimeConfigParserResult {
 	const secretTable = new ApplyOnlySecretTable();
 	return {
@@ -65,12 +119,28 @@ function config(overrides: Partial<PrimeConfigParserResult> = {}): PrimeConfigPa
 		...overrides,
 	};
 }
+
 function input(
 	snapshot: PrimeSourceSnapshot,
 	overrides: Partial<PrimeConfigParserResult> = {},
 	candidates: PrimeDestinationInput["skills"]["candidates"] = [],
+	hydrateModels = true,
 ): PrimeDestinationInput {
-	return { snapshot, config: config(overrides), skills: { candidates, losses: [] } };
+	const models = hydrateModels ? overrides.models?.map(addFixtureModelSpec) : overrides.models;
+	const operations = hydrateModels
+		? overrides.operations?.map(operation =>
+				operation.kind === "models" ? addFixtureModelSpec(operation) : operation,
+			)
+		: overrides.operations;
+	return {
+		snapshot,
+		config: config({
+			...overrides,
+			...(models === undefined ? {} : { models }),
+			...(operations === undefined ? {} : { operations }),
+		}),
+		skills: { candidates, losses: [] },
+	};
 }
 function credential(provider: string, id: string): PrimeNormalizedCredentialOperation {
 	return {
@@ -88,6 +158,117 @@ afterEach(async () => {
 });
 
 describe("prime destination planning and apply", () => {
+	it("hydrates parsed Prime models through OMP projection and persists authRef and extensions", async () => {
+		const root = await temp(),
+			snapshot = await sourceSnapshot(root),
+			agentDir = path.join(root, "omp"),
+			parsed = parseModelConfig(
+				JSON.stringify({
+					providers: {
+						local: {
+							baseUrl: "http://local",
+							auth: "none",
+							models: [
+								{
+									id: "model",
+									api: "openai-completions",
+									authRef: "provider:local",
+									supportsTools: false,
+									contextWindow: 4096,
+									primeOnlyMetadata: { source: "prime" },
+								},
+							],
+						},
+					},
+				}),
+			),
+			operation = parsed.models[0];
+		expect(operation?.model.modelSpecV1).toMatchObject({
+			providerId: "local",
+			modelId: "model",
+			authRef: "provider:local",
+			supportsToolUse: false,
+			contextLength: 4096,
+			extensions: { prime: { primeOnlyMetadata: { source: "prime" } } },
+		});
+		const value = input(snapshot, parsed),
+			plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd }),
+			applied = await applyPrimeDestination(plan, value);
+		expect(applied.report.items.find(item => item.itemId === "model:local:definition:model")?.outcome).toBe(
+			"imported",
+		);
+		const text = await fs.readFile(plan.destination.modelsPath, "utf8"),
+			serialized = YAML.parse(text) as {
+				providers: { local: { models: Array<Record<string, unknown>> } };
+			},
+			model = serialized.providers.local.models[0];
+		expect(model).toMatchObject({
+			id: "model",
+			authRef: "provider:local",
+			supportsTools: false,
+			contextWindow: 4096,
+			extensions: { prime: { primeOnlyMetadata: { source: "prime" } } },
+		});
+	});
+	it("persists an explicit null context window and keeps it null in the runtime model", async () => {
+		const root = await temp(),
+			snapshot = await sourceSnapshot(root),
+			agentDir = path.join(root, "omp"),
+			parsed = parseModelConfig(
+				JSON.stringify({
+					providers: {
+						local: {
+							baseUrl: "http://local",
+							api: "openai-responses",
+							auth: "none",
+							models: [{ id: "gpt-5.4", contextWindow: null }],
+						},
+					},
+				}),
+			),
+			value = input(snapshot, parsed),
+			plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd }),
+			applied = await applyPrimeDestination(plan, value);
+		expect(applied.report.items.find(item => item.itemId === "model:local:definition:gpt-5.4")?.outcome).toBe(
+			"imported",
+		);
+		const serialized = YAML.parse(await fs.readFile(plan.destination.modelsPath, "utf8")) as {
+				providers: { local: { models: Array<Record<string, unknown>> } };
+			},
+			persisted = serialized.providers.local.models[0];
+		if (!persisted) throw new Error("Expected the imported model in models.yml");
+		expect(Object.hasOwn(persisted, "contextWindow")).toBe(true);
+		expect(persisted.contextWindow).toBeNull();
+
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			const registry = new ModelRegistry(auth, plan.destination.modelsPath);
+			expect(registry.getError()).toBeUndefined();
+			expect(registry.find("local", "gpt-5.4")?.contextWindow).toBeNull();
+		} finally {
+			auth.close();
+		}
+	});
+	it("loses malformed model authRef operations instead of importing under provider auth", async () => {
+		const root = await temp(),
+			snapshot = await sourceSnapshot(root),
+			agentDir = path.join(root, "omp"),
+			parsed = parseModelConfig(
+				JSON.stringify({
+					providers: {
+						local: {
+							models: [{ id: "model", authRef: "sk-live-secret" }],
+						},
+					},
+				}),
+			);
+		expect(parsed.models[0]?.model.modelSpecV1).toBeUndefined();
+		const plan = await planPrimeDestination(input(snapshot, parsed, [], false), { agentDir, cwd: snapshot.cwd });
+		expect(plan.items.find(item => item.itemId === "model:local:definition:model")).toMatchObject({
+			outcome: "lost",
+			lossCodes: ["models-invalid-value"],
+		});
+	});
 	it("keeps dry-run byte-pure, including an absent agent directory", async () => {
 		const root = await temp(),
 			snapshot = await sourceSnapshot(root),
@@ -318,6 +499,47 @@ describe("prime destination planning and apply", () => {
 			}),
 		);
 		expect(entry && (await validatePrimeDestinationRollbackEntry(entry, plan.destination))).toBe(true);
+	});
+	it("adds explicit null context length to an existing model when ModelSpecV1 owns the field", async () => {
+		const root = await temp(),
+			snapshot = await sourceSnapshot(root),
+			agentDir = path.join(root, "omp"),
+			modelsPath = path.join(agentDir, "models.yml");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.writeFile(
+			modelsPath,
+			"providers:\n  local:\n    baseUrl: http://existing\n    api: openai-completions\n    auth: none\n    models:\n      - id: gpt-5.4\n        name: GPT-5.4\n",
+		);
+		const operation: PrimeNormalizedModelOperation = {
+				kind: "models",
+				modelKind: "definition",
+				provider: "local",
+				model: {
+					id: "gpt-5.4",
+					modelSpecV1: {
+						version: 1,
+						providerId: "local",
+						modelId: "gpt-5.4",
+						contextLength: null,
+					},
+				},
+				sourceRefs: ["global/models.json"],
+			},
+			value = input(snapshot, { models: [operation], operations: [operation] }),
+			plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd });
+		expect(plan.items.find(item => item.itemId === "model:local:definition:gpt-5.4")?.outcome).toBe("planned");
+
+		const applied = await applyPrimeDestination(plan, value),
+			parsed = YAML.parse(await fs.readFile(modelsPath, "utf8")) as {
+				providers: { local: { models: Array<Record<string, unknown>> } };
+			},
+			model = parsed.providers.local.models[0];
+		expect(applied.report.items.find(item => item.itemId === "model:local:definition:gpt-5.4")?.outcome).toBe(
+			"imported",
+		);
+		if (!model) throw new Error("Expected the existing model in models.yml");
+		expect(Object.hasOwn(model, "contextWindow")).toBe(true);
+		expect(model.contextWindow).toBeNull();
 	});
 
 	it("keeps the prior models file intact when atomic publication fails", async () => {
@@ -707,7 +929,7 @@ describe("prime destination planning and apply", () => {
 		expect(await fs.stat(agentDir).catch(() => undefined)).toBeUndefined();
 	});
 
-	it("continues configuration-only apply when staged models are invalid", async () => {
+	it("skips invalid model operations while applying valid configuration", async () => {
 		const root = await temp();
 		const snapshot = await sourceSnapshot(root);
 		const agentDir = path.join(root, "omp");
@@ -724,7 +946,11 @@ describe("prime destination planning and apply", () => {
 			modelKind: "definition",
 			provider: "local",
 			providerConfig: { api: "openai-completions", auth: "none", baseUrl: "http://local" },
-			model: { id: "two", api: "openai-completions" },
+			model: {
+				id: "two",
+				api: "openai-completions",
+				modelSpecV1: { version: 1, providerId: "local", modelId: "two" },
+			},
 			sourceRefs: ["global/models.json"],
 		};
 		const setting = {
@@ -733,26 +959,20 @@ describe("prime destination planning and apply", () => {
 			values: { hideThinkingBlock: true },
 			sourceRefs: ["global/settings.json"],
 		};
-		const strictValue = input(snapshot, {
-			effectiveSettings: setting.values,
-			settings: [setting],
-			models: [invalidModel, validModel],
-			operations: [invalidModel, validModel, setting],
-		});
-		const strictPlan = await planPrimeDestination(strictValue, { agentDir, cwd: snapshot.cwd });
-		const refused = await applyPrimeDestination(strictPlan, strictValue);
-		expect(refused.report.losses).toContainEqual(
-			expect.objectContaining({ code: "destination-apply-failed", domain: "config" }),
+		const strictValue = input(
+			snapshot,
+			{
+				effectiveSettings: setting.values,
+				settings: [setting],
+				models: [invalidModel, validModel],
+				operations: [invalidModel, validModel, setting],
+			},
+			[],
+			false,
 		);
-		await expect(fs.stat(path.join(agentDir, "config.yml"))).rejects.toThrow();
+		const plan = await planPrimeDestination(strictValue, { agentDir, cwd: snapshot.cwd });
+		const applied = await applyPrimeDestination(plan, strictValue);
 
-		const value: PrimeDestinationInput = { ...strictValue, allowModelLosses: true };
-		const plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd });
-		const applied = await applyPrimeDestination(plan, value);
-
-		expect(applied.report.losses).toContainEqual(
-			expect.objectContaining({ code: "models-invalid-value", domain: "models" }),
-		);
 		expect(applied.report.losses.some(loss => loss.code === "destination-apply-failed")).toBe(false);
 		expect(applied.report.items).toEqual(
 			expect.arrayContaining([

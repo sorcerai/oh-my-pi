@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added local provider and exact OAuth credential references, including pinned same-account refresh without sibling rotation.
+
 ## [17.3.2] - 2026-08-13
 
 ### Fixed

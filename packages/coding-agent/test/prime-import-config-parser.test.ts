@@ -286,6 +286,68 @@ describe("parsePrimeConfig", () => {
 		});
 		expect(model?.providerApiKey).toEqual({ classification: "env_or_literal_ref" });
 	});
+	it("emits a Prime ModelSpecV1 before normalization and keeps safe unknown fields namespaced", () => {
+		const result = parse([
+			models(
+				JSON.stringify({
+					providers: {
+						prime: {
+							models: [
+								{
+									id: "model",
+									authRef: "provider:prime",
+									supportsTools: false,
+									contextWindow: 4096,
+									primeOnlyMetadata: { tier: "local", labels: ["safe"] },
+									headers: { Authorization: "not-serialized" },
+								},
+							],
+						},
+					},
+				}),
+			),
+		]);
+		expect(result.models[0]?.model.modelSpecV1).toEqual({
+			version: 1,
+			providerId: "prime",
+			modelId: "model",
+			authRef: "provider:prime",
+			supportsToolUse: false,
+			contextLength: 4096,
+			extensions: {
+				prime: {
+					primeOnlyMetadata: { tier: "local", labels: ["safe"] },
+				},
+			},
+		});
+		expect(result.losses).toContainEqual(
+			expect.objectContaining({ code: "models-unknown-field", path: "prime.models.primeOnlyMetadata" }),
+		);
+		expect(JSON.stringify(result)).not.toContain("not-serialized");
+	});
+	it("accepts explicit null context windows for definitions and overrides without false losses", () => {
+		const result = parse([
+			models(
+				JSON.stringify({
+					providers: {
+						local: {
+							models: [{ id: "definition", contextWindow: null }, { id: "absent" }],
+							modelOverrides: { override: { contextWindow: null } },
+						},
+					},
+				}),
+			),
+		]);
+		const definition = result.models.find(item => item.model.id === "definition");
+		const absent = result.models.find(item => item.model.id === "absent");
+		const override = result.models.find(item => item.modelKind === "override");
+		expect(definition?.model.modelSpecV1).toMatchObject({ contextLength: null });
+		expect(Object.hasOwn(definition?.model.modelSpecV1 ?? {}, "contextLength")).toBe(true);
+		expect(Object.hasOwn(absent?.model.modelSpecV1 ?? {}, "contextLength")).toBe(false);
+		expect(override?.model.modelSpecV1).toMatchObject({ contextLength: null });
+		expect(result.losses).toEqual([]);
+	});
+
 	it("normalizes every header value without exposing command, env, or literal bytes", () => {
 		const result = parse([
 			models(

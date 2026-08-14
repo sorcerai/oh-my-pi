@@ -2,8 +2,10 @@
  * Custom model/provider config file handle and validation.
  */
 
+import { parseLocalAuthRef } from "@oh-my-pi/pi-ai";
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { ConfigFile } from "./config-file";
+import { ompModelRecordToModelSpecV1 } from "./model-spec-v1";
 import type { ModelsConfig, ProviderAuthMode, ProviderDiscovery } from "./models-config-schema";
 import { getModelsConfigSchema } from "./models-config-schema-bundle";
 
@@ -11,8 +13,9 @@ export type ProviderValidationMode = "models-config" | "runtime-register";
 
 export interface ProviderValidationModel {
 	id: string;
+	authRef?: string;
 	api?: Api;
-	contextWindow?: number;
+	contextWindow?: number | null;
 	supportsTools?: boolean;
 	maxTokens?: number;
 }
@@ -39,6 +42,15 @@ export function validateProviderConfiguration(
 ): void {
 	const hasProviderApi = !!config.api;
 	const models = config.models;
+	for (const model of models) {
+		if (model.authRef === undefined) continue;
+		try {
+			parseLocalAuthRef(model.authRef, providerName);
+		} catch {
+			throw new Error(`Provider ${providerName}, model ${model.id}: invalid "authRef".`);
+		}
+	}
+	const modelsHaveAuthRefs = models.length > 0 && models.every(model => model.authRef !== undefined);
 
 	if (models.length === 0) {
 		if (mode === "models-config") {
@@ -65,13 +77,13 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
+				? !config.apiKey && !config.oauthConfigured && !modelsHaveAuthRefs
+				: !config.apiKey && (config.auth ?? "apiKey") !== "none" && !modelsHaveAuthRefs;
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"
-					? `Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`
-					: `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`,
+					? `Provider ${providerName}: "apiKey", "oauth", or authRef on every model is required when defining models.`
+					: `Provider ${providerName}: "apiKey" or authRef on every custom model is required unless auth is "none".`,
 			);
 		}
 	}
@@ -92,13 +104,32 @@ export function validateProviderConfiguration(
 			throw new Error(`Provider ${providerName}: model missing "id"`);
 		}
 		if (mode === "models-config") {
-			if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0) {
+			if (modelDef.contextWindow !== undefined && modelDef.contextWindow !== null && modelDef.contextWindow <= 0) {
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
 			}
 			if (modelDef.maxTokens !== undefined && modelDef.maxTokens <= 0) {
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid maxTokens`);
 			}
 		}
+	}
+}
+
+/**
+ * Reject a model entry the interchange converter cannot represent, naming the
+ * offending provider and model the way every other check in this file does.
+ * The converter's own message is appended but never carries field values.
+ */
+function assertConvertibleModelRecord(
+	record: Record<string, unknown>,
+	providerName: string,
+	modelId: string,
+	label: string,
+): void {
+	try {
+		ompModelRecordToModelSpecV1(record);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : "record is not convertible";
+		throw new Error(`Provider ${providerName}, ${label} ${modelId}: ${detail}`);
 	}
 }
 
@@ -109,6 +140,17 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 	const providers = config.providers ?? {};
 	for (const providerName in providers) {
 		const providerConfig = providers[providerName];
+		for (const modelDef of providerConfig.models ?? []) {
+			assertConvertibleModelRecord({ ...modelDef, provider: providerName }, providerName, modelDef.id, "model");
+		}
+		for (const [modelId, override] of Object.entries(providerConfig.modelOverrides ?? {})) {
+			assertConvertibleModelRecord(
+				{ ...override, provider: providerName, id: modelId },
+				providerName,
+				modelId,
+				"model override",
+			);
+		}
 		validateProviderConfiguration(
 			providerName,
 			{

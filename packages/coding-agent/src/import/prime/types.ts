@@ -1,3 +1,5 @@
+import type { ModelSpecV1 } from "@oh-my-pi/pi-catalog";
+
 export const PRIME_IMPORT_SCHEMA_VERSION = 1 as const;
 
 export type PrimeImportDomain =
@@ -165,6 +167,7 @@ export interface PrimeNormalizedThinking {
 
 export interface PrimeNormalizedModel {
 	readonly id: string;
+	readonly modelSpecV1?: ModelSpecV1;
 	readonly name?: string;
 	readonly api?: string;
 	readonly baseUrl?: string;
@@ -188,10 +191,12 @@ export interface PrimeNormalizedModel {
 
 export interface PrimeNormalizedModelOverride {
 	readonly id: string;
+	readonly modelSpecV1?: ModelSpecV1;
 	readonly name?: string;
 	readonly reasoning?: boolean;
 	readonly thinking?: PrimeNormalizedThinking;
 	readonly input?: readonly ("text" | "image")[];
+	readonly supportsTools?: boolean;
 	readonly cost?: Readonly<{
 		readonly input?: number;
 		readonly output?: number;
@@ -203,7 +208,6 @@ export interface PrimeNormalizedModelOverride {
 	readonly maxTokens?: number;
 	readonly compat?: Readonly<Record<string, PrimeJsonValue>>;
 }
-
 interface PrimeNormalizedModelOperationBase extends PrimeImportOperation {
 	readonly kind: "models";
 	readonly provider: string;
