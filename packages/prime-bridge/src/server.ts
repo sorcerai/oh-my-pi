@@ -677,6 +677,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 									error instanceof PayloadTooLargeError ? 413 : 400,
 								);
 							}
+							// originSessionId arrives in the request body, so without this a
+							// worker could forge the apparent sender of any mesh message.
+							if (!grantAllowsSession(auth.principal, message.originSessionId)) return forbidden();
 							const existingMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
 							if (existingMessage !== null) {
 								if (!sameMessage(existingMessage, message))
@@ -763,6 +766,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 									error instanceof PayloadTooLargeError ? 413 : 400,
 								);
 							}
+							// peek=false claims messages, so an ungated targetId lets a caller
+							// drain another target's inbox and deny delivery, not merely read it.
+							if (!grantAllowsSession(auth.principal, targetId)) return forbidden();
 							return jsonResponse(
 								store.listInbox({
 									targetId,
@@ -803,6 +809,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 									error instanceof PayloadTooLargeError ? 413 : 400,
 								);
 							}
+							// Same claim semantics as /v1/inbox?peek=false, so the same gate.
+							if (!grantAllowsSession(auth.principal, waitRequest.targetId)) return forbidden();
 							const existing = store.claimInboxForTarget(waitRequest.targetId, waitRequest.from);
 							if (existing !== null) return jsonResponse(existing);
 							if (waiters.length >= MAX_ACTIVE_WAITERS)

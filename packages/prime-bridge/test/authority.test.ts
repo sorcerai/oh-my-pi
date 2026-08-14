@@ -165,3 +165,54 @@ describe("bridge authority proofs", () => {
 		expect((await mcp(server, UNGRANTED_SESSION, "plain-legacy-token")).status).not.toBe(403);
 	});
 });
+
+describe("mesh identity", () => {
+	const message = (originSessionId: string) => ({
+		meshMessageId: `mid-${originSessionId}`,
+		idempotencyKey: `idem-${originSessionId}`,
+		originSessionId,
+		originHarness: "omp",
+		targetHarness: "omp",
+		targetId: "peer-x",
+		body: "hello",
+		projectRoot: "/tmp",
+		createdAt: new Date(0).toISOString(),
+	});
+
+	const post = (server: PrimeBridgeServer, route: string, token: string, body: unknown) =>
+		fetch(`${server.url}${route}`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+
+	it("refuses a worker that forges the sending session", async () => {
+		const server = await createServer();
+
+		expect((await post(server, "/v1/messages", WORKER_TOKEN, message(UNGRANTED_SESSION))).status).toBe(403);
+		expect((await post(server, "/v1/messages", WORKER_TOKEN, message(GRANTED_SESSION))).status).not.toBe(403);
+		// A supervisor is not session-scoped and may speak for any origin.
+		expect((await post(server, "/v1/messages", SUPERVISOR_TOKEN, message(UNGRANTED_SESSION))).status).not.toBe(403);
+	});
+
+	it("refuses a worker that reads or drains another target's inbox", async () => {
+		const server = await createServer();
+		const inbox = (target: string, peek: string, token: string) =>
+			v1(server, `/v1/inbox?targetId=${encodeURIComponent(target)}&peek=${peek}`, token);
+
+		for (const peek of ["true", "false"]) {
+			expect((await inbox(UNGRANTED_SESSION, peek, WORKER_TOKEN)).status).toBe(403);
+			expect((await inbox(GRANTED_SESSION, peek, WORKER_TOKEN)).status).toBe(200);
+			expect((await inbox(UNGRANTED_SESSION, peek, SUPERVISOR_TOKEN)).status).toBe(200);
+		}
+	});
+
+	it("refuses a worker that waits on another target", async () => {
+		const server = await createServer();
+		// Only the refusal is asserted: a permitted /v1/wait parks until a message
+		// arrives or its timeout elapses, so the positive case cannot be checked
+		// without blocking the suite on it.
+		const refused = await post(server, "/v1/wait", WORKER_TOKEN, { targetId: UNGRANTED_SESSION, timeoutMs: 0 });
+		expect(refused.status).toBe(403);
+	});
+});
