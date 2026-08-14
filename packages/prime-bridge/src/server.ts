@@ -7,6 +7,7 @@ import {
 	provisionPrimeBridgeConfig,
 	resolveBridgeConfig,
 } from "./config";
+import { type BridgeGrant, grantAllowsSession, parseBridgeGrants, primaryBridgeToken } from "./grants";
 import { handleMcpRequest } from "./mcp/server";
 import { CommandResultUncertainError, PrimeDaemonClient } from "./prime/client";
 import { BridgeStore, type ClaimedInboxMessage, type ClaimedPendingMessage } from "./store";
@@ -54,6 +55,50 @@ function unauthorized(): Response {
 
 function forbidden(): Response {
 	return new Response("Forbidden", { status: 403 });
+}
+
+/**
+ * An authenticated caller.
+ *
+ * Every route resolves one of these before doing any work, so authority has a
+ * single place to live. Fields are derived server-side only: nothing a caller
+ * puts in a request may widen what its principal is allowed to do.
+ */
+export interface BridgePrincipal extends BridgeGrant {
+	readonly token: string;
+}
+
+type AuthenticationOutcome =
+	| { readonly ok: true; readonly principal: BridgePrincipal }
+	| { readonly ok: false; readonly response: Response };
+
+const BEARER_PREFIX = "Bearer ";
+
+/**
+ * Resolve the caller of a request, or the response that rejects it.
+ *
+ * The token file is re-read per request so an out-of-band rotation or a grant
+ * change takes effect without a restart. A malformed file authenticates nobody:
+ * the parse throws and every caller is rejected, rather than degrading to a
+ * permissive default.
+ */
+async function authenticate(request: Request, config: PrimeBridgeConfig): Promise<AuthenticationOutcome> {
+	const origin = request.headers.get("origin");
+	if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin))
+		return { ok: false, response: forbidden() };
+	let grants: ReadonlyMap<string, BridgeGrant>;
+	try {
+		grants = parseBridgeGrants(await fs.readFile(config.tokenFile, "utf8"));
+	} catch {
+		return { ok: false, response: unauthorized() };
+	}
+	const authorization = request.headers.get("authorization");
+	if (authorization === null || !authorization.startsWith(BEARER_PREFIX))
+		return { ok: false, response: unauthorized() };
+	const presented = authorization.slice(BEARER_PREFIX.length);
+	const grant = presented.length === 0 ? undefined : grants.get(presented);
+	if (grant === undefined) return { ok: false, response: unauthorized() };
+	return { ok: true, principal: { ...grant, token: presented } };
 }
 
 function resolveOptions(options: PrimeBridgeServerOptions): PrimeBridgeConfig {
@@ -322,7 +367,10 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 	const config = resolveOptions(options);
 	await fs.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
 	await fs.chmod(config.stateDir, 0o700);
-	const token = await ensureBridgeToken(config.tokenFile);
+	// ensureBridgeToken returns the file's contents, which for a grant file is the
+	// whole JSON document rather than a usable credential. Resolve the advertised
+	// token through the grant map so `server.token` is always a token that works.
+	const token = primaryBridgeToken(parseBridgeGrants(await ensureBridgeToken(config.tokenFile)));
 	if (options.token !== undefined && options.token !== token)
 		throw new Error("provided bridge token does not match token file");
 	const auditTokenIdentifier = tokenIdentifier(token);
@@ -549,16 +597,11 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 				if (server === undefined || request.headers.get("host") !== new URL(server.url).host)
 					return new Response("Bad Request", { status: 400 });
 				if (url.pathname === "/v1/tool-host") {
-					const origin = request.headers.get("origin");
-					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
-					let currentToken: string;
-					try {
-						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
-					} catch {
-						return unauthorized();
-					}
-					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
-						return unauthorized();
+					const auth = await authenticate(request, config);
+					if (!auth.ok) return auth.response;
+					// Registering a tool host publishes tools into every session, so it is
+					// administrative regardless of which sessions the caller was granted.
+					if (auth.principal.role !== "supervisor") return forbidden();
 					if (
 						bunServer.upgrade(request, {
 							data: { awaitingPong: false, closed: false, queue: [], queuedBytes: 0, backpressured: false },
@@ -568,16 +611,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 					return new Response("Upgrade failed", { status: 400 });
 				}
 				if (url.pathname.startsWith("/mcp/")) {
-					const origin = request.headers.get("origin");
-					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
-					let currentToken: string;
-					try {
-						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
-					} catch {
-						return unauthorized();
-					}
-					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
-						return unauthorized();
+					const auth = await authenticate(request, config);
+					if (!auth.ok) return auth.response;
 					const prefix = "/mcp/v1/sessions/";
 					if (!url.pathname.startsWith(prefix)) return new Response("Not Found", { status: 404 });
 					let sessionId: string;
@@ -586,21 +621,26 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 					} catch {
 						return new Response("Not Found", { status: 404 });
 					}
+					// Scope comes from the grant, never from the path. A worker naming a
+					// session it was not granted is refused before the tool host sees it.
+					if (!grantAllowsSession(auth.principal, sessionId)) return forbidden();
 					return handleMcpRequest(request, toolHost, sessionId);
 				}
 				if (url.pathname === "/health") return jsonResponse({ ok: true });
 
 				if (url.pathname.startsWith("/v1/")) {
-					const origin = request.headers.get("origin");
-					if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin)) return forbidden();
-					let currentToken: string;
-					try {
-						currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
-					} catch {
-						return unauthorized();
+					const auth = await authenticate(request, config);
+					if (!auth.ok) return auth.response;
+					// Administrative surfaces. The messaging routes below (/v1/messages,
+					// /v1/inbox, /v1/wait*) stay open to any authenticated principal:
+					// scoping a worker's reachable targets is a separate decision, tracked
+					// as its own issue, and gating them here would sever the mesh.
+					if (
+						(url.pathname === "/v1/peers" && request.method === "POST") ||
+						(url.pathname === "/v1/audit" && request.method === "GET")
+					) {
+						if (auth.principal.role !== "supervisor") return forbidden();
 					}
-					if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
-						return unauthorized();
 					try {
 						const custom = await options.handleV1?.(request);
 						if (custom !== null && custom !== undefined) return custom;
@@ -611,9 +651,14 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 							} catch (error) {
 								return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
 							}
-							if (targetHarness === "omp") return jsonResponse(store.listOmpPeers());
+							// Discovery is scoped like every other surface: an unscoped worker
+							// would otherwise enumerate every session id on the machine. Peer
+							// ids share the namespace grants name, so the same gate applies.
+							const visible = <TPeer extends { id: string }>(entries: readonly TPeer[]): TPeer[] =>
+								entries.filter(entry => grantAllowsSession(auth.principal, entry.id));
+							if (targetHarness === "omp") return jsonResponse(visible(store.listOmpPeers()));
 							const peers = options.peers ? await options.peers() : await primeClient.listSessions();
-							return jsonResponse(mapPrimePeers(peers));
+							return jsonResponse(visible(mapPrimePeers(peers)));
 						}
 						if (url.pathname === "/v1/peers" && request.method === "POST") {
 							try {
@@ -637,6 +682,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 									error instanceof PayloadTooLargeError ? 413 : 400,
 								);
 							}
+							// originSessionId arrives in the request body, so without this a
+							// worker could forge the apparent sender of any mesh message.
+							if (!grantAllowsSession(auth.principal, message.originSessionId)) return forbidden();
 							const existingMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
 							if (existingMessage !== null) {
 								if (!sameMessage(existingMessage, message))
@@ -723,6 +771,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 									error instanceof PayloadTooLargeError ? 413 : 400,
 								);
 							}
+							// peek=false claims messages, so an ungated targetId lets a caller
+							// drain another target's inbox and deny delivery, not merely read it.
+							if (!grantAllowsSession(auth.principal, targetId)) return forbidden();
 							return jsonResponse(
 								store.listInbox({
 									targetId,
@@ -763,6 +814,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 									error instanceof PayloadTooLargeError ? 413 : 400,
 								);
 							}
+							// Same claim semantics as /v1/inbox?peek=false, so the same gate.
+							if (!grantAllowsSession(auth.principal, waitRequest.targetId)) return forbidden();
 							const existing = store.claimInboxForTarget(waitRequest.targetId, waitRequest.from);
 							if (existing !== null) return jsonResponse(existing);
 							if (waiters.length >= MAX_ACTIVE_WAITERS)
