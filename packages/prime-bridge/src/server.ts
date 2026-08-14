@@ -7,6 +7,7 @@ import {
 	provisionPrimeBridgeConfig,
 	resolveBridgeConfig,
 } from "./config";
+import { type BridgeGrant, parseBridgeGrants, primaryBridgeToken } from "./grants";
 import { handleMcpRequest } from "./mcp/server";
 import { CommandResultUncertainError, PrimeDaemonClient } from "./prime/client";
 import { BridgeStore, type ClaimedInboxMessage, type ClaimedPendingMessage } from "./store";
@@ -63,7 +64,7 @@ function forbidden(): Response {
  * single place to live. Fields are derived server-side only: nothing a caller
  * puts in a request may widen what its principal is allowed to do.
  */
-export interface BridgePrincipal {
+export interface BridgePrincipal extends BridgeGrant {
 	readonly token: string;
 }
 
@@ -71,25 +72,33 @@ type AuthenticationOutcome =
 	| { readonly ok: true; readonly principal: BridgePrincipal }
 	| { readonly ok: false; readonly response: Response };
 
+const BEARER_PREFIX = "Bearer ";
+
 /**
  * Resolve the caller of a request, or the response that rejects it.
  *
- * The token file is re-read per request so an out-of-band rotation takes effect
- * without a restart.
+ * The token file is re-read per request so an out-of-band rotation or a grant
+ * change takes effect without a restart. A malformed file authenticates nobody:
+ * the parse throws and every caller is rejected, rather than degrading to a
+ * permissive default.
  */
 async function authenticate(request: Request, config: PrimeBridgeConfig): Promise<AuthenticationOutcome> {
 	const origin = request.headers.get("origin");
 	if (origin !== null && origin.length > 0 && !config.allowedOrigins.includes(origin))
 		return { ok: false, response: forbidden() };
-	let currentToken: string;
+	let grants: ReadonlyMap<string, BridgeGrant>;
 	try {
-		currentToken = (await fs.readFile(config.tokenFile, "utf8")).trim();
+		grants = parseBridgeGrants(await fs.readFile(config.tokenFile, "utf8"));
 	} catch {
 		return { ok: false, response: unauthorized() };
 	}
-	if (currentToken.length === 0 || request.headers.get("authorization") !== `Bearer ${currentToken}`)
+	const authorization = request.headers.get("authorization");
+	if (authorization === null || !authorization.startsWith(BEARER_PREFIX))
 		return { ok: false, response: unauthorized() };
-	return { ok: true, principal: { token: currentToken } };
+	const presented = authorization.slice(BEARER_PREFIX.length);
+	const grant = presented.length === 0 ? undefined : grants.get(presented);
+	if (grant === undefined) return { ok: false, response: unauthorized() };
+	return { ok: true, principal: { ...grant, token: presented } };
 }
 
 function resolveOptions(options: PrimeBridgeServerOptions): PrimeBridgeConfig {
@@ -358,7 +367,10 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 	const config = resolveOptions(options);
 	await fs.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
 	await fs.chmod(config.stateDir, 0o700);
-	const token = await ensureBridgeToken(config.tokenFile);
+	// ensureBridgeToken returns the file's contents, which for a grant file is the
+	// whole JSON document rather than a usable credential. Resolve the advertised
+	// token through the grant map so `server.token` is always a token that works.
+	const token = primaryBridgeToken(parseBridgeGrants(await ensureBridgeToken(config.tokenFile)));
 	if (options.token !== undefined && options.token !== token)
 		throw new Error("provided bridge token does not match token file");
 	const auditTokenIdentifier = tokenIdentifier(token);
