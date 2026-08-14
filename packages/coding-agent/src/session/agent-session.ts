@@ -102,7 +102,11 @@ import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCos
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	type ResolvedModelRoleValue,
+	resolvePersistedModelSelector,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -7106,9 +7110,25 @@ export class AgentSession {
 		return true;
 	}
 
+	/**
+	 * True when the session's effective model changed, including routing-only
+	 * differences (`provider/id@upstream`) that {@link modelsAreEqual} misses.
+	 * The forward switch and the session-switch restore/rollback must agree on
+	 * this — it gates `model_changed` emission and advisor executor-guidance
+	 * rebuilds (routing-only changes alter what the executor receives). Note it
+	 * deliberately ignores API-shape differences; provider-session resets have
+	 * their own stricter check (`shouldResetProviderState`).
+	 */
+	#modelIdentityChanged(current: Model | undefined, next: Model): boolean {
+		return (
+			!modelsAreEqual(current, next) ||
+			(current !== undefined && formatModelStringWithRouting(current) !== formatModelStringWithRouting(next))
+		);
+	}
+
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
-		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		const isChanging = this.#modelIdentityChanged(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {
@@ -7116,6 +7136,7 @@ export class AgentSession {
 			}
 		}
 		this.agent.setModel(model);
+		if (isChanging) this.#advisors.onPrimaryModelChanged();
 		// Model mutations driven through ModelControls (explicit /model, prewalk
 		// hand-offs, retry-fallback, model cycling) funnel through this method,
 		// so this is the single point that notifies subscribers (ACP config
@@ -7716,25 +7737,25 @@ export class AgentSession {
 				const availableModels = this.#modelRegistry.getAvailable();
 				let match: Model | undefined;
 				for (const targetModelStr of targetModelStrings) {
-					const slashIdx = targetModelStr.indexOf("/");
-					if (slashIdx <= 0) continue;
-					const provider = targetModelStr.slice(0, slashIdx);
-					const modelId = targetModelStr.slice(slashIdx + 1);
-					match = availableModels.find(m => m.provider === provider && m.id === modelId);
+					match = resolvePersistedModelSelector(targetModelStr, availableModels)?.model;
 					if (match) break;
 				}
 				if (match) {
 					const currentModel = this.model;
+					const identityChanged = this.#modelIdentityChanged(currentModel, match);
+					// Provider-session resets are stricter than the identity check: they
+					// also key on api-shape differences, which #modelIdentityChanged
+					// deliberately ignores.
 					const shouldResetProviderState =
 						switchingToDifferentSession ||
-						(currentModel !== undefined &&
-							(currentModel.provider !== match.provider ||
-								currentModel.id !== match.id ||
-								currentModel.api !== match.api));
+						(currentModel !== undefined && (identityChanged || currentModel.api !== match.api));
 					if (shouldResetProviderState) {
 						await this.#setModelWithProviderSessionReset(match);
 					} else {
 						this.agent.setModel(match);
+						if (identityChanged) {
+							this.#advisors.onPrimaryModelChanged();
+						}
 					}
 				}
 			}
@@ -7858,7 +7879,8 @@ export class AgentSession {
 			if (previousModel) {
 				const rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
-				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
+				modelRolledBack = this.#modelIdentityChanged(rolledBackModel, previousModel);
+				if (modelRolledBack) this.#advisors.onPrimaryModelChanged();
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);

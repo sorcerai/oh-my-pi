@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -19,8 +20,8 @@ describe("AgentSession model persistence", () => {
 	let session: AgentSession | undefined;
 	let sessionSettings: Settings;
 	// Auth storage (SQLite DB) and the model registry are immutable across these tests:
-	// every test sets the same anthropic runtime key and only ever reads the bundled model
-	// list. Building them once avoids ~12 SQLite opens + registry constructions.
+	// every test uses the same anthropic/openrouter runtime keys and only ever reads the
+	// bundled model list. Building them once avoids ~12 SQLite opens + registry constructions.
 	let sharedDir: TempDir;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -29,6 +30,7 @@ describe("AgentSession model persistence", () => {
 		sharedDir = TempDir.createSync("@pi-model-persistence-shared-");
 		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
 		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
 		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 	});
 
@@ -354,6 +356,28 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(defaultModel.id);
 	});
 
+	it("does not fuzzy-match a missing persisted model selector", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeRoleModelSession(
+			modelValue(defaultModel),
+			"anthropic/claude-opus",
+			"temporary",
+		);
+		const created = await createSession({
+			initialModel: getAnthropicModelOrThrow("claude-sonnet-4-6"),
+			modelRoles: { default: modelValue(defaultModel) },
+			persist: true,
+		});
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+		expect(created.session.model?.id).toBe(defaultModel.id);
+
+		await created.session.dispose();
+		session = undefined;
+		const resumed = await createStartupResumeSession(targetSessionFile);
+		expect(resumed.session.model?.id).toBe(defaultModel.id);
+	});
+
 	it("falls back to the saved default model when startup role restore is unavailable", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const settingsFallbackModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -382,6 +406,68 @@ describe("AgentSession model persistence", () => {
 		const result = await createStartupResumeSession(targetSessionFile, settings);
 
 		expect(result.session.model?.id).toBe(defaultModel.id);
+	});
+
+	it("persists and restores routed temporary models across session resumes", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const routedSelector = "openrouter/z-ai/glm-4.7@cerebras";
+		const routedModel = parseModelPattern(routedSelector, sharedModelRegistry.getAvailable()).model;
+		if (!routedModel) throw new Error(`Expected routed model ${routedSelector} to resolve`);
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: modelValue(defaultModel) },
+			persist: true,
+		});
+
+		await created.session.setModelTemporary(routedModel);
+		expect(created.session.sessionManager.buildSessionContext().models.temporary).toBe(routedSelector);
+
+		const targetSessionFile = await writeRoleModelSession(modelValue(defaultModel), routedSelector, "temporary");
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(routedSelector);
+
+		await created.session.dispose();
+		session = undefined;
+		const resumed = await createStartupResumeSession(targetSessionFile);
+		expect(formatModelStringWithRouting(resumed.session.model!)).toBe(routedSelector);
+	});
+
+	it("persists and resumes a routed initial SDK model", async () => {
+		const routedSelector = "openrouter/z-ai/glm-4.7@cerebras";
+		const routedModel = parseModelPattern(routedSelector, sharedModelRegistry.getAvailable()).model;
+		if (!routedModel) throw new Error(`Expected routed model ${routedSelector} to resolve`);
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "routed-initial"));
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			model: routedModel,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = created.session;
+		expect(created.session.sessionManager.buildSessionContext().models.default).toBe(routedSelector);
+		await created.session.sessionManager.ensureOnDisk();
+		await created.session.sessionManager.flush();
+		const sessionFile = created.session.sessionFile;
+		if (!sessionFile) throw new Error("Expected routed initial session file");
+
+		await created.session.dispose();
+		session = undefined;
+		const reopenedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "routed-reopen"));
+		expect(reopenedManager.buildSessionContext().models.default).toBe(routedSelector);
+		await reopenedManager.close();
+		const resumed = await createStartupResumeSession(sessionFile);
+		expect(formatModelStringWithRouting(resumed.session.model!)).toBe(routedSelector);
 	});
 
 	it("restores a temporary model when switching sessions", async () => {
