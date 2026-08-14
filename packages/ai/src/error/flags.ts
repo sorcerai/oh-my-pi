@@ -1,4 +1,4 @@
-import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
+import { $env, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
 import type { Api, AssistantMessage } from "../types";
 import { AwsCredentialsError } from "./aws";
 import {
@@ -377,7 +377,11 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		// not match TRANSIENT_TRANSPORT_PATTERN, so flag it explicitly to keep
 		// AIError.retriable from treating the temporary cap as terminal.
 		if (reason === "CONCURRENT_LIMIT") kinds |= Flag.Transient;
-		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
+		const usesResponsesApi =
+			api === "openai-responses" ||
+			api === "openai-codex-responses" ||
+			(api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0");
+		if (usesResponsesApi && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
 

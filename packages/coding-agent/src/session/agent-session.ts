@@ -7176,7 +7176,7 @@ export class AgentSession {
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
 		const currentModel = this.model;
 		if (currentModel?.api !== "openai-codex-responses") return;
-		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
+		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel, true);
 	}
 
 	#resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void {
@@ -7189,11 +7189,15 @@ export class AgentSession {
 
 	#resetCurrentResponsesProviderSession(reason: string): void {
 		const currentModel = this.model;
-		if (currentModel?.api !== "openai-responses" && currentModel?.api !== "openai-codex-responses") {
+		if (
+			currentModel?.api !== "openai-responses" &&
+			currentModel?.api !== "openai-codex-responses" &&
+			currentModel?.api !== "openrouter"
+		) {
 			return;
 		}
 
-		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
+		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel, true);
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 		logger.debug("Reset Responses provider session after stale replay error", {
 			provider: currentModel.provider,
@@ -7226,29 +7230,37 @@ export class AgentSession {
 		}
 	}
 
-	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
+	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model, force = false): void {
+		if (!force && currentModel.api === nextModel.api && !this.#modelIdentityChanged(currentModel, nextModel)) return;
 		const providerKeys = new Set<string>();
 		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
 			providerKeys.add("openai-codex-responses");
 		}
-		if (currentModel.api === "openai-responses") {
+		if (currentModel.api === "openai-responses" || currentModel.api === "openrouter") {
 			providerKeys.add(`openai-responses:${currentModel.provider}`);
 		}
-		if (nextModel.api === "openai-responses") {
+		if (nextModel.api === "openai-responses" || nextModel.api === "openrouter") {
 			providerKeys.add(`openai-responses:${nextModel.provider}`);
 		}
 
 		// `openai-completions` sessions are keyed `openai-completions:<provider>:<resolvedBaseUrl>:<modelId>`
 		// and cache backend-specific decisions (strict-tools disable scopes, reasoning-effort
-		// fallbacks). The resolved request base URL can differ from the catalog `model.baseUrl`
+		// fallbacks). OpenRouter dynamically dispatches through this transport when
+		// PI_OPENROUTER_RESPONSES=0, so treat it as both effective transport families.
+		// The resolved request base URL can differ from the catalog `model.baseUrl`
 		// (Moonshot env override, Alibaba Coding Plan enterprise URL, Azure deployment URL),
 		// so evict by provider prefix when the user moves away from that completions backend.
 		let completionsPrefixToEvict: string | undefined;
-		if (currentModel.api === "openai-completions") {
+		if (currentModel.api === "openai-completions" || currentModel.api === "openrouter") {
 			const currentScope = `${currentModel.provider}:${currentModel.baseUrl ?? ""}`;
 			const nextScope =
-				nextModel.api === "openai-completions" ? `${nextModel.provider}:${nextModel.baseUrl ?? ""}` : undefined;
-			if (currentScope !== nextScope) {
+				nextModel.api === "openai-completions" || nextModel.api === "openrouter"
+					? `${nextModel.provider}:${nextModel.baseUrl ?? ""}`
+					: undefined;
+			const sameModelRoutingChanged =
+				modelsAreEqual(currentModel, nextModel) &&
+				formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(nextModel);
+			if (currentScope !== nextScope || sameModelRoutingChanged) {
 				completionsPrefixToEvict = `openai-completions:${currentModel.provider}:`;
 			}
 		}

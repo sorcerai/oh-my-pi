@@ -2970,6 +2970,61 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("restarts OpenRouter Responses state before retrying stale item-id replay errors", async () => {
+		const model = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!model) throw new Error("Expected bundled OpenRouter model to exist");
+
+		const staleReplayError = "Item with id 'rs_stale' not found.";
+		const mock = createMockModel({
+			responses: [{ throw: staleReplayError }, { content: ["Recovered after OpenRouter state reset"] }],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const closeSpy = vi.fn();
+		const stateKey = `openai-responses:${model.provider}`;
+		session.providerSessionState.set(stateKey, { close: closeSpy } satisfies ProviderSessionState);
+
+		const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
+		Bun.env.PI_OPENROUTER_RESPONSES = "1";
+		try {
+			await session.prompt("Retry stale OpenRouter replay");
+			await session.waitForIdle();
+
+			expect(closeSpy).toHaveBeenCalledTimes(1);
+			expect(session.providerSessionState.has(stateKey)).toBe(false);
+			expect(getLastAssistantMessage(session).content).toContainEqual({
+				type: "text",
+				text: "Recovered after OpenRouter state reset",
+			});
+		} finally {
+			if (previousOpenRouterResponses === undefined) {
+				delete Bun.env.PI_OPENROUTER_RESPONSES;
+			} else {
+				Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
+			}
+		}
+	});
+
 	it("restarts Responses provider state before retrying Zero Data Retention errors", async () => {
 		const model = getBundledModel("openai", "gpt-4o-mini");
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");

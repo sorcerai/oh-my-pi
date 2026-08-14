@@ -94,12 +94,27 @@ describe("error-id classification", () => {
 		expect(id).toBe(503);
 	});
 
-	it("gates stale Responses replay errors by API", () => {
+	it("gates stale Responses replay errors by effective API", () => {
 		const text = "Item with id 'resp_123' not found";
-		const anthropicId = AIError.classify(new Error(text), "anthropic-messages");
-		const responsesId = AIError.classify(new Error(text), "openai-responses");
-		expect(AIError.is(anthropicId, AIError.Flag.StaleResponsesItem)).toBe(false);
-		expect(AIError.is(responsesId, AIError.Flag.StaleResponsesItem)).toBe(true);
+		const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
+		try {
+			const anthropicId = AIError.classify(new Error(text), "anthropic-messages");
+			const responsesId = AIError.classify(new Error(text), "openai-responses");
+			delete Bun.env.PI_OPENROUTER_RESPONSES;
+			const openRouterResponsesId = AIError.classify(new Error(text), "openrouter");
+			Bun.env.PI_OPENROUTER_RESPONSES = "0";
+			const openRouterCompletionsId = AIError.classify(new Error(text), "openrouter");
+			expect(AIError.is(anthropicId, AIError.Flag.StaleResponsesItem)).toBe(false);
+			expect(AIError.is(responsesId, AIError.Flag.StaleResponsesItem)).toBe(true);
+			expect(AIError.is(openRouterResponsesId, AIError.Flag.StaleResponsesItem)).toBe(true);
+			expect(AIError.is(openRouterCompletionsId, AIError.Flag.StaleResponsesItem)).toBe(false);
+		} finally {
+			if (previousOpenRouterResponses === undefined) {
+				delete Bun.env.PI_OPENROUTER_RESPONSES;
+			} else {
+				Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
+			}
+		}
 	});
 
 	it("walks causes and preserves carried ids", () => {
