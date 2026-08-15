@@ -737,3 +737,37 @@ describe("configured tool-host session id", () => {
 		expect(socket.sent.find(frame => frame.type === "register")?.sessionId).toBe("generated-session-id");
 	});
 });
+
+describe("published tool surface", () => {
+	const fleetSession = () =>
+		session(
+			"session-a",
+			new Map([
+				["read", tool("read", async () => ({ content: [] }))],
+				["grep", tool("grep", async () => ({ content: [] }))],
+				["fleet_spawn", tool("fleet_spawn", async () => ({ content: [] }))],
+			]),
+		);
+	const published = (socket: { sent: SentFrame[] }): string[] => {
+		const register = socket.sent.find(frame => frame.type === "register");
+		return ((register?.tools ?? []) as { name: string }[]).map(entry => entry.name).sort();
+	};
+
+	it("publishes only allowTools when defaults are off", async () => {
+		const { socket } = await started(fleetSession(), {
+			allowTools: ["fleet_spawn"],
+			defaultTools: false,
+		});
+
+		// A caller holding omp:supervise may call any registered tool, so publishing
+		// a file-reading tool to it is publishing the filesystem — including the
+		// token file that authenticates the tool host itself.
+		expect(published(socket)).toEqual(["fleet_spawn"]);
+	});
+
+	it("still unions the defaults when not disabled", async () => {
+		const { socket } = await started(fleetSession(), { allowTools: ["fleet_spawn"] });
+
+		expect(published(socket)).toEqual(["fleet_spawn", "grep", "read"]);
+	});
+});
