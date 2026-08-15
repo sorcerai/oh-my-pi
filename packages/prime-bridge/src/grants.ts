@@ -110,3 +110,39 @@ export function primaryBridgeToken(grants: ReadonlyMap<string, BridgeGrant>): st
 	}
 	throw new BridgeGrantError("token file defines no supervisor token");
 }
+
+/** Serialize grants for the token file. Stable key order keeps diffs readable. */
+export function serializeBridgeGrants(grants: ReadonlyMap<string, BridgeGrant>): string {
+	const record: Record<string, BridgeGrant> = {};
+	for (const token of [...grants.keys()].sort()) {
+		const grant = grants.get(token);
+		if (grant !== undefined) record[token] = grant;
+	}
+	return `${JSON.stringify(record, null, 2)}\n`;
+}
+
+/** Returns a copy with one grant added or replaced. */
+export function withBridgeGrant(
+	grants: ReadonlyMap<string, BridgeGrant>,
+	token: string,
+	grant: BridgeGrant,
+): ReadonlyMap<string, BridgeGrant> {
+	return new Map([...grants, [token, grant]]);
+}
+
+/**
+ * Returns a copy with every grant for one principal removed.
+ *
+ * Refuses to remove the last supervisor: a token file with no supervisor cannot
+ * advertise a working token, which would lock the operator out of their own bridge.
+ */
+export function withoutBridgePrincipal(
+	grants: ReadonlyMap<string, BridgeGrant>,
+	principal: string,
+): ReadonlyMap<string, BridgeGrant> {
+	const remaining = new Map([...grants].filter(([, grant]) => grant.principal !== principal));
+	if (remaining.size === grants.size) throw new BridgeGrantError(`no grant exists for principal ${principal}`);
+	if (![...remaining.values()].some(grant => grant.role === "supervisor"))
+		throw new BridgeGrantError("refusing to revoke the last supervisor grant");
+	return remaining;
+}
