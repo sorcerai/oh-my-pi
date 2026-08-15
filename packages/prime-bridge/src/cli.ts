@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type PrimeBridgeConfig, resolveBridgeConfig } from "./config";
+import { runGrantCommand } from "./grant-command";
 import { PrimeDaemonClient } from "./prime/client";
 import { type PrimeBridgeLogger, type PrimeBridgeServer, startPrimeBridgeServer } from "./server";
 import { runSessionCommand, type SessionConvertDependencies } from "./session/convert";
@@ -231,7 +232,17 @@ export async function main(
 
 if (import.meta.main) {
 	const commandArgs = Bun.argv.slice(2);
-	if (commandArgs[0] === "session") {
+	if (commandArgs[0] === "grant") {
+		try {
+			process.exitCode = await runGrantCommand(commandArgs, {
+				writeOut: (text: string) => console.log(text),
+				writeErr: (text: string) => console.error(text),
+			});
+		} catch (error) {
+			console.error("Prime bridge grant command failed:", error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
+		}
+	} else if (commandArgs[0] === "session") {
 		try {
 			await runSessionCommand(commandArgs, {
 				writeOut: (text: string) => console.log(text),

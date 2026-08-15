@@ -55,3 +55,24 @@ export async function ensureBridgeToken(tokenFile: string): Promise<string> {
 	await fs.chmod(resolvedPath, 0o600);
 	return published;
 }
+
+/**
+ * Replace a secret file atomically, preserving 0600 and refusing symlinks.
+ *
+ * Used to rewrite the grant file in place. The rename is atomic, so a concurrent
+ * reader sees either the old grants or the new ones and never a partial document.
+ */
+export async function writeSecretFile(filePath: string, contents: string): Promise<void> {
+	const resolvedPath = path.resolve(filePath);
+	await ensurePrivateDirectory(path.dirname(resolvedPath));
+	await rejectSymlink(resolvedPath);
+	const temporaryPath = `${resolvedPath}.${process.pid}.${randomUUID()}.tmp`;
+	try {
+		await fs.writeFile(temporaryPath, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
+		await fs.chmod(temporaryPath, 0o600);
+		await fs.rename(temporaryPath, resolvedPath);
+		await fs.chmod(resolvedPath, 0o600);
+	} finally {
+		await fs.rm(temporaryPath, { force: true });
+	}
+}
