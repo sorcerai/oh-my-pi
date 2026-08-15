@@ -19,7 +19,7 @@ export interface GrantCommandIo {
 
 const USAGE = [
 	"Usage:",
-	"  grant add --principal <name> --role supervisor|worker [--session <id>]... [--token-file <path>]",
+	"  grant add --principal <name> --role supervisor|worker [--session <id>]... [--capability <name>]... [--token-file <path>]",
 	"  grant list [--json] [--token-file <path>]",
 	"  grant revoke --principal <name> [--token-file <path>]",
 ].join("\n");
@@ -91,13 +91,21 @@ export async function runGrantCommand(argv: readonly string[], io: GrantCommandI
 		if (principal === undefined || principal.length === 0) throw new Error("--principal is required");
 		const role = parseRole(optionValue(argv, "--role"));
 		const sessions = optionValues(argv, "--session");
+		const capabilities = optionValues(argv, "--capability");
 		if (role === "worker" && sessions.length === 0)
 			throw new Error("--session is required at least once for a worker grant");
 		if (role === "supervisor" && sessions.length > 0)
 			throw new Error("--session does not apply to a supervisor, which reaches every session");
+		if (role === "supervisor" && capabilities.length > 0)
+			throw new Error("--capability does not apply to a supervisor, which holds every capability");
 
 		const token = `${randomUUID()}${randomUUID()}`;
-		const grants = withBridgeGrant(await readGrants(config.tokenFile), token, { principal, role, sessions });
+		const grants = withBridgeGrant(await readGrants(config.tokenFile), token, {
+			principal,
+			role,
+			sessions,
+			capabilities,
+		});
 		await writeSecretFile(config.tokenFile, serializeBridgeGrants(grants));
 		io.writeOut(token);
 		io.writeErr(
@@ -113,6 +121,7 @@ export async function runGrantCommand(argv: readonly string[], io: GrantCommandI
 			principal: grant.principal,
 			role: grant.role,
 			sessions: grant.sessions,
+			capabilities: grant.capabilities,
 			token: tokenIdentifier(token),
 		}));
 		if (argv.includes("--json")) {

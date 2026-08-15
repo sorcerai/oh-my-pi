@@ -23,6 +23,17 @@ export interface RegisteredTool {
 	readonly inputSchema: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * Tools a session-scoped worker may call without the `omp:supervise`
+ * capability. Every other tool (the fleet lifecycle/apply/verification
+ * surface) is supervisor-only and is denied to a plain worker by the bridge.
+ *
+ * Mirrors `DEFAULT_ALLOWED_TOOLS` in the coding-agent tool-host adapter — the
+ * set of tools the host publishes by default. Kept as the canonical
+ * worker-safe list for the bridge's own gate.
+ */
+export const WORKER_SAFE_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "glob", "web_search"]);
+
 export type ToolHostFrame =
 	| {
 			readonly type: "register";

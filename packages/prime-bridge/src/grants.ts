@@ -20,6 +20,13 @@ export interface BridgeGrant {
 	readonly role: BridgeRole;
 	/** Sessions a worker may address. Ignored for supervisors, who reach every session. */
 	readonly sessions: readonly string[];
+	/**
+	 * Authority axis, independent of session scope. A worker grant holding
+	 * `"omp:supervise"` may call supervisor-only tools *within* its granted
+	 * sessions; it is not an unscoped supervisor. Supervisors hold every
+	 * capability implicitly.
+	 */
+	readonly capabilities: readonly string[];
 }
 
 /** Principal recorded for a legacy bare-token file, which carries full authority. */
@@ -28,6 +35,16 @@ export const LEGACY_PRINCIPAL = "legacy-bare-token" as const;
 const FORBIDDEN_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 
 const DIGEST_PREFIX = "sha256:";
+
+/**
+ * The precise shape `ensureBridgeToken` minted for the historical bare-token
+ * format: two lowercase UUIDs concatenated (72 chars of hex and dashes).
+ * A legacy bare token is recognized by shape alone — any other non-JSON content
+ * is corruption, not a credential, and must fail closed rather than silently
+ * become a full-authority supervisor.
+ */
+const LEGACY_BARE_TOKEN_PATTERN =
+	/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 /** Stable, non-reversible lookup key for a bearer token. */
 export function bridgeTokenDigest(token: string): string {
@@ -46,6 +63,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const prototype = Object.getPrototypeOf(value);
 	return prototype === Object.prototype || prototype === null;
+}
+
+function parseCapabilities(value: unknown): readonly string[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) throw new BridgeGrantError("grant capabilities must be an array of strings");
+	for (const capability of value) {
+		if (typeof capability !== "string" || capability.length === 0)
+			throw new BridgeGrantError("grant capabilities must be non-empty strings");
+	}
+	return [...(value as readonly string[])];
 }
 
 function parseSessions(value: unknown): readonly string[] {
@@ -68,7 +95,12 @@ function parseGrant(value: unknown): BridgeGrant {
 		throw new BridgeGrantError("grant principal must be a non-empty string");
 	if (role !== "supervisor" && role !== "worker")
 		throw new BridgeGrantError('grant role must be "supervisor" or "worker"');
-	return { principal, role, sessions: parseSessions(value.sessions) };
+	return {
+		principal,
+		role,
+		sessions: parseSessions(value.sessions),
+		capabilities: parseCapabilities(value.capabilities),
+	};
 }
 
 /**
@@ -86,13 +118,20 @@ export function parseBridgeGrants(contents: string): ReadonlyMap<string, BridgeG
 	try {
 		parsed = JSON.parse(trimmed);
 	} catch {
-		// Not JSON, so this is the legacy bare-token format.
-		return new Map([[bridgeTokenDigest(trimmed), { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [] }]]);
+		// Not JSON. Only the precise legacy bare-token shape is a credential;
+		// anything else — a truncated grant file, a crash write, hand-editing —
+		// is corruption and authenticates nobody.
+		if (LEGACY_BARE_TOKEN_PATTERN.test(trimmed)) {
+			return new Map([
+				[bridgeTokenDigest(trimmed), { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [], capabilities: [] }],
+			]);
+		}
+		throw new BridgeGrantError("token file is neither a grant object nor a legacy bare token");
 	}
 	if (!isPlainObject(parsed)) {
-		// Valid JSON but not a grant object (a bare quoted string, a number). Treat the
-		// raw text as a token rather than silently accepting an unintended shape.
-		return new Map([[bridgeTokenDigest(trimmed), { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [] }]]);
+		// Valid JSON but not a grant object (a quoted string, a number, an array).
+		// That is not a credential and is never treated as one.
+		throw new BridgeGrantError("token file must be a grant object");
 	}
 
 	const grants = new Map<string, BridgeGrant>();
@@ -111,6 +150,14 @@ export function parseBridgeGrants(contents: string): ReadonlyMap<string, BridgeG
 /** Whether a grant may address one session. Supervisors reach every session. */
 export function grantAllowsSession(grant: BridgeGrant, sessionId: string): boolean {
 	return grant.role === "supervisor" || grant.sessions.includes(sessionId);
+}
+
+/** The capability a principal must hold to call supervisor-only tools. */
+export const OMP_SUPERVISE_CAPABILITY = "omp:supervise" as const;
+
+/** Whether a grant holds one capability. Supervisors hold every capability. */
+export function grantHasCapability(grant: BridgeGrant, capability: string): boolean {
+	return grant.role === "supervisor" || grant.capabilities.includes(capability);
 }
 
 /**

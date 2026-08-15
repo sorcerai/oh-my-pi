@@ -13,14 +13,15 @@ const grantFile = (value: unknown): string => JSON.stringify(value);
 
 describe("bridge grants", () => {
 	it("reads a legacy bare token as one full-authority supervisor", () => {
-		const grants = parseBridgeGrants("  abc123-def456\n");
+		const grants = parseBridgeGrants("  00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000\n");
 
 		// Keyed by digest, never by the token itself.
-		expect([...grants.keys()]).toEqual([bridgeTokenDigest("abc123-def456")]);
-		expect(grants.get(bridgeTokenDigest("abc123-def456"))).toEqual({
+		expect([...grants.keys()]).toEqual([bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000")]);
+		expect(grants.get(bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000"))).toEqual({
 			principal: LEGACY_PRINCIPAL,
 			role: "supervisor",
 			sessions: [],
+			capabilities: [],
 		});
 	});
 
@@ -36,11 +37,13 @@ describe("bridge grants", () => {
 			principal: "omp",
 			role: "supervisor",
 			sessions: [],
+			capabilities: [],
 		});
 		expect(grants.get(bridgeTokenDigest("worker-token"))).toEqual({
 			principal: "cyboflow",
 			role: "worker",
 			sessions: ["sess-a", "sess-b"],
+			capabilities: [],
 		});
 	});
 
@@ -65,6 +68,12 @@ describe("bridge grants", () => {
 		const malformed: string[] = [
 			"",
 			"   ",
+			// Non-JSON that is not the legacy bare-token shape is corruption, never a
+			// supervisor — this is the fail-open the shape check closes.
+			"not a legacy token",
+			"truncated grant file {",
+			"garbage content",
+			"\n",
 			grantFile({}),
 			grantFile({ t: { principal: "omp" } }),
 			grantFile({ t: { principal: "omp", role: "admin" } }),
@@ -76,6 +85,8 @@ describe("bridge grants", () => {
 			grantFile({ "": { principal: "omp", role: "supervisor" } }),
 			grantFile({ t: null }),
 			grantFile({ t: ["omp", "supervisor"] }),
+			'"a-quoted-string-is-not-a-grant"',
+			"42",
 		];
 
 		for (const contents of malformed) {

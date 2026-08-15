@@ -9,7 +9,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
-import type { RegisteredTool } from "../protocol/tool-host";
+import { WORKER_SAFE_TOOLS, type RegisteredTool } from "../protocol/tool-host";
+import { type BridgeGrant, grantHasCapability, OMP_SUPERVISE_CAPABILITY } from "../grants";
 import type { ToolHostServer } from "../tool-host/server";
 import { mapAgentToolError, mapAgentToolResult } from "./result-map";
 
@@ -83,6 +84,16 @@ function toMcpTool(tool: RegisteredTool): Tool {
 	};
 }
 
+/**
+ * A principal may call a tool when it holds `omp:supervise`, or when the tool is
+ * on the worker-safe list. Everything else — the fleet lifecycle/apply/verify
+ * surface — is supervisor-only, and unclassified tools are denied by default.
+ */
+function mayCallTool(principal: BridgeGrant, toolName: string): boolean {
+	if (grantHasCapability(principal, OMP_SUPERVISE_CAPABILITY)) return true;
+	return WORKER_SAFE_TOOLS.has(toolName);
+}
+
 export function validMcpSessionId(sessionId: string): boolean {
 	return sessionId.length > 0 && sessionId.length <= 256 && !sessionId.includes("/") && sessionId.isWellFormed();
 }
@@ -91,6 +102,7 @@ export async function handleMcpRequest(
 	request: Request,
 	toolHost: ToolHostServer,
 	sessionId: string,
+	principal: BridgeGrant,
 ): Promise<Response> {
 	if (!validMcpSessionId(sessionId)) return mcpError(null, MCP_ERROR_SESSION, "invalid MCP session ID");
 
@@ -103,7 +115,7 @@ export async function handleMcpRequest(
 			: mcpError(null, -32700, error instanceof Error ? error.message : String(error), 400);
 	}
 	const requestId = isRecord(parsedBody) ? parsedBody.id : null;
-	const tools = toolHost.registry.getTools(sessionId);
+	const tools = toolHost.registry.getTools(sessionId).filter(tool => mayCallTool(principal, tool.name));
 	if (!toolHost.registry.hasSession(sessionId))
 		return mcpError(requestId, MCP_ERROR_SESSION, "MCP session is unknown or offline");
 	let resultExceeded = false;
@@ -118,6 +130,8 @@ export async function handleMcpRequest(
 		const tool = toolHost.registry.getTool(sessionId, message.params.name);
 		const args = message.params.arguments ?? {};
 		if (tool === undefined) return mapAgentToolError(new Error(`unknown tool: ${message.params.name}`));
+		if (!mayCallTool(principal, message.params.name))
+			return mapAgentToolError(new Error(`tool requires omp:supervise: ${message.params.name}`));
 		const validation = inputValidator.getValidator(tool.inputSchema as unknown as JsonSchemaType)(args);
 		if (!validation.valid) throw new McpError(ErrorCode.InvalidParams, validation.errorMessage);
 		try {

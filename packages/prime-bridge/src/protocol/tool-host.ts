@@ -4,4 +4,5 @@ export {
 	parseToolHostFrame,
 	ToolHostFrameSchema,
 	toolHostFrameSchema,
+	WORKER_SAFE_TOOLS,
 } from "@oh-my-pi/prime-bridge-protocol";

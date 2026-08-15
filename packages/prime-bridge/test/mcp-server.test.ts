@@ -11,6 +11,8 @@ const temporaryDirectories: string[] = [];
 const runningServers: PrimeBridgeServer[] = [];
 
 type Tool = Extract<ToolHostFrame, { type: "register" }>["tools"][number];
+const SUPERVISOR = { principal: "omp", role: "supervisor", sessions: [], capabilities: [] } as const;
+
 type JsonRpcResponse = {
 	jsonrpc: "2.0";
 	id?: number;
@@ -209,6 +211,7 @@ describe("session-scoped MCP Streamable HTTP endpoint", () => {
 			}),
 			server.toolHost,
 			"session-a",
+			SUPERVISOR,
 		);
 		expect(response.status).toBe(200);
 		expect(response.headers.get("content-type")).toContain("text/event-stream");
@@ -224,6 +227,7 @@ describe("session-scoped MCP Streamable HTTP endpoint", () => {
 			}),
 			server.toolHost,
 			"session-a",
+			SUPERVISOR,
 		);
 		requestController.abort();
 		await abortedResponse.body?.cancel();

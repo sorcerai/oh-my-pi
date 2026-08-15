@@ -140,7 +140,7 @@ describe("authenticated bridge HTTP service", () => {
 
 	it("authorizes each request with the current token file value", async () => {
 		const running = await createServer();
-		const rotatedToken = "rotated-token";
+		const rotatedToken = "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000";
 		await fs.writeFile(running.config.tokenFile, rotatedToken, { encoding: "utf8", mode: 0o600 });
 
 		expect(

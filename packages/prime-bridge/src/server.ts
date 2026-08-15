@@ -636,7 +636,7 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 					// Scope comes from the grant, never from the path. A worker naming a
 					// session it was not granted is refused before the tool host sees it.
 					if (!grantAllowsSession(auth.principal, sessionId)) return forbidden();
-					return handleMcpRequest(request, toolHost, sessionId);
+					return handleMcpRequest(request, toolHost, sessionId, auth.principal);
 				}
 				if (url.pathname === "/health") return jsonResponse({ ok: true });
 

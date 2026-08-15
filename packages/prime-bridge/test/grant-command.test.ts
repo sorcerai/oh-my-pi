@@ -61,6 +61,7 @@ describe("grant command", () => {
 			principal: "cyboflow",
 			role: "worker",
 			sessions: ["sess-a", "sess-b"],
+			capabilities: [],
 		});
 		expect(await fs.readFile(file, "utf8")).toContain("cyboflow");
 		// The minted bearer must not be recoverable from the file it authorizes.
@@ -77,14 +78,14 @@ describe("grant command", () => {
 	it("preserves an existing legacy bare token instead of clobbering it", async () => {
 		const file = await tokenFile();
 		await fs.mkdir(path.dirname(file), { recursive: true });
-		await fs.writeFile(file, "legacy-token-still-in-use\n", { mode: 0o600 });
+		await fs.writeFile(file, "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000\n", { mode: 0o600 });
 
 		await run(addWorker(file, "cyboflow", "sess-a"));
 
 		// The running daemon and every existing pointer still hold this token; losing
 		// it here would lock the operator out of their own bridge.
 		const grants = parseBridgeGrants(await fs.readFile(file, "utf8"));
-		expect(grants.get(bridgeTokenDigest("legacy-token-still-in-use"))?.role).toBe("supervisor");
+		expect(grants.get(bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000"))?.role).toBe("supervisor");
 		expect(grants.size).toBe(2);
 	});
 
