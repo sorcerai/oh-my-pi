@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runGrantCommand } from "../src/grant-command";
-import { parseBridgeGrants } from "../src/grants";
+import { bridgeTokenDigest, parseBridgeGrants } from "../src/grants";
 
 const temporaryDirectories: string[] = [];
 
@@ -57,12 +57,14 @@ describe("grant command", () => {
 		if (token === undefined) throw new Error("expected a minted token");
 
 		const grants = parseBridgeGrants(await fs.readFile(file, "utf8"));
-		expect(grants.get(token)).toEqual({
+		expect(grants.get(bridgeTokenDigest(token))).toEqual({
 			principal: "cyboflow",
 			role: "worker",
 			sessions: ["sess-a", "sess-b"],
 		});
 		expect(await fs.readFile(file, "utf8")).toContain("cyboflow");
+		// The minted bearer must not be recoverable from the file it authorizes.
+		expect(await fs.readFile(file, "utf8")).not.toContain(token);
 	});
 
 	it("writes the token file readable only by its owner", async () => {
@@ -82,7 +84,7 @@ describe("grant command", () => {
 		// The running daemon and every existing pointer still hold this token; losing
 		// it here would lock the operator out of their own bridge.
 		const grants = parseBridgeGrants(await fs.readFile(file, "utf8"));
-		expect(grants.get("legacy-token-still-in-use")?.role).toBe("supervisor");
+		expect(grants.get(bridgeTokenDigest("legacy-token-still-in-use"))?.role).toBe("supervisor");
 		expect(grants.size).toBe(2);
 	});
 

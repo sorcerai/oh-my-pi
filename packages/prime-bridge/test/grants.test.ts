@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
+	assertBridgeGrantsHaveSupervisor,
 	BridgeGrantError,
+	bridgeTokenDigest,
 	grantAllowsSession,
 	LEGACY_PRINCIPAL,
 	parseBridgeGrants,
-	primaryBridgeToken,
+	serializeBridgeGrants,
 } from "../src/grants";
 
 const grantFile = (value: unknown): string => JSON.stringify(value);
@@ -13,13 +15,13 @@ describe("bridge grants", () => {
 	it("reads a legacy bare token as one full-authority supervisor", () => {
 		const grants = parseBridgeGrants("  abc123-def456\n");
 
-		expect([...grants.keys()]).toEqual(["abc123-def456"]);
-		expect(grants.get("abc123-def456")).toEqual({
+		// Keyed by digest, never by the token itself.
+		expect([...grants.keys()]).toEqual([bridgeTokenDigest("abc123-def456")]);
+		expect(grants.get(bridgeTokenDigest("abc123-def456"))).toEqual({
 			principal: LEGACY_PRINCIPAL,
 			role: "supervisor",
 			sessions: [],
 		});
-		expect(primaryBridgeToken(grants)).toBe("abc123-def456");
 	});
 
 	it("reads a grant file into per-token principals, roles, and session scope", () => {
@@ -30,13 +32,16 @@ describe("bridge grants", () => {
 			}),
 		);
 
-		expect(grants.get("supervisor-token")).toEqual({ principal: "omp", role: "supervisor", sessions: [] });
-		expect(grants.get("worker-token")).toEqual({
+		expect(grants.get(bridgeTokenDigest("supervisor-token"))).toEqual({
+			principal: "omp",
+			role: "supervisor",
+			sessions: [],
+		});
+		expect(grants.get(bridgeTokenDigest("worker-token"))).toEqual({
 			principal: "cyboflow",
 			role: "worker",
 			sessions: ["sess-a", "sess-b"],
 		});
-		expect(primaryBridgeToken(grants)).toBe("supervisor-token");
 	});
 
 	it("scopes workers to granted sessions while supervisors reach every session", () => {
@@ -46,8 +51,8 @@ describe("bridge grants", () => {
 				work: { principal: "cyboflow", role: "worker", sessions: ["sess-a"] },
 			}),
 		);
-		const supervisor = grants.get("sup");
-		const worker = grants.get("work");
+		const supervisor = grants.get(bridgeTokenDigest("sup"));
+		const worker = grants.get(bridgeTokenDigest("work"));
 		if (supervisor === undefined || worker === undefined) throw new Error("expected both grants");
 
 		expect(grantAllowsSession(supervisor, "sess-a")).toBe(true);
@@ -105,11 +110,20 @@ describe("bridge grants", () => {
 		expect(Object.hasOwn(Object.prototype, "principal")).toBe(false);
 	});
 
-	it("requires a supervisor before advertising a primary token", () => {
+	it("rejects a grant file that defines no supervisor", () => {
 		const workersOnly = parseBridgeGrants(
 			grantFile({ w: { principal: "cyboflow", role: "worker", sessions: ["a"] } }),
 		);
 
-		expect(() => primaryBridgeToken(workersOnly)).toThrow(BridgeGrantError);
+		expect(() => assertBridgeGrantsHaveSupervisor(workersOnly)).toThrow(BridgeGrantError);
+	});
+
+	it("stores no presentable credential on disk", () => {
+		const grants = parseBridgeGrants(grantFile({ "secret-bearer-value": { principal: "omp", role: "supervisor" } }));
+
+		// The point of digest keying: reading the file yields nothing usable as a bearer.
+		expect(serializeBridgeGrants(grants)).not.toContain("secret-bearer-value");
+		expect(grants.has("secret-bearer-value")).toBe(false);
+		expect(grants.has(bridgeTokenDigest("secret-bearer-value"))).toBe(true);
 	});
 });
