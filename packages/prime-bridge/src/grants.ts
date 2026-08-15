@@ -123,7 +123,10 @@ export function parseBridgeGrants(contents: string): ReadonlyMap<string, BridgeG
 		// is corruption and authenticates nobody.
 		if (LEGACY_BARE_TOKEN_PATTERN.test(trimmed)) {
 			return new Map([
-				[bridgeTokenDigest(trimmed), { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [], capabilities: [] }],
+				[
+					bridgeTokenDigest(trimmed),
+					{ principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [], capabilities: [] },
+				],
 			]);
 		}
 		throw new BridgeGrantError("token file is neither a grant object nor a legacy bare token");
@@ -204,6 +207,29 @@ export function withoutBridgePrincipal(
 ): ReadonlyMap<string, BridgeGrant> {
 	const remaining = new Map([...grants].filter(([, grant]) => grant.principal !== principal));
 	if (remaining.size === grants.size) throw new BridgeGrantError(`no grant exists for principal ${principal}`);
+	if (![...remaining.values()].some(grant => grant.role === "supervisor"))
+		throw new BridgeGrantError("refusing to revoke the last supervisor grant");
+	return remaining;
+}
+
+/**
+ * Returns a copy with the single grant matching one display handle removed.
+ *
+ * `grant list` shows a truncated digest, so a handle is matched by prefix against
+ * the full digest key. An ambiguous prefix is refused rather than guessed: picking
+ * one of several matching grants would revoke an authority the operator did not
+ * name. The last-supervisor guard applies here too.
+ */
+export function withoutBridgeGrantHandle(
+	grants: ReadonlyMap<string, BridgeGrant>,
+	handle: string,
+): ReadonlyMap<string, BridgeGrant> {
+	const normalized = handle.startsWith(DIGEST_PREFIX) ? handle : `${DIGEST_PREFIX}${handle}`;
+	const matches = [...grants.keys()].filter(digest => digest.startsWith(normalized));
+	if (matches.length === 0) throw new BridgeGrantError(`no grant matches handle ${handle}`);
+	if (matches.length > 1)
+		throw new BridgeGrantError(`handle ${handle} matches ${matches.length} grants; use a longer one`);
+	const remaining = new Map([...grants].filter(([digest]) => digest !== matches[0]));
 	if (![...remaining.values()].some(grant => grant.role === "supervisor"))
 		throw new BridgeGrantError("refusing to revoke the last supervisor grant");
 	return remaining;

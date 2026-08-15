@@ -78,14 +78,19 @@ describe("grant command", () => {
 	it("preserves an existing legacy bare token instead of clobbering it", async () => {
 		const file = await tokenFile();
 		await fs.mkdir(path.dirname(file), { recursive: true });
-		await fs.writeFile(file, "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000\n", { mode: 0o600 });
+		await fs.writeFile(file, "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000\n", {
+			mode: 0o600,
+		});
 
 		await run(addWorker(file, "cyboflow", "sess-a"));
 
 		// The running daemon and every existing pointer still hold this token; losing
 		// it here would lock the operator out of their own bridge.
 		const grants = parseBridgeGrants(await fs.readFile(file, "utf8"));
-		expect(grants.get(bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000"))?.role).toBe("supervisor");
+		expect(
+			grants.get(bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000"))
+				?.role,
+		).toBe("supervisor");
 		expect(grants.size).toBe(2);
 	});
 
@@ -152,5 +157,113 @@ describe("grant command", () => {
 		const listed = await run(["grant", "list", "--token-file", file]);
 		expect(listed.code).toBe(0);
 		expect(listed.out.join("\n")).toContain("No grants");
+	});
+});
+
+describe("grant command argument safety", () => {
+	it("rejects an unknown or misspelled flag instead of ignoring it", async () => {
+		const file = await tokenFile();
+
+		// The dangerous case: a typo silently drops the authority it was meant to
+		// grant, and the operator is told the mint succeeded.
+		await expect(
+			run(["grant", "add", "--principal", "w", "--role", "worker", "--sesion", "s", "--token-file", file]),
+		).rejects.toThrow(/unknown option "--sesion"/);
+		await expect(
+			run([
+				"grant",
+				"add",
+				"--principal",
+				"w",
+				"--role",
+				"worker",
+				"--session",
+				"s",
+				"--capabilty",
+				"omp:supervise",
+				"--token-file",
+				file,
+			]),
+		).rejects.toThrow(/unknown option "--capabilty"/);
+		await expect(run(["grant", "list", "--verbose", "--token-file", file])).rejects.toThrow(/unknown option/);
+	});
+
+	it("still accepts every documented flag", async () => {
+		const file = await tokenFile();
+
+		const added = await run([
+			"grant",
+			"add",
+			"--principal",
+			"cyboflow",
+			"--role",
+			"worker",
+			"--session",
+			"sess-a",
+			"--capability",
+			"omp:supervise",
+			"--token-file",
+			file,
+		]);
+		expect(added.code).toBe(0);
+		expect((await run(["grant", "list", "--json", "--token-file", file])).code).toBe(0);
+	});
+});
+
+describe("grant revoke by handle", () => {
+	it("retires one grant of a principal that holds several", async () => {
+		const file = await tokenFile();
+		await run(["grant", "add", "--principal", "omp", "--role", "supervisor", "--token-file", file]);
+		await run(addWorker(file, "cyboflow", "sess-a"));
+		await run(addWorker(file, "cyboflow", "sess-b"));
+
+		const rows = JSON.parse((await run(["grant", "list", "--json", "--token-file", file])).out.join("")) as {
+			principal: string;
+			sessions: string[];
+			token: string;
+		}[];
+		const doomed = rows.find(row => row.sessions.includes("sess-a"));
+		if (doomed === undefined) throw new Error("expected the sess-a grant");
+
+		expect((await run(["grant", "revoke", "--token", doomed.token, "--token-file", file])).code).toBe(0);
+
+		const after = JSON.parse((await run(["grant", "list", "--json", "--token-file", file])).out.join("")) as {
+			principal: string;
+			sessions: string[];
+		}[];
+		// The principal's other grant survives, which principal-wide revoke cannot do.
+		expect(after.filter(row => row.principal === "cyboflow").map(row => row.sessions)).toEqual([["sess-b"]]);
+	});
+
+	it("refuses an ambiguous, unknown, or last-supervisor handle", async () => {
+		const file = await tokenFile();
+		await run(["grant", "add", "--principal", "omp", "--role", "supervisor", "--token-file", file]);
+		await run(addWorker(file, "cyboflow", "sess-a"));
+
+		await expect(run(["grant", "revoke", "--token", "sha256:doesnotexist", "--token-file", file])).rejects.toThrow(
+			/no grant matches handle/,
+		);
+		// A bare prefix matches every digest, so it must be refused rather than guessed.
+		await expect(run(["grant", "revoke", "--token", "sha256:", "--token-file", file])).rejects.toThrow(
+			/matches 2 grants/,
+		);
+		const rows = JSON.parse((await run(["grant", "list", "--json", "--token-file", file])).out.join("")) as {
+			role: string;
+			token: string;
+		}[];
+		const supervisor = rows.find(row => row.role === "supervisor");
+		if (supervisor === undefined) throw new Error("expected a supervisor row");
+		await expect(run(["grant", "revoke", "--token", supervisor.token, "--token-file", file])).rejects.toThrow(
+			/last supervisor/,
+		);
+	});
+
+	it("refuses both selectors at once", async () => {
+		const file = await tokenFile();
+		await run(["grant", "add", "--principal", "omp", "--role", "supervisor", "--token-file", file]);
+
+		await expect(
+			run(["grant", "revoke", "--principal", "omp", "--token", "sha256:x", "--token-file", file]),
+		).rejects.toThrow(/either --principal or --token/);
 	});
 });
