@@ -1,9 +1,14 @@
+import { createHash } from "node:crypto";
+
 /**
  * Bridge authority grants.
  *
  * The token file answers two questions that used to be one: who is calling, and
  * what may they do. A grant is resolved server-side from the presented token and
  * nothing else — no header, body, or path segment may widen it.
+ *
+ * Grants are keyed by a digest of the token, never by the token itself, so the
+ * file grants authority without storing anything presentable as a credential.
  */
 
 /** Supervisors administer the bridge. Workers act only inside sessions granted to them. */
@@ -21,6 +26,13 @@ export interface BridgeGrant {
 export const LEGACY_PRINCIPAL = "legacy-bare-token" as const;
 
 const FORBIDDEN_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
+const DIGEST_PREFIX = "sha256:";
+
+/** Stable, non-reversible lookup key for a bearer token. */
+export function bridgeTokenDigest(token: string): string {
+	return `${DIGEST_PREFIX}${createHash("sha256").update(token, "utf8").digest("hex")}`;
+}
 
 /** Structural failure of the token file. Messages never include token or session values. */
 export class BridgeGrantError extends Error {
@@ -75,19 +87,22 @@ export function parseBridgeGrants(contents: string): ReadonlyMap<string, BridgeG
 		parsed = JSON.parse(trimmed);
 	} catch {
 		// Not JSON, so this is the legacy bare-token format.
-		return new Map([[trimmed, { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [] }]]);
+		return new Map([[bridgeTokenDigest(trimmed), { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [] }]]);
 	}
 	if (!isPlainObject(parsed)) {
 		// Valid JSON but not a grant object (a bare quoted string, a number). Treat the
 		// raw text as a token rather than silently accepting an unintended shape.
-		return new Map([[trimmed, { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [] }]]);
+		return new Map([[bridgeTokenDigest(trimmed), { principal: LEGACY_PRINCIPAL, role: "supervisor", sessions: [] }]]);
 	}
 
 	const grants = new Map<string, BridgeGrant>();
-	for (const token of Object.keys(parsed)) {
-		if (FORBIDDEN_KEYS.has(token)) throw new BridgeGrantError("token file contains a forbidden key");
-		if (token.trim().length === 0) throw new BridgeGrantError("token file contains an empty token");
-		grants.set(token, parseGrant(parsed[token]));
+	for (const key of Object.keys(parsed)) {
+		if (FORBIDDEN_KEYS.has(key)) throw new BridgeGrantError("token file contains a forbidden key");
+		if (key.trim().length === 0) throw new BridgeGrantError("token file contains an empty token");
+		// A digest key is used as-is. A raw-token key is from the pre-digest format:
+		// hash it so it still authenticates, and the next write persists the digest,
+		// retiring the stored credential.
+		grants.set(key.startsWith(DIGEST_PREFIX) ? key : bridgeTokenDigest(key), parseGrant(parsed[key]));
 	}
 	if (grants.size === 0) throw new BridgeGrantError("token file grants no tokens");
 	return grants;
@@ -99,24 +114,24 @@ export function grantAllowsSession(grant: BridgeGrant, sessionId: string): boole
 }
 
 /**
- * The token the server advertises for itself.
+ * Reject a grant file that defines no supervisor.
  *
- * A bare-token file has exactly one. A grant file may have several, so the first
- * supervisor wins — deterministic, and always a token that actually works.
+ * Such a file cannot administer its own bridge, so it is almost certainly a
+ * mistake rather than an intentional lockout.
  */
-export function primaryBridgeToken(grants: ReadonlyMap<string, BridgeGrant>): string {
-	for (const [token, grant] of grants) {
-		if (grant.role === "supervisor") return token;
+export function assertBridgeGrantsHaveSupervisor(grants: ReadonlyMap<string, BridgeGrant>): void {
+	for (const grant of grants.values()) {
+		if (grant.role === "supervisor") return;
 	}
-	throw new BridgeGrantError("token file defines no supervisor token");
+	throw new BridgeGrantError("token file defines no supervisor grant");
 }
 
 /** Serialize grants for the token file. Stable key order keeps diffs readable. */
 export function serializeBridgeGrants(grants: ReadonlyMap<string, BridgeGrant>): string {
 	const record: Record<string, BridgeGrant> = {};
-	for (const token of [...grants.keys()].sort()) {
-		const grant = grants.get(token);
-		if (grant !== undefined) record[token] = grant;
+	for (const digest of [...grants.keys()].sort()) {
+		const grant = grants.get(digest);
+		if (grant !== undefined) record[digest] = grant;
 	}
 	return `${JSON.stringify(record, null, 2)}\n`;
 }
@@ -127,7 +142,7 @@ export function withBridgeGrant(
 	token: string,
 	grant: BridgeGrant,
 ): ReadonlyMap<string, BridgeGrant> {
-	return new Map([...grants, [token, grant]]);
+	return new Map([...grants, [bridgeTokenDigest(token), grant]]);
 }
 
 /**

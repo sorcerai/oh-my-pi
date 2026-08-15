@@ -173,7 +173,7 @@ describe("mesh identity", () => {
 		originSessionId,
 		originHarness: "omp",
 		targetHarness: "omp",
-		targetId: "peer-x",
+		targetId: GRANTED_SESSION,
 		body: "hello",
 		projectRoot: "/tmp",
 		createdAt: new Date(0).toISOString(),
@@ -185,6 +185,17 @@ describe("mesh identity", () => {
 			headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
 			body: JSON.stringify(body),
 		});
+
+	it("refuses a worker that addresses an ungranted target", async () => {
+		const server = await createServer();
+		const toTarget = (targetId: string) => ({ ...message(GRANTED_SESSION), targetId });
+
+		// Origin and target are both caller-supplied; gating only the origin would
+		// let a worker send anywhere it can guess.
+		expect((await post(server, "/v1/messages", WORKER_TOKEN, toTarget(UNGRANTED_SESSION))).status).toBe(403);
+		expect((await post(server, "/v1/messages", WORKER_TOKEN, toTarget(GRANTED_SESSION))).status).not.toBe(403);
+		expect((await post(server, "/v1/messages", SUPERVISOR_TOKEN, toTarget(UNGRANTED_SESSION))).status).not.toBe(403);
+	});
 
 	it("refuses a worker that forges the sending session", async () => {
 		const server = await createServer();

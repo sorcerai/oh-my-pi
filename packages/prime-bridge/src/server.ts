@@ -7,7 +7,13 @@ import {
 	provisionPrimeBridgeConfig,
 	resolveBridgeConfig,
 } from "./config";
-import { type BridgeGrant, grantAllowsSession, parseBridgeGrants, primaryBridgeToken } from "./grants";
+import {
+	assertBridgeGrantsHaveSupervisor,
+	type BridgeGrant,
+	bridgeTokenDigest,
+	grantAllowsSession,
+	parseBridgeGrants,
+} from "./grants";
 import { handleMcpRequest } from "./mcp/server";
 import { CommandResultUncertainError, PrimeDaemonClient } from "./prime/client";
 import { BridgeStore, type ClaimedInboxMessage, type ClaimedPendingMessage } from "./store";
@@ -96,7 +102,8 @@ async function authenticate(request: Request, config: PrimeBridgeConfig): Promis
 	if (authorization === null || !authorization.startsWith(BEARER_PREFIX))
 		return { ok: false, response: unauthorized() };
 	const presented = authorization.slice(BEARER_PREFIX.length);
-	const grant = presented.length === 0 ? undefined : grants.get(presented);
+	// Look up by digest: the file stores no presentable credential.
+	const grant = presented.length === 0 ? undefined : grants.get(bridgeTokenDigest(presented));
 	if (grant === undefined) return { ok: false, response: unauthorized() };
 	return { ok: true, principal: { ...grant, token: presented } };
 }
@@ -367,10 +374,15 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 	const config = resolveOptions(options);
 	await fs.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
 	await fs.chmod(config.stateDir, 0o700);
-	// ensureBridgeToken returns the file's contents, which for a grant file is the
-	// whole JSON document rather than a usable credential. Resolve the advertised
-	// token through the grant map so `server.token` is always a token that works.
-	const token = primaryBridgeToken(parseBridgeGrants(await ensureBridgeToken(config.tokenFile)));
+	// ensureBridgeToken returns the file's contents: a bare token for the legacy
+	// format, the whole JSON document for a grant file. Only the former is a usable
+	// bearer, and grants are keyed by digest precisely so a grant file yields none —
+	// so `server.token` is the legacy token when there is one and empty otherwise.
+	const fileContents = await ensureBridgeToken(config.tokenFile);
+	const grants = parseBridgeGrants(fileContents);
+	assertBridgeGrantsHaveSupervisor(grants);
+	const bareToken = fileContents.trim();
+	const token = grants.has(bridgeTokenDigest(bareToken)) ? bareToken : "";
 	if (options.token !== undefined && options.token !== token)
 		throw new Error("provided bridge token does not match token file");
 	const auditTokenIdentifier = tokenIdentifier(token);
@@ -682,9 +694,13 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 									error instanceof PayloadTooLargeError ? 413 : 400,
 								);
 							}
-							// originSessionId arrives in the request body, so without this a
-							// worker could forge the apparent sender of any mesh message.
+							// Both ends of a send are caller-supplied. Without the origin check a
+							// worker forges the apparent sender; without the target check it can
+							// address any session it manages to guess, which is exactly the scope
+							// the grant contract promises ("sessions a worker may address"). A
+							// grant that needs to reach a target names that target.
 							if (!grantAllowsSession(auth.principal, message.originSessionId)) return forbidden();
+							if (!grantAllowsSession(auth.principal, message.targetId)) return forbidden();
 							const existingMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
 							if (existingMessage !== null) {
 								if (!sameMessage(existingMessage, message))
