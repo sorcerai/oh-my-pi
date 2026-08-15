@@ -12,10 +12,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveBridgeConfig } from "../src/config";
+import type { ToolHostFrame } from "../src/protocol/tool-host";
+import { WORKER_SAFE_TOOLS } from "../src/protocol/tool-host";
 import type { PrimeBridgeServer } from "../src/server";
 import { startPrimeBridgeServer } from "../src/server";
-import { WORKER_SAFE_TOOLS } from "../src/protocol/tool-host";
-import type { ToolHostFrame } from "../src/protocol/tool-host";
 
 const temporaryDirectories: string[] = [];
 const runningServers: PrimeBridgeServer[] = [];

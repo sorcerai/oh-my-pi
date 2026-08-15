@@ -16,8 +16,12 @@ describe("bridge grants", () => {
 		const grants = parseBridgeGrants("  00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000\n");
 
 		// Keyed by digest, never by the token itself.
-		expect([...grants.keys()]).toEqual([bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000")]);
-		expect(grants.get(bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000"))).toEqual({
+		expect([...grants.keys()]).toEqual([
+			bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000"),
+		]);
+		expect(
+			grants.get(bridgeTokenDigest("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000")),
+		).toEqual({
 			principal: LEGACY_PRINCIPAL,
 			role: "supervisor",
 			sessions: [],

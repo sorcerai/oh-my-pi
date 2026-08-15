@@ -9,8 +9,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
-import { WORKER_SAFE_TOOLS, type RegisteredTool } from "../protocol/tool-host";
 import { type BridgeGrant, grantHasCapability, OMP_SUPERVISE_CAPABILITY } from "../grants";
+import { type RegisteredTool, WORKER_SAFE_TOOLS } from "../protocol/tool-host";
 import type { ToolHostServer } from "../tool-host/server";
 import { mapAgentToolError, mapAgentToolResult } from "./result-map";
 

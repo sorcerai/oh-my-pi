@@ -150,7 +150,9 @@ describe("bridge authority proofs", () => {
 		const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "prime-bridge-legacy-"));
 		temporaryDirectories.push(stateDir);
 		const tokenFile = path.join(stateDir, "token");
-		await fs.writeFile(tokenFile, "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000\n", { mode: 0o600 });
+		await fs.writeFile(tokenFile, "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000\n", {
+			mode: 0o600,
+		});
 		const config = resolveBridgeConfig({
 			stateDir,
 			tokenFile,
@@ -161,8 +163,19 @@ describe("bridge authority proofs", () => {
 		runningServers.push(server);
 
 		expect(server.token).toBe("00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000");
-		expect((await v1(server, "/v1/audit", "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000")).status).toBe(200);
-		expect((await mcp(server, UNGRANTED_SESSION, "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000")).status).not.toBe(403);
+		expect(
+			(await v1(server, "/v1/audit", "00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000"))
+				.status,
+		).toBe(200);
+		expect(
+			(
+				await mcp(
+					server,
+					UNGRANTED_SESSION,
+					"00000000-0000-0000-0000-00000000000000000000-0000-0000-0000-000000000000",
+				)
+			).status,
+		).not.toBe(403);
 	});
 });
 
