@@ -37,6 +37,15 @@ export interface PrimeBridgeHostAdapterConfig {
 	readonly url?: string;
 	readonly tokenPath?: string;
 	readonly allowTools?: readonly string[];
+	/**
+	 * Register under this session id instead of the session's generated one.
+	 *
+	 * A consumer holding a pre-minted, session-scoped grant cannot match an id
+	 * that changes every run. Setting a stable id lets the grant be issued once.
+	 * The bridge keys tool registration by session, so two live sessions sharing
+	 * one id would publish over each other — give each its own.
+	 */
+	readonly sessionId?: string;
 	readonly approvalTimeoutMs?: number;
 	readonly readFile?: ReadFile;
 	readonly websocketFactory?: PrimeBridgeHostWebSocketFactory;
@@ -165,7 +174,7 @@ export class PrimeBridgeHostAdapter {
 	refreshTools(): void {
 		const session = this.#session;
 		if (this.#stopped || this.#socket?.readyState !== 1 || session === undefined) return;
-		const nextSessionId = session.toolSession.getSessionId?.() ?? undefined;
+		const nextSessionId = this.#publishedSessionId();
 		if (nextSessionId === undefined) return;
 		if (this.#sessionId !== undefined && this.#sessionId !== nextSessionId) {
 			for (const requestId of this.#pending.keys())
@@ -226,10 +235,21 @@ export class PrimeBridgeHostAdapter {
 		return tools;
 	}
 
+	/**
+	 * The session id this host publishes under.
+	 *
+	 * A configured id wins over the generated one so a pre-minted, session-scoped
+	 * grant keeps matching across runs. Returns undefined until the session exists,
+	 * so nothing registers for a session that never started.
+	 */
+	#publishedSessionId(): string | undefined {
+		const generated = this.#session?.toolSession.getSessionId?.() ?? undefined;
+		if (generated === undefined) return undefined;
+		return this.#config?.sessionId ?? generated;
+	}
+
 	#sendRegister(): void {
-		const session = this.#session;
-		const getSessionId = session?.toolSession.getSessionId;
-		const sessionId = getSessionId?.() ?? undefined;
+		const sessionId = this.#publishedSessionId();
 		if (sessionId === undefined) return;
 		this.#sessionId = sessionId;
 		this.#registeredTools = this.#visibleTools();

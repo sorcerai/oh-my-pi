@@ -705,3 +705,35 @@ describe("PrimeBridgeHostAdapter", () => {
 		expect(socket.sent.length).toBe(frameCount);
 	});
 });
+
+describe("configured tool-host session id", () => {
+	it("registers under the configured id instead of the generated one", async () => {
+		const value = session("generated-session-id", new Map([["read", tool("read", async () => ({ content: [] }))]]));
+		const { socket } = await started(value, { sessionId: "cyboflow-supervise" });
+
+		const register = socket.sent.find(frame => frame.type === "register");
+		// A pre-minted, session-scoped grant cannot match an id that changes per run.
+		expect(register?.sessionId).toBe("cyboflow-supervise");
+		expect(socket.sent.some(frame => frame.sessionId === "generated-session-id")).toBe(false);
+	});
+
+	it("keeps the configured id when the underlying session changes", async () => {
+		const value = session("generated-a", new Map([["read", tool("read", async () => ({ content: [] }))]]));
+		const { socket } = await started(value, { sessionId: "cyboflow-supervise" });
+		socket.sent.length = 0;
+
+		value.setSessionId("generated-b");
+
+		// Rotating the real session must not unregister the granted scope, or the
+		// consumer's tools would vanish mid-run.
+		expect(socket.sent.some(frame => frame.type === "unregister")).toBe(false);
+		for (const frame of socket.sent) expect(frame.sessionId).toBe("cyboflow-supervise");
+	});
+
+	it("still uses the generated id when none is configured", async () => {
+		const value = session("generated-session-id", new Map([["read", tool("read", async () => ({ content: [] }))]]));
+		const { socket } = await started(value);
+
+		expect(socket.sent.find(frame => frame.type === "register")?.sessionId).toBe("generated-session-id");
+	});
+});
