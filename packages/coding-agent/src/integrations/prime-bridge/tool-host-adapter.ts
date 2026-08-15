@@ -38,6 +38,15 @@ export interface PrimeBridgeHostAdapterConfig {
 	readonly tokenPath?: string;
 	readonly allowTools?: readonly string[];
 	/**
+	 * Publish the default tool set (`read`, `grep`, `glob`, `web_search`) alongside
+	 * `allowTools`. Defaults to true.
+	 *
+	 * Set false to publish exactly `allowTools`. Required for a narrow surface: a
+	 * caller holding `omp:supervise` may call any registered tool, so publishing a
+	 * file-reading tool to it is equivalent to publishing the filesystem.
+	 */
+	readonly defaultTools?: boolean;
+	/**
 	 * Register under this session id instead of the session's generated one.
 	 *
 	 * A consumer holding a pre-minted, session-scoped grant cannot match an id
@@ -221,7 +230,13 @@ export class PrimeBridgeHostAdapter {
 		const config = this.#config;
 		const getToolByName = session?.toolSession.getToolByName;
 		if (session === undefined || config === undefined || getToolByName === undefined) return [];
-		const allowed = new Set([...DEFAULT_ALLOWED_TOOLS, ...(config.allowTools ?? [])]);
+		// The default set is a convenience, not a floor. It was previously unioned
+		// unconditionally, so an operator could not stop publishing `read` — and a
+		// principal holding omp:supervise could read any path on the machine through
+		// the bridge, including the token file that authenticates the tool host
+		// itself. Publishing a narrow surface has to be expressible.
+		const defaults = config.defaultTools === false ? [] : [...DEFAULT_ALLOWED_TOOLS];
+		const allowed = new Set([...defaults, ...(config.allowTools ?? [])]);
 		const names = session.agentSession.getEnabledToolNames();
 		const tools: RegisteredTool[] = [];
 		const seen = new Set<string>();

@@ -423,6 +423,7 @@ export const SETTINGS_SCHEMA = {
 	"primeBridge.autoStart": { type: "boolean", default: false },
 	"primeBridge.toolHost.enabled": { type: "boolean", default: false },
 	"primeBridge.toolHost.allowTools": { type: "array", default: EMPTY_STRING_ARRAY },
+	"primeBridge.toolHost.defaultTools": { type: "boolean", default: true },
 	"primeBridge.toolHost.sessionId": { type: "string", default: undefined },
 	"primeBridge.toolHost.approvalTimeoutMs": { type: "number", default: PRIME_BRIDGE_APPROVAL_TIMEOUT_MAX_MS },
 

@@ -3483,6 +3483,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			url: settings.get("primeBridge.url"),
 			tokenPath: settings.get("primeBridge.tokenPath"),
 			allowTools: settings.get("primeBridge.toolHost.allowTools"),
+			defaultTools: settings.get("primeBridge.toolHost.defaultTools"),
 			sessionId: settings.get("primeBridge.toolHost.sessionId"),
 			approvalTimeoutMs: settings.get("primeBridge.toolHost.approvalTimeoutMs"),
 		};
