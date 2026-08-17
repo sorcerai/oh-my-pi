@@ -876,3 +876,91 @@ describe("authenticated tool host websocket endpoint", () => {
 		await recovered.stop();
 	});
 });
+
+describe("tool host session id collisions", () => {
+	/** A minimal live host socket, matching the fake used elsewhere in this file. */
+	function fakeSocket(): { socket: never; closes: { code: number; reason: string }[] } {
+		const closes: { code: number; reason: string }[] = [];
+		const socket = {
+			data: { awaitingPong: false, closed: false, queue: [], queuedBytes: 0, backpressured: false },
+			readyState: 1,
+			sendText: () => 1,
+			ping: () => {},
+			terminate: () => {},
+			close: (code: number, reason: string) => {
+				closes.push({ code, reason });
+			},
+		} as never;
+		return { socket, closes };
+	}
+
+	function register(host: ToolHostServer, socket: never, sessionId: string, hostId: string): void {
+		host.websocket.open?.(socket);
+		host.websocket.message(socket, JSON.stringify(registration(sessionId, hostId)));
+	}
+
+	it("records which host displaced which when two hosts share a session id", () => {
+		const host = new ToolHostServer();
+		const first = fakeSocket();
+		const second = fakeSocket();
+
+		register(host, first.socket, "shared-session", "host-a");
+		register(host, second.socket, "shared-session", "host-b");
+
+		// Takeover itself is intentional: a restarted host must be able to reclaim its
+		// session id, and pending calls fail with a disconnect rather than hanging. What
+		// was missing is any record that the executor changed — after this the caller's
+		// tools run in host-b's context, and host-a never reconnects.
+		const replaced = host.audit().filter(entry => entry.action === "register_replaced");
+		expect(replaced).toHaveLength(1);
+		expect(replaced[0]).toMatchObject({
+			sessionId: "shared-session",
+			hostId: "host-b",
+			previousHostId: "host-a",
+		});
+		expect(first.closes).toEqual([{ code: 4009, reason: "replaced by reconnect" }]);
+		expect(host.registry.getOwner("shared-session")?.hostId).toBe("host-b");
+	});
+
+	it("stays quiet when the same host re-registers its own session id", () => {
+		const host = new ToolHostServer();
+		const first = fakeSocket();
+		const second = fakeSocket();
+
+		register(host, first.socket, "shared-session", "host-a");
+		register(host, second.socket, "shared-session", "host-a");
+
+		// A genuine reconnect is not a collision and must not look like one.
+		expect(host.audit().filter(entry => entry.action === "register_replaced")).toHaveLength(0);
+		expect(host.registry.getOwner("shared-session")?.hostId).toBe("host-a");
+	});
+
+	it("stays quiet when the displaced socket is already dead", () => {
+		const host = new ToolHostServer();
+		const dead = fakeSocket();
+		const restarted = fakeSocket();
+
+		register(host, dead.socket, "shared-session", "host-old");
+		// A restarted process gets a fresh host id, so a dead incumbent plus a new id is
+		// an ordinary restart, not two live sessions fighting over one id.
+		(dead.socket as unknown as { readyState: number }).readyState = 3;
+		register(host, restarted.socket, "shared-session", "host-new");
+
+		expect(host.audit().filter(entry => entry.action === "register_replaced")).toHaveLength(0);
+		expect(host.registry.getOwner("shared-session")?.hostId).toBe("host-new");
+	});
+
+	it("leaves unrelated session ids alone", () => {
+		const host = new ToolHostServer();
+		const first = fakeSocket();
+		const second = fakeSocket();
+
+		register(host, first.socket, "session-a", "host-a");
+		register(host, second.socket, "session-b", "host-b");
+
+		expect(host.audit().filter(entry => entry.action === "register_replaced")).toHaveLength(0);
+		expect(second.closes).toEqual([]);
+		expect(host.registry.getOwner("session-a")?.hostId).toBe("host-a");
+		expect(host.registry.getOwner("session-b")?.hostId).toBe("host-b");
+	});
+});
