@@ -420,3 +420,84 @@ describe("anthropic applyAnthropicUsageExtras", () => {
 		expect(usage.server).toBeUndefined();
 	});
 });
+
+describe("local runtime serving statistics", () => {
+	it("reports the fields a speculative-decoding server sends", () => {
+		const usage = parseChunkUsage(
+			{
+				prompt_tokens: 1_000,
+				completion_tokens: 100,
+				tokens_per_second: 42.5,
+				acceptance_ratio: 0.78,
+				accepted_from_draft: 61,
+				speculative_cycles: 20,
+				prefill_seconds: 0.42,
+				prefill_tokens_per_second: 2_380,
+				prefill_tokens_computed: 200,
+				prefill_tokens_restored: 800,
+				prefix_cache_hit_tokens: 800,
+				reasoning_seconds: 1.5,
+			},
+			OPENAI_MODEL,
+			undefined,
+		);
+
+		expect(usage.localRuntime).toEqual({
+			tokensPerSecond: 42.5,
+			acceptanceRatio: 0.78,
+			acceptedFromDraft: 61,
+			speculativeCycles: 20,
+			prefillSeconds: 0.42,
+			prefillTokensPerSecond: 2_380,
+			prefillTokensComputed: 200,
+			prefillTokensRestored: 800,
+			prefixCacheHitTokens: 800,
+			reasoningSeconds: 1.5,
+		});
+		// The standard buckets must be untouched by the extra fields.
+		expect(usage.input + usage.cacheRead).toBe(1_000);
+		expect(usage.output).toBe(100);
+	});
+
+	it("omits the block entirely for a hosted provider that sends none of it", () => {
+		const usage = parseChunkUsage({ prompt_tokens: 10, completion_tokens: 5 }, OPENAI_MODEL, undefined);
+
+		expect(usage.localRuntime).toBeUndefined();
+	});
+
+	it("keeps a genuine zero and never invents one", () => {
+		// A zero acceptance ratio is a real reading — the draft model accepted nothing.
+		// An absent one is not, so the two must stay distinguishable.
+		const reported = parseChunkUsage(
+			{ prompt_tokens: 10, completion_tokens: 5, acceptance_ratio: 0, accepted_from_draft: 0 },
+			OPENAI_MODEL,
+			undefined,
+		);
+		expect(reported.localRuntime).toEqual({ acceptanceRatio: 0, acceptedFromDraft: 0 });
+
+		const partial = parseChunkUsage(
+			{ prompt_tokens: 10, completion_tokens: 5, tokens_per_second: 30 },
+			OPENAI_MODEL,
+			undefined,
+		);
+		expect(partial.localRuntime).toEqual({ tokensPerSecond: 30 });
+		expect(partial.localRuntime?.acceptanceRatio).toBeUndefined();
+	});
+
+	it("ignores non-finite and non-numeric values", () => {
+		const usage = parseChunkUsage(
+			{
+				prompt_tokens: 10,
+				completion_tokens: 5,
+				tokens_per_second: Number.NaN,
+				acceptance_ratio: "0.9",
+				accepted_from_draft: Number.POSITIVE_INFINITY,
+				prefill_seconds: 0.1,
+			},
+			OPENAI_MODEL,
+			undefined,
+		);
+
+		expect(usage.localRuntime).toEqual({ prefillSeconds: 0.1 });
+	});
+});

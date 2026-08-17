@@ -1719,6 +1719,33 @@ function buildParams(
 	return { params, toolStrictMode, strictToolsApplied };
 }
 
+/**
+ * Serving statistics some local runtimes attach to `usage`.
+ *
+ * Only present on speculative-decoding servers; a field the server omits stays
+ * undefined rather than becoming zero, because a zero acceptance ratio is a real
+ * and alarming reading, not an absence of data.
+ */
+function parseLocalRuntimeStats(rawUsage: object): NonNullable<AssistantMessage["usage"]["localRuntime"]> | undefined {
+	const raw = rawUsage as Record<string, unknown>;
+	const finite = (value: unknown): number | undefined =>
+		typeof value === "number" && Number.isFinite(value) ? value : undefined;
+	const stats = {
+		tokensPerSecond: finite(raw.tokens_per_second),
+		acceptanceRatio: finite(raw.acceptance_ratio),
+		acceptedFromDraft: finite(raw.accepted_from_draft),
+		speculativeCycles: finite(raw.speculative_cycles),
+		prefillSeconds: finite(raw.prefill_seconds),
+		prefillTokensPerSecond: finite(raw.prefill_tokens_per_second),
+		prefillTokensComputed: finite(raw.prefill_tokens_computed),
+		prefillTokensRestored: finite(raw.prefill_tokens_restored),
+		prefixCacheHitTokens: finite(raw.prefix_cache_hit_tokens),
+		reasoningSeconds: finite(raw.reasoning_seconds),
+	};
+	const reported = Object.entries(stats).filter(([, value]) => value !== undefined);
+	return reported.length === 0 ? undefined : (Object.fromEntries(reported) as typeof stats);
+}
+
 export function parseChunkUsage(
 	rawUsage: object,
 	model: Model<"openai-completions">,
@@ -1753,10 +1780,12 @@ export function parseChunkUsage(
 		cacheWriteDeepSeek: typeof promptCacheMissTokens === "number" ? promptCacheMissTokens : undefined,
 		hasDeepSeekCacheHitAndMiss: typeof promptCacheHitTokens === "number" && typeof promptCacheMissTokens === "number",
 	});
+	const localRuntime = parseLocalRuntimeStats(rawUsage);
 	const usage: AssistantMessage["usage"] = {
 		...accounting,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
+		...(localRuntime !== undefined ? { localRuntime } : {}),
 	};
 	calculateCost(model, usage);
 	applyOpenRouterReportedCost(model, usage, rawUsage);

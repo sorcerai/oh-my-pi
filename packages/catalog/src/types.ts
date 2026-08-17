@@ -117,6 +117,36 @@ export interface Usage {
 	/** Copilot premium-request counter, when applicable. */
 	premiumRequests?: number;
 	/**
+	 * Serving statistics a local runtime reports alongside token counts.
+	 *
+	 * Only speculative-decoding servers (MLX with a draft model, vLLM, TGI) emit
+	 * these; hosted providers never do. Every field is independently optional, and
+	 * `undefined` means the server did not report it, NOT zero — a fabricated zero
+	 * here reads as "the draft model accepted nothing", which is a real diagnosis.
+	 */
+	localRuntime?: {
+		/** Server-measured output throughput. Authoritative, unlike a client-side estimate. */
+		tokensPerSecond?: number;
+		/** Fraction of drafted tokens the target accepted, 0..1. Low means the draft costs more than it saves. */
+		acceptanceRatio?: number;
+		/** Tokens accepted from the draft model. */
+		acceptedFromDraft?: number;
+		/** Speculative rounds performed. */
+		speculativeCycles?: number;
+		/** Wall-clock seconds spent on prefill. */
+		prefillSeconds?: number;
+		/** Prefill throughput in tokens per second. */
+		prefillTokensPerSecond?: number;
+		/** Prompt tokens actually computed during prefill. */
+		prefillTokensComputed?: number;
+		/** Prompt tokens restored from cache instead of recomputed. */
+		prefillTokensRestored?: number;
+		/** Prompt tokens served from a prefix cache hit. */
+		prefixCacheHitTokens?: number;
+		/** Wall-clock seconds spent generating reasoning tokens. */
+		reasoningSeconds?: number;
+	};
+	/**
 	 * Reasoning/thinking tokens included in `output`, when the provider reports them
 	 * (OpenAI `output_tokens_details.reasoning_tokens`, Google `thoughtsTokenCount`).
 	 * Always a subset of `output` — non-reasoning output is `output - reasoningTokens`.
