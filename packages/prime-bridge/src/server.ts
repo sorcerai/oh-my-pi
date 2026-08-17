@@ -408,6 +408,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 								...(entry.requestId === undefined ? {} : { requestId: entry.requestId }),
 								...(entry.toolName === undefined ? {} : { toolName: entry.toolName }),
 								...(entry.code === undefined ? {} : { code: entry.code }),
+								...(entry.hostId === undefined ? {} : { hostId: entry.hostId }),
+								...(entry.previousHostId === undefined ? {} : { previousHostId: entry.previousHostId }),
 							},
 						});
 						callerAudit?.(entry);
@@ -425,6 +427,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 					...(entry.requestId === undefined ? {} : { requestId: entry.requestId }),
 					...(entry.toolName === undefined ? {} : { toolName: entry.toolName }),
 					...(entry.code === undefined ? {} : { code: entry.code }),
+					...(entry.hostId === undefined ? {} : { hostId: entry.hostId }),
+					...(entry.previousHostId === undefined ? {} : { previousHostId: entry.previousHostId }),
 				},
 			});
 		});

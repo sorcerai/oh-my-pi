@@ -21,11 +21,15 @@ export interface ToolHostServerOptions {
 }
 
 export interface ToolHostAuditEntry {
-	action: "register" | "tools_changed" | "call" | "result" | "error" | "disconnect";
+	action: "register" | "register_replaced" | "tools_changed" | "call" | "result" | "error" | "disconnect";
 	sessionId?: string;
 	requestId?: string;
 	toolName?: string;
 	code?: string;
+	/** Registering host, recorded when one host displaces another on a session id. */
+	hostId?: string;
+	/** Host that lost the session id to {@link ToolHostAuditEntry.hostId}. */
+	previousHostId?: string;
 }
 
 interface PendingCall {
@@ -378,6 +382,21 @@ export class ToolHostServer {
 		}
 		const oldSocket = this.#sessionSockets.get(frame.sessionId);
 		if (oldSocket !== undefined && oldSocket !== ws) {
+			// Takeover is deliberate: pending calls fail with a disconnect and stale
+			// replies are dropped, which is how a restarted host reclaims its session.
+			// But when the displaced host is a *different* one that is still live, this
+			// is very likely two sessions configured with the same id — after which the
+			// caller's tools quietly execute in the winner's context instead. Nothing
+			// else records that, so audit it and name both hosts.
+			const displaced = oldSocket.data.owner;
+			if (displaced !== undefined && displaced.hostId !== frame.hostId && socketIsOpen(oldSocket)) {
+				this.#audit({
+					action: "register_replaced",
+					sessionId: frame.sessionId,
+					hostId: frame.hostId,
+					previousHostId: displaced.hostId,
+				});
+			}
 			this.#closeState(oldSocket);
 			oldSocket.close(4009, "replaced by reconnect");
 		}
