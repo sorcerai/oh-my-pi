@@ -61,6 +61,26 @@ describe("isSttModelCached completeness", () => {
 		await touch(path.join(repoDir, "tokens.txt"));
 		expect(await downloader.isSttModelCached("parakeet")).toBe(true);
 	});
+	it("requires every Nemotron cache artifact to be present", async () => {
+		const home = path.join(tmp, "home");
+		const variantDir = path.join(
+			home,
+			"Library/Application Support/FluidAudio/Models/nemotron-multilingual/latin/1120ms",
+		);
+		const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(home);
+		try {
+			await touch(path.join(variantDir, "metadata.json"));
+			await touch(path.join(variantDir, "tokenizer.json"));
+			await touch(path.join(variantDir, "encoder.mlmodelc"));
+			await touch(path.join(variantDir, "decoder.mlmodelc"));
+			expect(await downloader.isSttModelCached("nemotron")).toBe(false);
+
+			await touch(path.join(variantDir, "joint.mlmodelc"));
+			expect(await downloader.isSttModelCached("nemotron")).toBe(true);
+		} finally {
+			homedirSpy.mockRestore();
+		}
+	});
 });
 
 describe("STTController preflight", () => {
