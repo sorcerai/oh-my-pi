@@ -20,7 +20,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
-import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import { BLOB_HASH_RE, type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
@@ -382,6 +382,60 @@ export type ReadonlySessionManager = Pick<
 	| "putBlob"
 	| "putBlobSync"
 >;
+type WithoutGeneratedSessionFields<T extends { id: string; parentId: string | null; timestamp: string }> =
+	T extends unknown ? Omit<T, "id" | "parentId" | "timestamp"> : never;
+
+/** Native entry payloads accepted by {@link SessionManager.importTree}. */
+export type SessionTreeImportEntry =
+	| {
+			type: "message";
+			message:
+				| Message
+				| CustomMessage
+				| BashExecutionMessage
+				| PythonExecutionMessage
+				| FileMentionMessage
+				| HookMessage;
+	  }
+	| WithoutGeneratedSessionFields<CustomEntry | CustomMessageEntry | CompactionEntry>;
+
+/** Exact bytes for a content-addressed blob referenced by an imported tree. */
+export interface SessionTreeImportBlob {
+	hash: string;
+	bytes: Uint8Array;
+}
+
+export interface SessionTreeImportNode {
+	sourceId: string;
+	parentSourceId: string | null;
+	entry: SessionTreeImportEntry;
+}
+
+export interface SessionTreeImportOptions {
+	sessionDir?: string;
+	blobs?: readonly SessionTreeImportBlob[];
+	storage?: SessionStorage;
+	title?: string;
+	lossMarker?: {
+		customType: string;
+		data?: unknown;
+	};
+	lossMarkerFactory?: (nativeIdMap: Readonly<Record<string, string>>) => {
+		customType: string;
+		data?: unknown;
+	};
+	/**
+	 * Validate the fully materialized staged session before it is published.
+	 * The callback runs against the temporary sibling path, which is never the
+	 * returned destination path.
+	 */
+	validateBeforePublish?: (sessionPath: string, nativeIdMap: Readonly<Record<string, string>>) => void | Promise<void>;
+}
+
+export interface SessionTreeImportResult {
+	sessionPath: string;
+	nativeIdMap: Readonly<Record<string, string>>;
+}
 
 interface SessionManagerStateSnapshot {
 	cwd: string;
@@ -904,6 +958,26 @@ export class SessionManager {
 				}
 			},
 			{ epoch: startEpoch },
+		);
+	}
+	async #rewriteCreateOnly(): Promise<void> {
+		if (!this.#persist || !this.#sessionFile) return;
+		const epoch = this.#diskEpoch;
+		await this.#scheduleDiskWork(
+			async () => {
+				await this.#closeWriterHandle();
+				const sessionFile = this.#sessionFile;
+				if (!sessionFile || this.#diskEpoch !== epoch)
+					throw Object.assign(new Error("Session publication superseded"), { code: "EAGAIN" });
+				const createOnly = this.#storage.writeTextCreateOnly;
+				if (!createOnly) throw new Error("Session storage does not support create-only publication");
+				await createOnly.call(this.#storage, sessionFile, this.#fileBody());
+				this.#fileIsCurrent = true;
+				this.#materializeBreadcrumb();
+				this.#rewriteRequired = false;
+				this.#hasTitleSlot = true;
+			},
+			{ epoch },
 		);
 	}
 
@@ -1627,6 +1701,30 @@ export class SessionManager {
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
+		return manager;
+	}
+	/** Persist this session under a fresh identity without replacing a destination path. */
+	async persistCopyCreateOnly(
+		options?: { sessionDir?: string; suppressBreadcrumb?: boolean; cwd?: string },
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<SessionManager> {
+		const sessionDir =
+			options?.sessionDir ?? SessionManager.getDefaultSessionDir(options?.cwd ?? this.#cwd, undefined, storage);
+		const manager = new SessionManager(options?.cwd ?? this.#cwd, sessionDir, true, storage);
+		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+		manager.#resetToNewSession();
+		manager.#sessionName = this.#sessionName;
+		manager.#titleSource = this.#titleSource;
+		manager.#titleUpdatedAt = this.#titleUpdatedAt;
+		manager.#header.title = this.#sessionName;
+		manager.#header.titleSource = this.#titleSource;
+		manager.#header.additionalDirectories =
+			this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined;
+		manager.#additionalDirectories = [...this.#additionalDirectories];
+		manager.#entries = structuredClone(this.#entries);
+		manager.#index.rebuild(manager.#entries);
+		manager.#forceFileCreation = true;
+		await manager.#rewriteCreateOnly();
 		return manager;
 	}
 
@@ -2637,6 +2735,512 @@ export class SessionManager {
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#resetToNewSession();
 		return manager;
+	}
+
+	/**
+	 * Import a validated source tree through the native append APIs.
+	 *
+	 * Source identifiers are used only as mapping keys. Native entry ids,
+	 * parents, timestamps, normalization, and persistence are always generated
+	 * by this manager.
+	 */
+	static async importTree(
+		cwd: string,
+		nodes: readonly SessionTreeImportNode[],
+		activeLeafId: string | null,
+		options?: SessionTreeImportOptions,
+	): Promise<SessionTreeImportResult> {
+		const isSafeSourceId = (value: unknown): value is string =>
+			typeof value === "string" &&
+			value.length > 0 &&
+			value.trim() === value &&
+			value !== "." &&
+			value !== ".." &&
+			/^[^\s/\\\u0000-\u001f\u007f]+$/.test(value);
+		const hasOwn = (value: object, key: string): boolean => Object.hasOwn(value, key);
+		const generatedFields = ["id", "parentId", "timestamp"] as const;
+
+		if (!Array.isArray(nodes) || nodes.length === 0) {
+			throw new Error("Session tree import requires exactly one non-empty root.");
+		}
+		if (activeLeafId !== null && !isSafeSourceId(activeLeafId)) {
+			throw new Error("Session tree import activeLeafId must be a safe source id or null.");
+		}
+		if (activeLeafId === null) throw new Error("Session tree import requires an active leaf.");
+		if (options?.sessionDir !== undefined && (typeof options.sessionDir !== "string" || !options.sessionDir))
+			throw new Error("Session tree import sessionDir must be a non-empty string.");
+		if (options?.title !== undefined) {
+			if (typeof options.title !== "string") throw new Error("Session tree import title must be a string.");
+			const cleanTitle = options.title
+				.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+				.replace(/ +/g, " ")
+				.trim();
+			if (!cleanTitle) throw new Error("Session tree import title must not be empty.");
+		}
+		const normalizedBlobs: Array<{ hash: string; bytes: Buffer }> = [];
+		if (options?.blobs !== undefined) {
+			if (!Array.isArray(options.blobs)) throw new Error("Session tree import blobs must be an array.");
+			const seenBlobHashes = new Set<string>();
+			for (const blob of options.blobs) {
+				if (!blob || typeof blob !== "object" || !BLOB_HASH_RE.test(blob.hash))
+					throw new Error("Session tree import blob hash must be a lowercase SHA-256 hash.");
+				if (!(blob.bytes instanceof Uint8Array))
+					throw new Error(`Session tree import blob ${blob.hash} bytes must be a Uint8Array.`);
+				const bytes = Buffer.from(blob.bytes);
+				const actualHash = new Bun.SHA256().update(bytes).digest("hex");
+				if (actualHash !== blob.hash)
+					throw new Error(`Session tree import blob hash verification failed: ${blob.hash}`);
+				if (seenBlobHashes.has(blob.hash)) continue;
+				seenBlobHashes.add(blob.hash);
+				normalizedBlobs.push({ hash: blob.hash, bytes });
+			}
+		}
+		if (options?.lossMarker !== undefined) {
+			if (
+				!options.lossMarker ||
+				typeof options.lossMarker.customType !== "string" ||
+				options.lossMarker.customType.length === 0
+			) {
+				throw new Error("Session tree import lossMarker.customType must be a non-empty string.");
+			}
+			try {
+				structuredClone(options.lossMarker.data);
+			} catch (error) {
+				throw new Error(`Session tree import loss marker data is not cloneable: ${String(error)}`);
+			}
+		}
+		if (options?.lossMarkerFactory !== undefined && typeof options.lossMarkerFactory !== "function") {
+			throw new Error("Session tree import lossMarkerFactory must be a function.");
+		}
+
+		if (options?.lossMarker !== undefined && options.lossMarkerFactory !== undefined) {
+			throw new Error("Session tree import accepts only one loss marker source.");
+		}
+		const normalizedNodes: Array<{
+			sourceId: string;
+			parentSourceId: string | null;
+			entry: SessionTreeImportEntry;
+		}> = [];
+		const bySourceId = new Map<string, (typeof normalizedNodes)[number]>();
+		const childrenByParent = new Map<string | null, string[]>();
+		for (const node of nodes) {
+			if (!node || typeof node !== "object") throw new Error("Session tree import node must be an object.");
+			if (!isSafeSourceId(node.sourceId)) throw new Error("Session tree import sourceId is not safe.");
+			if (bySourceId.has(node.sourceId)) throw new Error(`Duplicate session tree sourceId: ${node.sourceId}`);
+			if (node.parentSourceId !== null && !isSafeSourceId(node.parentSourceId))
+				throw new Error(`Invalid parent sourceId for ${node.sourceId}`);
+			if (!node.entry || typeof node.entry !== "object" || typeof node.entry.type !== "string")
+				throw new Error(`Invalid entry for session tree node ${node.sourceId}`);
+
+			let entry: SessionTreeImportEntry;
+			try {
+				entry = structuredClone(node.entry) as SessionTreeImportEntry;
+			} catch (error) {
+				throw new Error(`Session tree import entry ${node.sourceId} is not cloneable: ${String(error)}`);
+			}
+			for (const field of generatedFields) {
+				if (hasOwn(entry, field)) throw new Error(`Imported entry ${node.sourceId} must not provide ${field}.`);
+			}
+
+			const isContent = (value: unknown): boolean =>
+				typeof value === "string" ||
+				(Array.isArray(value) && value.every(item => item && typeof item === "object"));
+			const isFiniteNumber = (value: unknown): value is number =>
+				typeof value === "number" && Number.isFinite(value);
+			const validateMessage = (message: unknown): void => {
+				if (!message || typeof message !== "object" || !("role" in message) || typeof message.role !== "string") {
+					throw new Error(`Invalid message payload for ${node.sourceId}`);
+				}
+				const value = message;
+				switch (value.role) {
+					case "user":
+					case "developer":
+						if (
+							!("content" in value) ||
+							!isContent(value.content) ||
+							!("timestamp" in value) ||
+							!isFiniteNumber(value.timestamp)
+						)
+							throw new Error(`Invalid ${value.role} message for ${node.sourceId}`);
+						break;
+					case "assistant":
+						if (
+							!("content" in value) ||
+							!Array.isArray(value.content) ||
+							!("api" in value) ||
+							typeof value.api !== "string" ||
+							!("provider" in value) ||
+							typeof value.provider !== "string" ||
+							!("model" in value) ||
+							typeof value.model !== "string" ||
+							!("usage" in value) ||
+							!value.usage ||
+							typeof value.usage !== "object" ||
+							!("stopReason" in value) ||
+							typeof value.stopReason !== "string" ||
+							!("timestamp" in value) ||
+							!isFiniteNumber(value.timestamp)
+						)
+							throw new Error(`Invalid assistant message for ${node.sourceId}`);
+						break;
+					case "toolResult":
+						if (
+							!("toolCallId" in value) ||
+							typeof value.toolCallId !== "string" ||
+							!("toolName" in value) ||
+							typeof value.toolName !== "string" ||
+							!("content" in value) ||
+							!Array.isArray(value.content) ||
+							!("isError" in value) ||
+							typeof value.isError !== "boolean" ||
+							!("timestamp" in value) ||
+							!isFiniteNumber(value.timestamp)
+						)
+							throw new Error(`Invalid tool result message for ${node.sourceId}`);
+						break;
+					case "bashExecution":
+						if (
+							!("command" in value) ||
+							typeof value.command !== "string" ||
+							!("output" in value) ||
+							typeof value.output !== "string" ||
+							("exitCode" in value && value.exitCode !== undefined && !isFiniteNumber(value.exitCode)) ||
+							!("cancelled" in value) ||
+							typeof value.cancelled !== "boolean" ||
+							!("truncated" in value) ||
+							typeof value.truncated !== "boolean" ||
+							!("timestamp" in value) ||
+							!isFiniteNumber(value.timestamp)
+						)
+							throw new Error(`Invalid bash execution message for ${node.sourceId}`);
+						break;
+					case "pythonExecution":
+						if (
+							!("code" in value) ||
+							typeof value.code !== "string" ||
+							!("output" in value) ||
+							typeof value.output !== "string" ||
+							("exitCode" in value && value.exitCode !== undefined && !isFiniteNumber(value.exitCode)) ||
+							!("cancelled" in value) ||
+							typeof value.cancelled !== "boolean" ||
+							!("truncated" in value) ||
+							typeof value.truncated !== "boolean" ||
+							!("timestamp" in value) ||
+							!isFiniteNumber(value.timestamp)
+						)
+							throw new Error(`Invalid python execution message for ${node.sourceId}`);
+						break;
+					case "custom":
+					case "hookMessage":
+						if (
+							!("customType" in value) ||
+							typeof value.customType !== "string" ||
+							!("content" in value) ||
+							!isContent(value.content) ||
+							!("display" in value) ||
+							typeof value.display !== "boolean" ||
+							!("timestamp" in value) ||
+							!isFiniteNumber(value.timestamp)
+						)
+							throw new Error(`Invalid ${value.role} message for ${node.sourceId}`);
+						break;
+					case "fileMention":
+						if (
+							!("files" in value) ||
+							!Array.isArray(value.files) ||
+							!("timestamp" in value) ||
+							!isFiniteNumber(value.timestamp)
+						)
+							throw new Error(`Invalid file mention message for ${node.sourceId}`);
+						break;
+					default:
+						throw new Error(`Unsupported message role for ${node.sourceId}: ${String(value.role)}`);
+				}
+			};
+
+			switch (entry.type) {
+				case "message":
+					validateMessage(entry.message);
+					break;
+				case "custom":
+					if (typeof entry.customType !== "string") throw new Error(`Invalid custom payload for ${node.sourceId}`);
+					break;
+				case "custom_message":
+					if (entry.customType !== undefined && typeof entry.customType !== "string")
+						throw new Error(`Invalid custom message type for ${node.sourceId}`);
+					if (entry.content !== undefined && typeof entry.content !== "string" && !Array.isArray(entry.content)) {
+						throw new Error(`Invalid custom message content for ${node.sourceId}`);
+					}
+					if (entry.display !== undefined && typeof entry.display !== "boolean")
+						throw new Error(`Invalid custom message display flag for ${node.sourceId}`);
+					if (entry.attribution !== undefined && typeof entry.attribution !== "string")
+						throw new Error(`Invalid custom message attribution for ${node.sourceId}`);
+					break;
+				case "compaction":
+					if (
+						typeof entry.summary !== "string" ||
+						typeof entry.firstKeptEntryId !== "string" ||
+						typeof entry.tokensBefore !== "number" ||
+						!Number.isFinite(entry.tokensBefore)
+					) {
+						throw new Error(`Invalid compaction payload for ${node.sourceId}`);
+					}
+					if (entry.shortSummary !== undefined && typeof entry.shortSummary !== "string")
+						throw new Error(`Invalid compaction shortSummary for ${node.sourceId}`);
+					break;
+				default:
+					throw new Error("Unsupported session tree entry type.");
+			}
+
+			const normalized = { sourceId: node.sourceId, parentSourceId: node.parentSourceId, entry };
+			normalizedNodes.push(normalized);
+			bySourceId.set(node.sourceId, normalized);
+			const siblings = childrenByParent.get(node.parentSourceId);
+			if (siblings) siblings.push(node.sourceId);
+			else childrenByParent.set(node.parentSourceId, [node.sourceId]);
+		}
+
+		const roots = childrenByParent.get(null) ?? [];
+		if (roots.length !== 1) throw new Error("Session tree import requires exactly one root.");
+		for (const node of normalizedNodes) {
+			if (node.parentSourceId !== null && !bySourceId.has(node.parentSourceId))
+				throw new Error(`Missing parent sourceId: ${node.parentSourceId}`);
+		}
+		if (!bySourceId.has(activeLeafId)) throw new Error(`Unknown active leaf sourceId: ${activeLeafId}`);
+		const activeChildren = childrenByParent.get(activeLeafId) ?? [];
+		if (activeChildren.length > 0) throw new Error(`Active sourceId is not a graph leaf: ${activeLeafId}`);
+
+		const orderedSourceIds: string[] = [];
+		const colors = new Map<string, "visiting" | "visited">();
+		const stack: Array<{ sourceId: string; nextChild: number }> = [];
+		const root = roots[0];
+		colors.set(root, "visiting");
+		orderedSourceIds.push(root);
+		stack.push({ sourceId: root, nextChild: 0 });
+		while (stack.length > 0) {
+			const frame = stack[stack.length - 1];
+			const children = childrenByParent.get(frame.sourceId) ?? [];
+			if (frame.nextChild < children.length) {
+				const child = children[frame.nextChild++];
+				const color = colors.get(child);
+				if (color === "visiting") throw new Error("Cyclic session tree parent graph.");
+				if (color === "visited") continue;
+				colors.set(child, "visiting");
+				orderedSourceIds.push(child);
+				stack.push({ sourceId: child, nextChild: 0 });
+			} else {
+				colors.set(frame.sourceId, "visited");
+				stack.pop();
+			}
+		}
+		if (orderedSourceIds.length !== normalizedNodes.length)
+			throw new Error("Session tree import contains an unreachable or cyclic node.");
+		for (const node of normalizedNodes) {
+			if (node.entry.type !== "compaction") continue;
+			let cursor = node.parentSourceId;
+			let found = false;
+			while (cursor !== null) {
+				if (cursor === node.entry.firstKeptEntryId) {
+					found = true;
+					break;
+				}
+				cursor = bySourceId.get(cursor)?.parentSourceId ?? null;
+			}
+			if (!found) {
+				throw new Error(
+					`Compaction ${node.sourceId} firstKeptEntryId must name an ancestor: ${node.entry.firstKeptEntryId}`,
+				);
+			}
+		}
+
+		// Keep the selected leaf last so reopening the JSONL reconstructs the
+		// same canonical leaf from the append-only journal order.
+		const importOrder = orderedSourceIds.filter(sourceId => sourceId !== activeLeafId);
+		importOrder.push(activeLeafId);
+
+		const storage = options?.storage ?? new FileSessionStorage();
+		let manager: SessionManager | undefined;
+		let sessionPath: string | undefined;
+		let temporarySessionPath: string | undefined;
+		try {
+			const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+			manager = new SessionManager(cwd, sessionDir, true, storage);
+			manager.#resetToNewSession();
+			sessionPath = manager.#sessionFile;
+			if (!sessionPath) throw new Error("Session tree import did not create a session path.");
+			temporarySessionPath = path.join(sessionDir, `.${path.basename(sessionPath)}.${mintSessionId()}.tmp`);
+			// Keep the staging manager detached from disk until the complete journal
+			// is materialized. The temporary sibling is the only pre-publication path.
+			manager.#sessionFile = undefined;
+			const nativeIdMap = new Map<string, string>();
+
+			const appendNode = (sourceId: string): void => {
+				const node = bySourceId.get(sourceId)!;
+				if (node.parentSourceId === null) manager!.resetLeaf();
+				else {
+					const nativeParentId = nativeIdMap.get(node.parentSourceId);
+					if (!nativeParentId) throw new Error(`Parent was not imported: ${node.parentSourceId}`);
+					manager!.branch(nativeParentId);
+				}
+
+				switch (node.entry.type) {
+					case "message":
+						nativeIdMap.set(sourceId, manager!.appendMessage(node.entry.message));
+						break;
+					case "custom":
+						nativeIdMap.set(sourceId, manager!.appendCustomEntry(node.entry.customType, node.entry.data));
+						break;
+					case "custom_message":
+						nativeIdMap.set(
+							sourceId,
+							manager!.appendCustomMessageEntry(
+								node.entry.customType,
+								node.entry.content,
+								node.entry.display,
+								node.entry.details,
+								node.entry.attribution,
+							),
+						);
+						break;
+					case "compaction": {
+						const firstKeptNativeId = nativeIdMap.get(node.entry.firstKeptEntryId);
+						if (!firstKeptNativeId)
+							throw new Error(`Compaction firstKeptEntryId was not imported: ${node.entry.firstKeptEntryId}`);
+						nativeIdMap.set(
+							sourceId,
+							manager!.appendCompaction(
+								node.entry.summary,
+								node.entry.shortSummary,
+								firstKeptNativeId,
+								node.entry.tokensBefore,
+								{
+									details: node.entry.details,
+									fromExtension: node.entry.fromExtension,
+									preserveData: node.entry.preserveData,
+								},
+							),
+						);
+						break;
+					}
+				}
+			};
+
+			for (const sourceId of importOrder) {
+				if (sourceId === activeLeafId) continue;
+				appendNode(sourceId);
+			}
+
+			if (options?.title !== undefined) {
+				const title = SessionManager.#cleanTitle(options.title);
+				if (!title) throw new Error("Session tree import title was rejected.");
+				const titleUpdatedAt = nowIso();
+				manager.#sessionName = title;
+				manager.#titleSource = "auto";
+				manager.#titleUpdatedAt = titleUpdatedAt;
+				manager.#header.title = title;
+				manager.#header.titleSource = "auto";
+			}
+
+			const activeNode = bySourceId.get(activeLeafId)!;
+			if (options?.lossMarker) {
+				if (activeNode.parentSourceId === null) manager.resetLeaf();
+				else {
+					const nativeParentId = nativeIdMap.get(activeNode.parentSourceId);
+					if (!nativeParentId) throw new Error(`Parent was not imported: ${activeNode.parentSourceId}`);
+					manager.branch(nativeParentId);
+				}
+				manager.appendCustomEntry(options.lossMarker.customType, structuredClone(options.lossMarker.data));
+			}
+
+			appendNode(activeLeafId);
+			const activeNativeId = nativeIdMap.get(activeLeafId)!;
+			if (options?.lossMarkerFactory) {
+				const marker = options.lossMarkerFactory(Object.fromEntries(nativeIdMap));
+				if (!marker || typeof marker.customType !== "string" || marker.customType.length === 0) {
+					throw new Error("Session tree import lossMarkerFactory returned an invalid customType.");
+				}
+				let markerData: unknown;
+				try {
+					markerData = structuredClone(marker.data);
+				} catch (error) {
+					throw new Error(`Session tree import generated loss marker data is not cloneable: ${String(error)}`);
+				}
+				const markerParentId =
+					activeNode.parentSourceId === null ? null : nativeIdMap.get(activeNode.parentSourceId);
+				if (activeNode.parentSourceId !== null && !markerParentId) {
+					throw new Error(`Parent was not imported: ${activeNode.parentSourceId}`);
+				}
+				if (markerParentId === null) manager.resetLeaf();
+				else if (markerParentId !== undefined) manager.branch(markerParentId);
+				const markerId = manager.appendCustomEntry(marker.customType, markerData);
+				const markerIndex = manager.#entries.findIndex(entry => entry.id === markerId);
+				const activeIndex = manager.#entries.findIndex(entry => entry.id === activeNativeId);
+				if (markerIndex < 0 || activeIndex < 0) throw new Error("Session tree import lost generated metadata.");
+				const [markerEntry] = manager.#entries.splice(markerIndex, 1);
+				manager.#entries.splice(activeIndex, 0, markerEntry!);
+				const activeEntry = manager.#entries[activeIndex + 1];
+				if (activeNode.parentSourceId === null && activeEntry) activeEntry.parentId = markerId;
+				manager.#index.rebuild(manager.#entries);
+			}
+			manager.branch(activeNativeId);
+
+			if (!temporarySessionPath || !sessionPath) throw new Error("Session tree import has no publication paths.");
+			const createOnly = storage.writeTextCreateOnly;
+			if (!createOnly) throw new Error("Session storage does not support create-only staging");
+			manager.#sessionFile = temporarySessionPath;
+			manager.#forceFileCreation = true;
+			await createOnly.call(storage, temporarySessionPath, manager.#fileBody());
+			if (!storage.fsyncFile) throw new Error("Session storage does not support file fsync");
+			await storage.fsyncFile(temporarySessionPath);
+			for (const blob of normalizedBlobs) {
+				const installed = await manager.#blobs.put(blob.bytes);
+				const storedBytes = await manager.#blobs.get(blob.hash);
+				const storedHash = storedBytes === null ? undefined : new Bun.SHA256().update(storedBytes).digest("hex");
+				if (installed.hash !== blob.hash || storedHash !== blob.hash || !storedBytes?.equals(blob.bytes))
+					throw new Error(`Session tree import blob installation failed: ${blob.hash}`);
+			}
+
+			const reopened = await SessionManager.open(temporarySessionPath, sessionDir, storage, {
+				suppressBreadcrumb: true,
+			});
+			await reopened.close();
+			const importedIdMap = Object.fromEntries(nativeIdMap);
+			await options?.validateBeforePublish?.(temporarySessionPath, importedIdMap);
+
+			if (!storage.publishCreateOnly) throw new Error("Session storage does not support create-only publication");
+			await manager.close();
+			await storage.publishCreateOnly(temporarySessionPath, sessionPath);
+			temporarySessionPath = undefined;
+			if (!storage.fsyncDirectory) throw new Error("Session storage does not support directory fsync");
+			await storage.fsyncDirectory(sessionDir);
+			return { sessionPath, nativeIdMap: importedIdMap };
+		} catch (error) {
+			const operationError = toError(error);
+			const cleanupErrors: Error[] = [];
+			if (manager) {
+				try {
+					await manager.close();
+				} catch (closeError) {
+					const normalizedCloseError = toError(closeError);
+					if (!normalizedCloseError.message.includes(operationError.message))
+						cleanupErrors.push(normalizedCloseError);
+				}
+				if (temporarySessionPath) {
+					try {
+						await manager.dropSession(temporarySessionPath);
+					} catch (cleanupError) {
+						cleanupErrors.push(toError(cleanupError));
+					}
+				}
+			}
+			if (cleanupErrors.length > 0) {
+				throw new AggregateError(
+					[toError(error), ...cleanupErrors],
+					"Session tree import failed and cleanup was incomplete.",
+				);
+			}
+			throw error;
+		}
 	}
 
 	/**

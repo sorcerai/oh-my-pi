@@ -118,6 +118,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.installHelp,
 	},
 	{
+		name: "import",
+		load: () => import("./commands/import").then(m => m.default),
+		help: { description: "Import state from another agent into OMP" },
+	},
+	{
 		name: "join",
 		load: () => import("./commands/join").then(m => m.default),
 		help: commandHelp.joinHelp,

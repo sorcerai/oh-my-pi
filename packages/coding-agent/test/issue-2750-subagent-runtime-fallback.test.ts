@@ -572,4 +572,160 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
 		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
 	});
+
+	it("preloads forwarded extension providers before resolving the child model", async () => {
+		const flash = model("pi-antigravity", "gemini-3.6-flash");
+		let providersPreloaded = false;
+		let preloadOptions: unknown;
+		let childModel: Model | undefined;
+		const modelRegistry = {
+			refresh: async () => {},
+			getAvailable: () => (providersPreloaded ? [flash] : []),
+			getApiKey: async () => "test-key",
+		};
+		vi.spyOn(sdkModule, "loadCliExtensionProviders").mockImplementation(
+			async (_registry, _settings, _cwd, options) => {
+				preloadOptions = options;
+				providersPreloaded = true;
+			},
+		);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childModel = options.model;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "flash-worker", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 0,
+			id: "extension-provider",
+			modelOverride: "pi-antigravity/gemini-3.6-flash",
+			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			settings: Settings.isolated(),
+			modelRegistry: modelRegistry as never,
+			enableLsp: false,
+		});
+
+		expect(providersPreloaded).toBe(true);
+		expect(preloadOptions).toEqual({
+			disableExtensionDiscovery: true,
+			additionalExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			signal: expect.anything(),
+		});
+		expect(childModel?.provider).toBe("pi-antigravity");
+		expect(childModel?.id).toBe("gemini-3.6-flash");
+	});
+
+	it("preloads provider extensions before resolving a restricted child model", async () => {
+		const flash = model("pi-antigravity", "gemini-3.6-flash");
+		let providersPreloaded = false;
+		const childPreloads: Array<{
+			extensions: string[] | undefined;
+			customTools: Array<{ path: string }> | undefined;
+		}> = [];
+		let childModel: Model | undefined;
+		const loadProviders = vi.spyOn(sdkModule, "loadCliExtensionProviders").mockImplementation(async () => {
+			providersPreloaded = true;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childPreloads.push({
+				extensions: options.preloadedExtensionPaths,
+				customTools: options.preloadedCustomToolPaths,
+			});
+			childModel = options.model;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "restricted", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 0,
+			id: "restricted-extension-provider",
+			restrictToolNames: true,
+			modelOverride: "pi-antigravity/gemini-3.6-flash",
+			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			preloadedCustomToolPaths: [{ path: "/tmp/custom-tool.ts" }],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => (providersPreloaded ? [flash] : []),
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(loadProviders).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/tmp", {
+			disableExtensionDiscovery: true,
+			additionalExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			signal: expect.anything(),
+		});
+		expect(childModel).toBe(flash);
+		expect(childPreloads).toContainEqual({ extensions: [], customTools: [] });
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "restricted-empty", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 1,
+			id: "restricted-empty-extension-provider",
+			restrictToolNames: true,
+			modelOverride: "pi-antigravity/gemini-3.6-flash",
+			preloadedExtensionPaths: [],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [flash],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+		expect(loadProviders).toHaveBeenCalledTimes(1);
+	});
+
+	it("passes cancellation into provider preload", async () => {
+		const preloadStarted = Promise.withResolvers<void>();
+		const releasePreload = Promise.withResolvers<void>();
+		let loaderSignal: AbortSignal | undefined;
+		vi.spyOn(sdkModule, "loadCliExtensionProviders").mockImplementation(
+			async (_registry, _settings, _cwd, options) => {
+				preloadStarted.resolve();
+				loaderSignal = options?.signal;
+				if (!loaderSignal) return await releasePreload.promise;
+				await new Promise<never>((_resolve, reject) => {
+					if (loaderSignal?.aborted) reject(loaderSignal.reason);
+					else loaderSignal?.addEventListener("abort", () => reject(loaderSignal?.reason), { once: true });
+				});
+			},
+		);
+		const abortController = new AbortController();
+		const run = runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "cancelled-preload", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 0,
+			id: "cancelled-provider-preload",
+			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+			signal: abortController.signal,
+		});
+
+		await preloadStarted.promise;
+		abortController.abort("cancelled during provider preload");
+		const earlyResult = await Promise.race([run.then(() => "settled"), Bun.sleep(20).then(() => "pending")]);
+		releasePreload.resolve();
+		const result = await run;
+		expect(earlyResult).toBe("settled");
+		expect(loaderSignal?.aborted).toBe(true);
+		expect(result.aborted).toBe(true);
+	});
 });

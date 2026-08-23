@@ -7,6 +7,8 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
+	getDefault,
+	type MemoriesSettings,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -14,6 +16,8 @@ import {
 	resetSettingsForTest,
 	type SettingPath,
 	Settings,
+	type SkillsSettings,
+	validatePrimeBridgeApprovalTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -613,6 +617,94 @@ describe("Settings", () => {
 			expect(Settings.isolated({ inlineToolDescriptors: true }).get("inlineToolDescriptors")).toBe("on");
 			expect(Settings.isolated({ inlineToolDescriptors: false }).get("inlineToolDescriptors")).toBe("off");
 			expect(Settings.isolated().get("inlineToolDescriptors")).toBe("auto");
+		});
+	});
+
+	describe("Phase 5 settings schema additions", () => {
+		it("resolves Prime Bridge defaults for the client settings", () => {
+			const settings = Settings.isolated();
+
+			expect(settings.get("primeBridge.enabled")).toBe(false);
+			expect(settings.get("primeBridge.url")).toBeUndefined();
+			expect(settings.get("primeBridge.tokenPath")).toBeUndefined();
+			expect(settings.get("primeBridge.autoStart")).toBe(false);
+		});
+
+		it("resolves configured Prime Bridge client settings", () => {
+			const settings = Settings.isolated({
+				"primeBridge.enabled": true,
+				"primeBridge.url": "http://127.0.0.1:8787",
+				"primeBridge.tokenPath": "/run/user/501/prime.token",
+				"primeBridge.autoStart": true,
+			});
+
+			expect(settings.get("primeBridge.enabled")).toBe(true);
+			expect(settings.get("primeBridge.url")).toBe("http://127.0.0.1:8787");
+			expect(settings.get("primeBridge.tokenPath")).toBe("/run/user/501/prime.token");
+			expect(settings.get("primeBridge.autoStart")).toBe(true);
+		});
+
+		it("resolves Prime Bridge tool-host defaults", () => {
+			const settings = Settings.isolated();
+
+			expect(settings.get("primeBridge.toolHost.enabled")).toBe(false);
+			expect(settings.get("primeBridge.toolHost.allowTools")).toEqual([]);
+			expect(settings.get("primeBridge.toolHost.defaultTools")).toBe(true);
+			expect(settings.get("primeBridge.toolHost.sessionId")).toBeUndefined();
+			expect(settings.get("primeBridge.toolHost.approvalTimeoutMs")).toBe(60_000);
+			expect(getDefault("primeBridge.toolHost.approvalTimeoutMs")).toBe(60_000);
+		});
+
+		it("resolves configured Prime Bridge tool-host settings", () => {
+			const settings = Settings.isolated({
+				"primeBridge.toolHost.enabled": true,
+				"primeBridge.toolHost.allowTools": ["read", "grep"],
+				"primeBridge.toolHost.defaultTools": false,
+				"primeBridge.toolHost.sessionId": "session-fixed",
+				"primeBridge.toolHost.approvalTimeoutMs": 1,
+			});
+
+			expect(settings.get("primeBridge.toolHost.enabled")).toBe(true);
+			expect(settings.get("primeBridge.toolHost.allowTools")).toEqual(["read", "grep"]);
+			expect(settings.get("primeBridge.toolHost.defaultTools")).toBe(false);
+			expect(settings.get("primeBridge.toolHost.sessionId")).toBe("session-fixed");
+			expect(settings.get("primeBridge.toolHost.approvalTimeoutMs")).toBe(1);
+		});
+
+		it("accepts inclusive Prime Bridge approval timeout boundaries", () => {
+			expect(() => validatePrimeBridgeApprovalTimeoutMs(1)).not.toThrow();
+			expect(() => validatePrimeBridgeApprovalTimeoutMs(60_000)).not.toThrow();
+		});
+
+		it("rejects Prime Bridge approval timeouts outside the supported bounds", () => {
+			for (const approvalTimeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 60_001]) {
+				expect(() => validatePrimeBridgeApprovalTimeoutMs(approvalTimeoutMs)).toThrow(
+					"Prime bridge approvalTimeoutMs must be between 1 and 60000 milliseconds",
+				);
+			}
+		});
+
+		it("defaults skills prompt exposure through the typed skills getter", () => {
+			const skills: SkillsSettings = Settings.isolated().getGroup("skills");
+
+			expect(skills.promptMode).toBe("all");
+			expect(skills.promptSkills).toEqual([]);
+		});
+
+		it("resolves configured skills prompt exposure through the typed skills getter", () => {
+			const skills: SkillsSettings = Settings.isolated({
+				"skills.promptMode": "allowlist",
+				"skills.promptSkills": ["browser", "git"],
+			}).getGroup("skills");
+
+			expect(skills.promptMode).toBe("allowlist");
+			expect(skills.promptSkills).toEqual(["browser", "git"]);
+		});
+
+		it("exposes the phase-one input token limit through the public typed memories group", () => {
+			const memories: MemoriesSettings = Settings.isolated().getGroup("memories");
+
+			expect(memories.phase1InputTokenLimit).toBe(4000);
 		});
 	});
 

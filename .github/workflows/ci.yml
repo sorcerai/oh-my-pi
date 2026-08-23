@@ -343,10 +343,7 @@ jobs:
               OMP_TEST_CONCURRENCY: "4"
            run: |
               bun run ci:test:ts:workspace
-              # Not `test:scripts`: scripts/musl-release.test.ts fails on main
-              # (its install.sh smoke-check executes a fake binary), so running
-              # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
+              bun run test:scripts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
@@ -624,12 +621,14 @@ jobs:
                     os: macos-15-intel,
                     target_id: darwin-x64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
+                    worker_path: "",
                     native_targets: darwin-x64-baseline,
                  }
                - {
-                    os: macos-14,
+                    os: macos-15,
                     target_id: darwin-arm64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
+                    worker_path: packages/coding-agent/binaries/omp-stt-nemotron-darwin-arm64,
                     native_targets: darwin-arm64,
                  }
       runs-on: ${{ matrix.os }}
@@ -672,7 +671,13 @@ jobs:
               APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
               APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
               APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-           run: bash scripts/ci-macos-sign.sh "${{ matrix.binary_path }}"
+           run: |
+              bash scripts/ci-macos-sign.sh "${{ matrix.binary_path }}"
+              # The stt-nemotron worker is a standalone stdin-protocol Mach-O.
+              # Immediate EOF exercises dyld and hardened-runtime launch safely.
+              if [ -n "${{ matrix.worker_path }}" ]; then
+                bash scripts/ci-macos-sign.sh --stdin-eof-launch-check "${{ matrix.worker_path }}"
+              fi
          - name: Smoke release binary
            run: |
               runtime_dir="$(mktemp -d)"
@@ -693,6 +698,17 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         - name: Upload release STT worker artifact
+           # Separate artifact name (v4 upload-artifact cannot append to an
+           # existing artifact); the release_github download merges every
+           # omp-binary-* artifact into binaries/, where the omp-* globs pick
+           # the worker up for checksums and release publishing.
+           if: matrix.worker_path != ''
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: omp-binary-${{ matrix.target_id }}-stt-worker
+              path: ${{ matrix.worker_path }}
+              if-no-files-found: error
 
    # Publishes the five @oh-my-pi/pi-natives-<tag> leaf packages once
    # validation passes and every binary built. Runs on one linux runner: leaf
@@ -794,6 +810,8 @@ jobs:
          # Generated after every other release asset is in place and before
          # the release is created, so SHA256SUMS.txt itself ships as an asset
          # and covers every other file uploaded alongside it.
+         - name: Require macOS arm64 STT worker
+           run: test -f packages/coding-agent/binaries/omp-stt-nemotron-darwin-arm64
          - name: Generate checksums
            run: |
               bun run ci:release:checksums SHA256SUMS.txt \
@@ -820,7 +838,7 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_github.result == 'success' }}
       needs: [release_metadata, release_github]
-      runs-on: macos-14
+      runs-on: macos-15
       permissions:
          contents: read
       env:
@@ -834,16 +852,30 @@ jobs:
            run: |
               codesign -dvvv ./omp-darwin-arm64
               codesign --verify --strict --verbose=4 ./omp-darwin-arm64
+              lipo -verify_arch arm64 ./omp-darwin-arm64
               runtime_dir="$(mktemp -d)"
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --version
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --smoke-test
+         - name: Verify published stt-nemotron worker (macOS arm64)
+           # The worker must exist as its own downloadable, signature-valid
+           # asset — every darwin-arm64 consumer installs it beside omp.
+           run: |
+              curl -fsSL -o stt-nemotron "https://github.com/${{ github.repository }}/releases/download/${{ needs.release_metadata.outputs.release-tag }}/omp-stt-nemotron-darwin-arm64"
+              chmod +x stt-nemotron
+              file stt-nemotron | grep -q "Mach-O"
+              codesign --verify --strict --verbose=4 ./stt-nemotron
+              lipo -verify_arch arm64 ./stt-nemotron
+              ./stt-nemotron </dev/null
          - name: Assert signed release is not ad-hoc
            if: env.MACOS_SIGNING == 'true'
            run: |
-              if codesign -dvvv ./omp-darwin-arm64 2>&1 | grep -qE "flags=.*adhoc|Signature=adhoc"; then
-                echo "published binary is still ad-hoc signed (Developer ID signing did not run)" >&2
-                exit 1
-              fi
+              for binary in ./omp-darwin-arm64 ./stt-nemotron; do
+                authority="$(codesign -dvvv "$binary" 2>&1 | sed -n '/^Authority=/{s/^Authority=//;p;q;}')"
+                if [ -z "$authority" ] || ! printf '%s\n' "$authority" | grep -q '^Developer ID Application:'; then
+                  echo "$binary is not signed with a Developer ID Application identity" >&2
+                  exit 1
+                fi
+              done
               # Gatekeeper assessment: a notarized Developer ID binary is accepted.
               # Informational — a bare (unstapled) Mach-O relies on the online ticket
               # lookup, so surface the result without gating the release on it.

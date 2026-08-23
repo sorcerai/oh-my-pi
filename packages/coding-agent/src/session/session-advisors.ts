@@ -355,6 +355,11 @@ export class SessionAdvisors {
 
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
 	onModelRolesChanged(): void {
+		this.onPrimaryModelChanged();
+	}
+
+	/** Rebuilds live advisors when the primary model selector changes. */
+	onPrimaryModelChanged(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);

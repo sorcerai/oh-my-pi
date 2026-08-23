@@ -103,7 +103,11 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	type ResolvedModelRoleValue,
+	resolvePersistedModelSelector,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -7502,7 +7506,10 @@ export class AgentSession {
 
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
-		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		const isChanging =
+			!currentModel ||
+			!modelsAreEqual(currentModel, model) ||
+			formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(model);
 		const codeModeChanged = this.#tools.codeModeChangesBetween(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
@@ -7526,8 +7533,8 @@ export class AgentSession {
 		// retry-fallback on the error path.
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
+			this.#advisors.onPrimaryModelChanged();
 		}
-
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);
 
@@ -8110,30 +8117,29 @@ export class AgentSession {
 				this.#closeAllProviderSessions("session reload");
 			}
 
-			// Restore model if saved
+			// Restore model if saved, preserving exact routing and selector suffixes.
 			const targetModelStrings = getRestorableSessionModels(
 				sessionContext.models,
 				this.sessionManager.getLastModelChangeRole(),
 			);
+			let restoredModelThinkingLevel: ConfiguredThinkingLevel | undefined;
 			if (targetModelStrings.length > 0) {
 				const availableModels = this.#modelRegistry.getAvailable();
 				let match: Model | undefined;
 				for (const targetModelStr of targetModelStrings) {
-					const slashIdx = targetModelStr.indexOf("/");
-					if (slashIdx <= 0) continue;
-					const provider = targetModelStr.slice(0, slashIdx);
-					const modelId = targetModelStr.slice(slashIdx + 1);
-					match = availableModels.find(m => m.provider === provider && m.id === modelId);
-					if (match) break;
+					const restored = resolvePersistedModelSelector(targetModelStr, availableModels);
+					if (!restored) continue;
+					match = restored.model;
+					restoredModelThinkingLevel = restored.thinkingLevel;
+					break;
 				}
 				if (match) {
 					const currentModel = this.model;
 					const shouldResetProviderState =
 						switchingToDifferentSession ||
 						(currentModel !== undefined &&
-							(currentModel.provider !== match.provider ||
-								currentModel.id !== match.id ||
-								currentModel.api !== match.api));
+							(!modelsAreEqual(currentModel, match) ||
+								formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(match)));
 					if (shouldResetProviderState) {
 						await this.#setModelWithProviderSessionReset(match);
 					} else {
@@ -8171,15 +8177,17 @@ export class AgentSession {
 			// resumes in auto mode (reclassifying the next turn) instead of freezing at
 			// the last resolved level. Entries written before the `configured` field
 			// existed fall back to the concrete level (legacy pin-on-resume behavior).
-			// With no thinking entry, fall back to the global default so fresh sessions
-			// still classify their first turn.
+			// With no thinking entry, a model selector suffix takes precedence over
+			// the global auto fallback so it survives routed model restoration.
 			const restoredConfigured = sessionContext.configuredThinkingLevel;
 			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
-				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-					? restoredConfigured === AUTO_THINKING
-						? AUTO_THINKING
-						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-					: defaultThinkingLevel;
+				!hasThinkingEntry && restoredModelThinkingLevel !== undefined
+					? restoredModelThinkingLevel
+					: hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
+						? restoredConfigured === AUTO_THINKING
+							? AUTO_THINKING
+							: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
+						: (restoredModelThinkingLevel ?? defaultThinkingLevel);
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
@@ -8261,7 +8269,10 @@ export class AgentSession {
 			if (previousModel) {
 				const rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
-				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
+				modelRolledBack =
+					!rolledBackModel ||
+					!modelsAreEqual(rolledBackModel, previousModel) ||
+					formatModelStringWithRouting(rolledBackModel) !== formatModelStringWithRouting(previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);

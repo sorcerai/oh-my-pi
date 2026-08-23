@@ -4,11 +4,12 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
@@ -41,7 +42,12 @@ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prom
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
+import {
+	type CreateAgentSessionOptions,
+	createAgentSession,
+	discoverAuthStorage,
+	loadCliExtensionProviders,
+} from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
@@ -62,6 +68,19 @@ import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
+
+/** Harness-owned standing directives injected into every subagent system prompt.
+ * Optional: missing file means no directives block (byte-identical stock prompt).
+ * Read on every spawn so edits apply to new dispatches without a restart. */
+function readSubagentDirectives(): string {
+	try {
+		return readFileSync(path.join(getAgentDir(), "subagent-directives.md"), "utf8").trim();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+		throw error;
+	}
+}
+
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -1927,6 +1946,7 @@ async function driveSessionToYield(
 		}
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
+		const requiresYield = session.model?.api !== "pi-antigravity-bridge";
 
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
@@ -2005,7 +2025,7 @@ async function driveSessionToYield(
 		// injected turns just multiply the failure noise; the teardown reap
 		// still cancels and awaits their jobs before worktree capture.
 		let asyncPendingNoticeSent = false;
-		while (!abortSignal.aborted) {
+		while (requiresYield && !abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
 				// Ladder exhausted / terminal model error: classified below
@@ -2895,6 +2915,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
 			}
 			checkAbort();
+			// Child sessions receive only the parent-discovered extension paths. Load
+			// their provider registrations before resolving `modelOverride`, otherwise
+			// a forwarded extension provider cannot be selected for the child.
+			if (options.preloadedExtensionPaths?.length) {
+				await loadCliExtensionProviders(modelRegistry, subagentSettings, worktree ?? cwd, {
+					disableExtensionDiscovery: true,
+					additionalExtensionPaths: options.preloadedExtensionPaths,
+					signal: abortSignal,
+				});
+			}
+			checkAbort();
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			const inheritedRetryFallbackChain =
@@ -2976,6 +3007,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
+			const subagentDirectives = readSubagentDirectives();
 			const sessionManagerPromise = sessionFile
 				? SessionManager.open(sessionFile, undefined, undefined, {
 						initialCwd: effectiveCwd,
@@ -3103,6 +3135,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReference: options.planReference?.content ?? "",
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
+						directives: subagentDirectives,
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",

@@ -91,6 +91,12 @@ bun --cwd=packages/coding-agent run build
 BINARY_DIR="$WORK_DIR/binary-bin"
 mkdir -p "$BINARY_DIR"
 cp packages/coding-agent/dist/omp "$BINARY_DIR/omp"
+# The compiled runtime resolves stt-nemotron only beside process.execPath, so
+# when the build staged a worker (Darwin arm64 hosts) it must travel with the
+# binary into the faked install dir.
+if [ -f packages/coding-agent/dist/stt-nemotron ]; then
+   cp packages/coding-agent/dist/stt-nemotron "$BINARY_DIR/stt-nemotron"
+fi
 smoke_cli "$BINARY_DIR/omp"
 
 section "Source install smoke"

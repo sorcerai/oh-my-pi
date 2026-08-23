@@ -5,6 +5,7 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { BridgeMessage, BridgeReceipt, ExternalPeer } from "@oh-my-pi/prime-bridge-protocol";
 import type { AsyncJobType } from "../../async";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
@@ -96,11 +97,19 @@ export interface CoordinationDetails {
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
+	/** Prime peers, kept separate from local AgentRegistry rows. */
+	externalPeers?: ExternalPeer[];
+	/** Verbatim receipts returned by the Prime bridge. */
+	externalReceipts?: BridgeReceipt[];
+	/** Verbatim messages returned by the Prime bridge inbox. */
+	externalInbox?: BridgeMessage[];
+	/** Message consumed by an external Prime wait. */
+	externalWaited?: BridgeMessage | null;
 	agents?: AgentActivitySnapshot[];
 }
 
 /** Hub result details: coordination snapshots or launch (process) state. */
-export type HubDetails = CoordinationDetails | LaunchToolDetails;
+export type HubDetails = (CoordinationDetails | LaunchToolDetails) & Partial<CoordinationDetails>;
 
 /** Partially-streamed hub call arguments, as seen by the renderers. */
 export type HubRenderArgs = {

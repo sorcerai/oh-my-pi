@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -14,7 +17,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, setAgentDir } from "@oh-my-pi/pi-utils";
 
 function createAssistantStopMessage(text: string): AssistantMessage {
 	return {
@@ -44,6 +47,7 @@ function createMockSession(
 		emit: (event: AgentSessionEvent) => void;
 		state: { messages: AssistantMessage[] };
 	}) => void | Promise<void>,
+	model: AgentSession["model"] = undefined,
 ): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const state = { messages: [] as AssistantMessage[] };
@@ -56,7 +60,7 @@ function createMockSession(
 	const session = {
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
-		model: undefined,
+		model,
 		extensionRunner: undefined,
 		sessionManager: {
 			appendSessionInit: () => {},
@@ -123,6 +127,86 @@ describe("runSubprocess yield reminders", () => {
 		} as unknown as import("@oh-my-pi/pi-coding-agent/config/model-registry").ModelRegistry,
 		enableLsp: false,
 	};
+
+	it("reloads subagent directives for each spawn and ignores a missing file", async () => {
+		const originalAgentDir = getAgentDir();
+		const originalEnv = {
+			OMP_AGENT_DIR: process.env.OMP_AGENT_DIR,
+			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+			OMP_PROFILE: process.env.OMP_PROFILE,
+			PI_PROFILE: process.env.PI_PROFILE,
+		};
+		const tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-subagent-directives-"));
+		const directivesPath = path.join(tempAgentDir, "subagent-directives.md");
+		const directiveA = "Directive A: use the first marker.";
+		const directiveB = "Directive B: use the second marker.";
+
+		try {
+			process.env.OMP_AGENT_DIR = tempAgentDir;
+			setAgentDir(tempAgentDir);
+
+			const createAgentSessionSpy = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () =>
+				createSessionResult(
+					createMockSession(({ emit }) => {
+						emit({
+							type: "tool_execution_end",
+							toolCallId: "tool-yield",
+							toolName: "yield",
+							result: {
+								content: [{ type: "text", text: "Result submitted." }],
+								details: { status: "success", data: { ok: true } },
+							},
+							isError: false,
+						});
+					}),
+				),
+			);
+
+			const childSystemPrompt = (spawnIndex: number): string => {
+				const systemPromptBuilder = createAgentSessionSpy.mock.calls[spawnIndex]?.[0]?.systemPrompt;
+				expect(systemPromptBuilder).toBeFunction();
+				if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
+				const renderedPrompt = systemPromptBuilder(["default system prompt"]);
+				return Array.isArray(renderedPrompt) ? renderedPrompt.join("\n") : renderedPrompt;
+			};
+
+			await fs.writeFile(directivesPath, directiveA, "utf8");
+			await runSubprocess({ ...baseOptions, id: "subagent-directives-a" });
+			const promptA = childSystemPrompt(0);
+			expect(promptA).toContain("DIRECTIVES");
+			expect(promptA).toContain(directiveA);
+			expect(promptA).not.toContain(directiveB);
+
+			await fs.writeFile(directivesPath, directiveB, "utf8");
+			const rebuiltPromptA = childSystemPrompt(0);
+			expect(rebuiltPromptA).toContain(directiveA);
+			expect(rebuiltPromptA).not.toContain(directiveB);
+			await runSubprocess({ ...baseOptions, id: "subagent-directives-b" });
+			const promptB = childSystemPrompt(1);
+			expect(promptB).toContain("DIRECTIVES");
+			expect(promptB).toContain(directiveB);
+			expect(promptB).not.toContain(directiveA);
+
+			await fs.rm(directivesPath);
+			await runSubprocess({ ...baseOptions, id: "subagent-directives-missing" });
+			const promptMissing = childSystemPrompt(2);
+			expect(promptMissing).not.toContain("DIRECTIVES");
+			expect(promptMissing).not.toContain(directiveA);
+			expect(promptMissing).not.toContain(directiveB);
+			await fs.mkdir(directivesPath);
+			const unreadableResult = await runSubprocess({ ...baseOptions, id: "subagent-directives-unreadable" });
+			expect(unreadableResult.exitCode).toBe(1);
+			expect(unreadableResult.error).toContain("EISDIR");
+			expect(createAgentSessionSpy).toHaveBeenCalledTimes(3);
+		} finally {
+			setAgentDir(originalAgentDir);
+			for (const [key, value] of Object.entries(originalEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			await fs.rm(tempAgentDir, { recursive: true, force: true });
+		}
+	});
 
 	it("waits for session_start extension user messages before prompting the subagent", async () => {
 		let extensionSendUserMessage: ExtensionActions["sendUserMessage"] | undefined;
@@ -600,14 +684,42 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.thinkingLevel).toBe(Effort.High);
 	});
+
+	it("does not re-prompt the plain-text Pi bridge", async () => {
+		const prompts: string[] = [];
+		const session = createMockSession(
+			({ text, emit, state }) => {
+				prompts.push(text);
+				const assistant = createAssistantStopMessage("plain bridge result");
+				state.messages.push(assistant);
+				emit({ type: "message_end", message: assistant });
+			},
+			{ api: "pi-antigravity-bridge" } as AgentSession["model"],
+		);
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "pi-bridge-without-tool-calls",
+		});
+
+		expect(prompts).toEqual(["do work"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("plain bridge result");
+	});
+
 	it("fails after 3 reminders when yield is never called for a structured task", async () => {
 		const prompts: string[] = [];
-		const session = createMockSession(({ text, promptIndex, emit, state }) => {
-			prompts.push(text);
-			const assistant = createAssistantStopMessage(promptIndex === 1 ? "did work" : "still no yield");
-			state.messages.push(assistant);
-			emit({ type: "message_end", message: assistant });
-		});
+		const session = createMockSession(
+			({ text, promptIndex, emit, state }) => {
+				prompts.push(text);
+				const assistant = createAssistantStopMessage(promptIndex === 1 ? "did work" : "still no yield");
+				state.messages.push(assistant);
+				emit({ type: "message_end", message: assistant });
+			},
+			{ api: "openai-completions", supportsTools: false } as AgentSession["model"],
+		);
 
 		mockCreateAgentSession(session);
 
@@ -616,6 +728,7 @@ describe("runSubprocess yield reminders", () => {
 			id: "subagent-3",
 			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
 		});
+
 		expect(prompts).toHaveLength(4);
 		expect(result.exitCode).toBe(1);
 		expect(result.aborted).toBe(false);

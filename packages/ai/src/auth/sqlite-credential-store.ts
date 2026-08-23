@@ -4,7 +4,8 @@
  * The public AuthCredentialStore interface remains in ../auth-storage so local
  * and remote stores share the same contract.
  */
-import { Database, type Statement } from "bun:sqlite";
+import { constants, Database, type Statement } from "bun:sqlite";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
@@ -23,7 +24,9 @@ import type {
 	OAuthCredential,
 	StoredAuthCredential,
 	StoredCredentialBlock,
+	StoredCredentialInsertResult,
 } from "../auth-storage";
+
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
@@ -92,6 +95,17 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
+const SQLITE_COMPANION_SUFFIXES = ["-wal", "-journal", "-shm"] as const;
+
+type ExistingSqliteIdentity = {
+	readonly path: string;
+	readonly dev: number;
+	readonly ino: number;
+};
+
+type OpenExistingHooks = {
+	readonly beforeOpen?: () => void | Promise<void>;
+};
 
 // SQLite error classifiers live in pi-utils so the credential store and the
 // model cache share one implementation; re-exported here to preserve the
@@ -131,6 +145,30 @@ export function serializeCredential(provider: string, credential: AuthCredential
 		};
 	}
 	return null;
+}
+function serializeCreateOnlyCredentials(provider: string, credentials: AuthCredential[]): SerializedCredentialRecord[] {
+	try {
+		return credentials.map(credential => {
+			if (!credential || typeof credential !== "object") {
+				throw new TypeError("invalid credential");
+			}
+			if (
+				(credential.type !== "api_key" && credential.type !== "oauth") ||
+				(credential.type === "api_key" && typeof credential.key !== "string") ||
+				(credential.type === "oauth" &&
+					(typeof credential.access !== "string" ||
+						typeof credential.refresh !== "string" ||
+						!Number.isFinite(credential.expires)))
+			) {
+				throw new TypeError("invalid credential");
+			}
+			const serialized = serializeCredential(provider, credential);
+			if (!serialized) throw new TypeError("invalid credential");
+			return serialized;
+		});
+	} catch {
+		throw new TypeError("Invalid credential payload");
+	}
 }
 
 function deserializeCredential(row: AuthRow): AuthCredential | null {
@@ -378,11 +416,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#dataVersion: number;
 	#authRevision: number;
 	#localAuthRevision: number;
+	#existingIdentity?: ExistingSqliteIdentity;
 	#closed = false;
 
-	constructor(db: Database) {
+	constructor(db: Database, initializeSchema = true, existingIdentity?: ExistingSqliteIdentity) {
+		this.#existingIdentity = existingIdentity;
 		this.#db = db;
-		this.#initializeSchema();
+		if (initializeSchema) this.#initializeSchema();
+		else this.#createLocalAuthChangeTrackingObjects();
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
@@ -550,6 +591,113 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`Failed to open auth database at '${dbPath}' after ${maxAttempts} attempts: ${lastBusyError?.message}`,
 			{ cause: lastBusyError },
 		);
+	}
+	/**
+	 * Open a validated existing database without schema initialization,
+	 * migration, chmod, WAL changes, or cache hygiene.
+	 */
+	static async openExisting(
+		dbPath: string,
+		expectedIdentity?: { readonly dev: number; readonly ino: number },
+		hooks?: OpenExistingHooks,
+	): Promise<SqliteAuthCredentialStore> {
+		const before = await fs.lstat(dbPath);
+		const expected = expectedIdentity ?? { dev: before.dev, ino: before.ino };
+		if (!before.isFile() || before.dev !== expected.dev || before.ino !== expected.ino) {
+			throw new AIError.ConfigurationError("Auth database identity changed before writable open");
+		}
+
+		await SqliteAuthCredentialStore.#assertNoUnsafeCompanions(dbPath);
+
+		const identity: ExistingSqliteIdentity = { path: dbPath, dev: expected.dev, ino: expected.ino };
+		let db: Database | undefined;
+		try {
+			await hooks?.beforeOpen?.();
+			db = new Database(dbPath, { readwrite: true, create: false });
+			SqliteAuthCredentialStore.#installBusyTimeout(db);
+			SqliteAuthCredentialStore.#assertExistingIdentity(db, identity);
+			await SqliteAuthCredentialStore.#assertNoUnsafeCompanions(dbPath);
+			return new SqliteAuthCredentialStore(db, false, identity);
+		} catch (error) {
+			try {
+				db?.close();
+			} catch {
+				// Preserve the open failure.
+			}
+			throw error;
+		}
+	}
+
+	static #assertNoUnsafeCompanionsSync(dbPath: string): void {
+		for (const suffix of SQLITE_COMPANION_SUFFIXES) {
+			const companionPath = `${dbPath}${suffix}`;
+			let companion: fsSync.Stats;
+			try {
+				companion = fsSync.lstatSync(companionPath);
+			} catch (error) {
+				const code =
+					typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+						? error.code
+						: undefined;
+				if (code === "ENOENT") continue;
+				throw error;
+			}
+			const owned = typeof process.getuid !== "function" || companion.uid === process.getuid();
+			if (!companion.isFile() || companion.nlink !== 1 || !owned || (companion.mode & 0o077) !== 0) {
+				throw new AIError.ConfigurationError(`Auth database has an unsafe SQLite companion: '${companionPath}'`);
+			}
+		}
+	}
+
+	static async #assertNoUnsafeCompanions(dbPath: string): Promise<void> {
+		for (const suffix of SQLITE_COMPANION_SUFFIXES) {
+			const companionPath = `${dbPath}${suffix}`;
+			let companion: fsSync.Stats;
+			try {
+				companion = await fs.lstat(companionPath);
+			} catch (error) {
+				const code =
+					typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+						? error.code
+						: undefined;
+				if (code === "ENOENT") continue;
+				throw error;
+			}
+			const owned = typeof process.getuid !== "function" || companion.uid === process.getuid();
+			if (!companion.isFile() || companion.nlink !== 1 || !owned || (companion.mode & 0o077) !== 0) {
+				throw new AIError.ConfigurationError(`Auth database has an unsafe SQLite companion: '${companionPath}'`);
+			}
+		}
+	}
+
+	static #assertExistingIdentity(db: Database, expected: ExistingSqliteIdentity): void {
+		const moved = new Int32Array(1);
+		const result = db.fileControl(constants.SQLITE_FCNTL_HAS_MOVED, moved);
+		let current: fsSync.Stats;
+		try {
+			current = fsSync.lstatSync(expected.path);
+		} catch (error) {
+			throw new AIError.ConfigurationError("Auth database identity changed during writable open", { cause: error });
+		}
+		if (
+			result !== 0 ||
+			moved[0] !== 0 ||
+			!current.isFile() ||
+			current.dev !== expected.dev ||
+			current.ino !== expected.ino
+		) {
+			throw new AIError.ConfigurationError("Auth database identity changed during writable open");
+		}
+	}
+
+	#assertPinnedExistingIdentity(): void {
+		const expected = this.#existingIdentity;
+		if (expected) SqliteAuthCredentialStore.#assertExistingIdentity(this.#db, expected);
+	}
+	#assertWriteBoundary(): void {
+		this.#assertPinnedExistingIdentity();
+		const expected = this.#existingIdentity;
+		if (expected) SqliteAuthCredentialStore.#assertNoUnsafeCompanionsSync(expected.path);
 	}
 
 	static #ensureAuthCredentialRefreshLeasesTable(db: Database): void {
@@ -767,11 +915,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				revision INTEGER NOT NULL
 			);
 			INSERT OR IGNORE INTO auth_change_revision (id, revision) VALUES (1, 0);
-			CREATE TEMP TABLE IF NOT EXISTS auth_local_change_revision (
-				id INTEGER PRIMARY KEY CHECK (id = 1),
-				revision INTEGER NOT NULL
-			);
-			INSERT OR IGNORE INTO auth_local_change_revision (id, revision) VALUES (1, 0);
 		`);
 		for (const table of ["auth_credentials", "auth_credential_blocks"] as const) {
 			for (const event of ["INSERT", "UPDATE", "DELETE"] as const) {
@@ -782,6 +925,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 						UPDATE auth_change_revision SET revision = revision + 1 WHERE id = 1;
 					END;
 				`);
+			}
+		}
+		this.#createLocalAuthChangeTrackingObjects();
+	}
+
+	#createLocalAuthChangeTrackingObjects(): void {
+		this.#db.run(`
+			CREATE TEMP TABLE IF NOT EXISTS auth_local_change_revision (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				revision INTEGER NOT NULL
+			);
+			INSERT OR IGNORE INTO auth_local_change_revision (id, revision) VALUES (1, 0);
+		`);
+		for (const table of ["auth_credentials", "auth_credential_blocks"] as const) {
+			for (const event of ["INSERT", "UPDATE", "DELETE"] as const) {
 				this.#db.run(`
 					CREATE TEMP TRIGGER IF NOT EXISTS auth_local_change_revision_${table}_${event.toLowerCase()}
 					AFTER ${event} ON main.${table}
@@ -1182,12 +1340,25 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			updateIdentity?.finalize();
 		}
 	}
+	#insertSerializedCredentialsIfAbsent(
+		provider: string,
+		serialized: SerializedCredentialRecord[],
+	): StoredCredentialInsertResult {
+		const existingRows = this.#listActiveByProviderStmt.all(provider) as AuthRow[];
+		if (existingRows.length > 0) {
+			return { inserted: false, rows: this.listAuthCredentials(provider) };
+		}
+		for (const record of serialized) {
+			this.#insertStmt.get(provider, record.credentialType, record.data, record.identityKey);
+		}
+		return { inserted: serialized.length > 0, rows: this.listAuthCredentials(provider) };
+	}
 
 	// ─── AuthCredentialStore interface ──────────────────────────────────────
 
 	listAuthCredentials(provider?: string): StoredAuthCredential[] {
 		const rows =
-			(provider
+			(provider !== undefined
 				? (this.#listActiveByProviderStmt.all(provider) as AuthRow[])
 				: (this.#listActiveStmt.all() as AuthRow[])) ?? [];
 
@@ -1200,9 +1371,61 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return results;
 	}
 
+	insertCredentialsIfProviderAbsent(provider: string, credentials: AuthCredential[]): StoredCredentialInsertResult {
+		this.#assertPinnedExistingIdentity();
+		if (provider.trim().length === 0) {
+			throw new AIError.ConfigurationError("Credential provider must be a non-empty string");
+		}
+		const serialized = serializeCreateOnlyCredentials(provider, credentials);
+		const insertIfAbsent = this.#db.transaction(() => {
+			this.#assertWriteBoundary();
+			return this.#insertSerializedCredentialsIfAbsent(provider, serialized);
+		});
+		return insertIfAbsent.immediate();
+	}
+
+	insertCredentialsIfProvidersAbsent(batch: Array<{ provider: string; credentials: AuthCredential[] }>): {
+		inserted: string[];
+		skipped: string[];
+	} {
+		this.#assertPinnedExistingIdentity();
+		if (!Array.isArray(batch)) {
+			throw new AIError.ConfigurationError("Credential batch must be an array");
+		}
+		const seenProviders = new Set<string>();
+		const serialized = batch.map(entry => {
+			if (!entry || typeof entry.provider !== "string" || entry.provider.trim().length === 0) {
+				throw new AIError.ConfigurationError("Credential provider must be a non-empty string");
+			}
+			if (seenProviders.has(entry.provider)) {
+				throw new AIError.ConfigurationError("Credential batch contains duplicate providers");
+			}
+			if (!Array.isArray(entry.credentials)) {
+				throw new AIError.ConfigurationError("Credential batch credentials must be an array");
+			}
+			seenProviders.add(entry.provider);
+			return {
+				provider: entry.provider,
+				records: serializeCreateOnlyCredentials(entry.provider, entry.credentials),
+			};
+		});
+		const insertBatch = this.#db.transaction(() => {
+			this.#assertWriteBoundary();
+			const inserted: string[] = [];
+			const skipped: string[] = [];
+			for (const entry of serialized) {
+				const outcome = this.#insertSerializedCredentialsIfAbsent(entry.provider, entry.records);
+				if (outcome.inserted) inserted.push(entry.provider);
+				else skipped.push(entry.provider);
+			}
+			return { inserted, skipped };
+		});
+		return insertBatch.immediate();
+	}
+
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
 		const rows =
-			(provider
+			(provider !== undefined
 				? (this.#listDisabledByProviderStmt.all(provider) as DisabledAuthRow[])
 				: (this.#listDisabledStmt.all() as DisabledAuthRow[])) ?? [];
 		const results: DisabledCredentialSummary[] = [];

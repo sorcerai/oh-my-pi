@@ -7,6 +7,7 @@
 ### Added
 
 - Added update channels: `omp update --canary` installs canary prereleases from the npm `canary` dist-tag and `omp update --stable` switches back; the chosen channel persists and drives the startup update check.
+- Added end-to-end Prime bridge control-mesh coverage for bidirectional delivery, durable restart recovery, deduplication, and event cursor continuity.
 
 ### Changed
 

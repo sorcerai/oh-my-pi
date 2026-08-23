@@ -39,6 +39,12 @@ Use `hub` messaging only for quick coordination, never long-form content. Addres
 - Coordination: before you edit a file or start work a sibling may already own, message that peer first — overlapping edits collide.
 - Follow-up: answer a peer's question with a short reply (set `replyTo`); use `await` only when you genuinely cannot proceed without the answer.
 {{/if}}
+{{#if directives}}
+DIRECTIVES
+===================================
+
+{{directives}}
+{{/if}}
 
 § Completion
 No TODO tracking, no progress updates. Execute; report results with `yield`.

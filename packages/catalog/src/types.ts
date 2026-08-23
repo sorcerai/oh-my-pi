@@ -906,6 +906,8 @@ export interface Model<TApi extends Api = Api> {
 	name: string;
 	api: TApi;
 	provider: Provider;
+	/** Local authentication reference resolved by the host at request time. */
+	authRef?: string;
 	baseUrl: string;
 	reasoning: boolean;
 	/**

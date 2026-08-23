@@ -3,6 +3,7 @@
 import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
+import { releaseSttWorkerAssetName, stageNemotronWorker } from "../packages/coding-agent/scripts/build-binary";
 import { COMPILED_EXTERNAL_DEPENDENCIES, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
 
 interface BinaryTarget {
@@ -98,6 +99,17 @@ function parseRequestedTargets(): Set<string> | null {
 			.filter(Boolean),
 	);
 }
+const codingAgentDir = path.join(repoRoot, "packages", "coding-agent");
+const sttWorkerBuildOutput = path.join(
+	repoRoot,
+	"packages",
+	"coding-agent",
+	"native",
+	"stt-nemotron",
+	".build",
+	"release",
+	"stt-nemotron",
+);
 
 function shouldAdhocSignDarwinBinary(target: BinaryTarget): boolean {
 	return target.platform === "darwin" && process.platform === "darwin";
@@ -131,11 +143,20 @@ async function embedNative(target: BinaryTarget): Promise<void> {
 
 async function buildBinary(target: BinaryTarget): Promise<void> {
 	console.log(`Building ${target.outfile}...`);
+	const workerAssetName = releaseSttWorkerAssetName(target);
+	if (!isDryRun && workerAssetName && (process.platform !== "darwin" || process.arch !== "arm64")) {
+		throw new Error(
+			`${target.id} requires the stt-nemotron worker (${workerAssetName}); build it on a Darwin arm64 host`,
+		);
+	}
 	await embedNative(target);
 	if (isDryRun) {
 		console.log(
 			`DRY RUN Bun.build target=${target.target} outfile=${target.outfile} external=${COMPILED_EXTERNAL_DEPENDENCIES.join(",")}`,
 		);
+		if (workerAssetName) {
+			console.log(`DRY RUN bun run build:stt-worker stage=packages/coding-agent/binaries/${workerAssetName}`);
+		}
 		return;
 	}
 
@@ -151,6 +172,14 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 	// Bun 1.3.12 emits a truncated Mach-O signature on darwin builds.
 	if (shouldAdhocSignDarwinBinary(target)) {
 		await runCommand(["codesign", "--force", "--sign", "-", path.join(repoRoot, target.outfile)], repoRoot);
+	}
+	if (workerAssetName) {
+		await runCommand(["bun", "run", "build:stt-worker"], codingAgentDir);
+		stageNemotronWorker({
+			binaryPath: path.join(repoRoot, target.outfile),
+			workerPath: sttWorkerBuildOutput,
+			stagedName: workerAssetName,
+		});
 	}
 }
 

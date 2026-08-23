@@ -54,6 +54,14 @@ class ControlledTitleUpdateBackend implements SessionStorageBackend {
 		return Promise.resolve();
 	}
 
+	writeFullCreateOnly(path: string, content: string, _mtimeMs: number): Promise<void> {
+		if (path === this.#sessionPath) {
+			return Promise.reject(Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" }));
+		}
+		this.#content = content;
+		return Promise.resolve();
+	}
+
 	append(_path: string, line: string, _mtimeMs: number): Promise<void> {
 		this.#content += line;
 		return Promise.resolve();
@@ -223,6 +231,74 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	});
 });
 
+describe("FileSessionStorage.writeTextCreateOnly", () => {
+	let tempDir: string;
+	let storage: FileSessionStorage;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-"));
+		storage = new FileSessionStorage();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("removes an owned partial file after a write failure so a retry can succeed", async () => {
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		const writeFailure = new Error("transient write failure");
+		const originalOpen = fs.promises.open.bind(fs.promises);
+		const openSpy = vi.spyOn(fs.promises, "open");
+		let shouldFail = true;
+		openSpy.mockImplementation(async (...args) => {
+			const handle = await originalOpen(...args);
+			if (!shouldFail || args[1] !== "wx") return handle;
+			shouldFail = false;
+			return new Proxy(handle, {
+				get(target, property, receiver) {
+					if (property === "writeFile") {
+						return async () => {
+							await target.writeFile("partial");
+							throw writeFailure;
+						};
+					}
+					const value = Reflect.get(target, property, receiver);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		});
+
+		await expect(storage.writeTextCreateOnly(sessionPath, "complete")).rejects.toBe(writeFailure);
+		expect(fs.existsSync(sessionPath)).toBe(false);
+
+		await storage.writeTextCreateOnly(sessionPath, "complete");
+		expect(await Bun.file(sessionPath).text()).toBe("complete");
+	});
+
+	it("commits the destination when source cleanup fails after linking", async () => {
+		const sourcePath = path.join(tempDir, "staged.jsonl");
+		const destinationPath = path.join(tempDir, "published.jsonl");
+		await Bun.write(sourcePath, "staged content");
+		const unlinkFailure = new Error("transient source cleanup failure");
+		const originalUnlink = fs.promises.unlink.bind(fs.promises);
+		let failed = false;
+		const unlinkSpy = vi.spyOn(fs.promises, "unlink").mockImplementation(async target => {
+			if (!failed) {
+				failed = true;
+				throw unlinkFailure;
+			}
+			return originalUnlink(target);
+		});
+
+		await expect(storage.publishCreateOnly(sourcePath, destinationPath)).resolves.toBeUndefined();
+
+		expect(unlinkSpy).toHaveBeenCalled();
+		expect(await Bun.file(destinationPath).text()).toBe("staged content");
+		expect(fs.existsSync(sourcePath)).toBe(true);
+	});
+});
+
 describe("FileSessionStorage.writeTextSync", () => {
 	let tempDir: string;
 
@@ -340,6 +416,10 @@ class PausableWriteFullBackend implements SessionStorageBackend {
 			await this.firstWriteRelease.promise;
 		}
 		this.writeFullCalls.push({ content, mtimeMs });
+	}
+	writeFullCreateOnly(_path: string, content: string, mtimeMs: number): Promise<void> {
+		this.writeFullCalls.push({ content, mtimeMs });
+		return Promise.resolve();
 	}
 	append(): Promise<void> {
 		return Promise.resolve();

@@ -5,6 +5,21 @@ export * from "./fireworks-model-id";
 export * from "./identity";
 export * from "./model-cache";
 export * from "./model-manager";
+export {
+	cloneModelSpecV1,
+	getModelSpecV1Extension,
+	isModelSpecV1SecretBearingKey,
+	type JsonArray,
+	type JsonObject,
+	type JsonPrimitive,
+	type JsonValue as ModelSpecV1JsonValue,
+	type ModelSpecV1,
+	type ModelSpecV1ExtensionNamespace,
+	type ModelSpecV1Extensions,
+	ModelSpecV1ValidationError,
+	validateModelSpecV1,
+	withModelSpecV1Extension,
+} from "./model-spec-v1";
 export * from "./model-thinking";
 export * from "./model-tokenizer";
 export * from "./models";

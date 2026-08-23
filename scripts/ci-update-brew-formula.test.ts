@@ -6,6 +6,7 @@ const SUMS = {
 	"omp-darwin-x64": "darwin_x64_sha",
 	"omp-linux-arm64": "linux_arm64_sha",
 	"omp-linux-x64": "linux_x64_sha",
+	"omp-stt-nemotron-darwin-arm64": "stt_worker_sha",
 };
 
 describe("renderFormula", () => {
@@ -17,8 +18,14 @@ describe("renderFormula", () => {
 	// `bin.install nil => "omp"` raises (issue #2398).
 	it("attaches `using: :nounzip` to every per-platform url stanza", () => {
 		const matches = formula.match(/using: :nounzip/g) ?? [];
-		expect(matches).toHaveLength(4);
-		for (const arch of ["omp-darwin-arm64", "omp-darwin-x64", "omp-linux-arm64", "omp-linux-x64"]) {
+		expect(matches).toHaveLength(5);
+		for (const arch of [
+			"omp-darwin-arm64",
+			"omp-darwin-x64",
+			"omp-linux-arm64",
+			"omp-linux-x64",
+			"omp-stt-nemotron-darwin-arm64",
+		]) {
 			expect(formula).toMatch(
 				new RegExp(
 					`url "https://github\\.com/[^"]+/${arch}",\\s+using: :nounzip\\s+sha256 "${SUMS[arch as keyof typeof SUMS]}"`,
@@ -46,5 +53,25 @@ describe("renderFormula", () => {
 			expect(formula).toContain(`/${name}",`);
 			expect(formula).toContain(`sha256 "${sha}"`);
 		}
+	});
+
+	// Regression: the darwin-arm64 release ships the stt-nemotron worker as its
+	// own bare-binary asset and the installed omp resolves it only beside its
+	// executable — a formula that installs omp without the worker ships broken
+	// native dictation on every Apple Silicon brew install.
+	it("installs the stt-nemotron worker beside omp on Apple Silicon only", () => {
+		expect(formula).toMatch(
+			/resource "stt_nemotron" do\n\s+url "https:\/\/github\.com\/[^"]+\/omp-stt-nemotron-darwin-arm64",\n\s+using: :nounzip\n\s+sha256 "stt_worker_sha"\n\s+end/,
+		);
+		expect(formula).toMatch(
+			/if OS\.mac\? && Hardware::CPU\.arm\?\n\s+resource\("stt_nemotron"\)\.stage do\n\s+bin\.install Dir\["omp-stt-nemotron-\*"\]\.first => "stt-nemotron"\n\s+end\n\s+\(bin\/"stt-nemotron"\)\.chmod 0555\n\s+end/,
+		);
+
+		// The worker exists only for darwin-arm64: x86-64 macOS and every Linux
+		// block must not reference it.
+		const onIntel = formula.slice(formula.indexOf("on_intel do"), formula.indexOf("on_linux do"));
+		expect(onIntel).not.toContain("stt-nemotron");
+		const onLinux = formula.slice(formula.indexOf("on_linux do"), formula.indexOf("def install"));
+		expect(onLinux).not.toContain("stt-nemotron");
 	});
 });

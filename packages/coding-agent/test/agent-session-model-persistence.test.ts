@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -19,8 +20,8 @@ describe("AgentSession model persistence", () => {
 	let session: AgentSession | undefined;
 	let sessionSettings: Settings;
 	// Auth storage (SQLite DB) and the model registry are immutable across these tests:
-	// every test sets the same anthropic runtime key and only ever reads the bundled model
-	// list. Building them once avoids ~12 SQLite opens + registry constructions.
+	// every test uses the bundled model list with stable runtime keys. Building them once
+	// avoids repeated SQLite opens and registry constructions.
 	let sharedDir: TempDir;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -29,6 +30,7 @@ describe("AgentSession model persistence", () => {
 		sharedDir = TempDir.createSync("@pi-model-persistence-shared-");
 		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
 		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedAuthStorage.setRuntimeApiKey("openrouter", "test-key");
 		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 	});
 
@@ -53,6 +55,13 @@ describe("AgentSession model persistence", () => {
 		const model = getBundledModel("anthropic", id);
 		if (!model) throw new Error(`Expected anthropic model ${id} to exist`);
 		return model;
+	}
+	function getRoutedOpenRouterModelOrThrow(route: string): Model<Api> {
+		const base = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!base) throw new Error("Expected OpenRouter model to exist");
+		const routed = parseModelPattern(`openrouter/${base.id}@${route}`, [base]).model;
+		if (!routed) throw new Error(`Expected routed OpenRouter model for ${route}`);
+		return routed;
 	}
 
 	function modelValue(model: Model<Api>): string {
@@ -411,6 +420,111 @@ describe("AgentSession model persistence", () => {
 		const result = await createStartupResumeSession(targetSessionFile, settings);
 
 		expect(result.session.model?.id).toBe(temporaryModel.id);
+	});
+
+	it("persists routed temporary selectors exactly", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const routedModel = getRoutedOpenRouterModelOrThrow("cerebras");
+		const created = await createSession({ initialModel: defaultModel, persist: true });
+
+		await created.session.setModelTemporary(routedModel);
+
+		const modelChange = created.session.sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "model_change")
+			.at(-1);
+		expect(modelChange).toMatchObject({ model: "openrouter/z-ai/glm-4.7@cerebras", role: "temporary" });
+	});
+
+	it("emits model_changed for routing-only primary changes", async () => {
+		const routedCerebras = getRoutedOpenRouterModelOrThrow("cerebras");
+		const routedFireworks = getRoutedOpenRouterModelOrThrow("fireworks");
+		const created = await createSession({ initialModel: routedCerebras });
+		let modelChangedCount = 0;
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
+
+		await created.session.setModel(routedFireworks);
+
+		expect(modelChangedCount).toBe(1);
+		expect(
+			(created.session.model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting
+				?.only,
+		).toEqual(["fireworks"]);
+	});
+
+	it("persists a routed initial model from SDK startup", async () => {
+		const routedModel = getRoutedOpenRouterModelOrThrow("cerebras");
+		const result = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings: Settings.isolated(),
+			model: routedModel,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = result.session;
+
+		expect(result.session.sessionManager.getBranch().find(entry => entry.type === "model_change")).toMatchObject({
+			model: "openrouter/z-ai/glm-4.7@cerebras",
+		});
+	});
+
+	it("restores routed thinking selectors during startup resume", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const defaultRoleValue = modelValue(defaultModel);
+		const targetSessionFile = await writeRoleModelSession(
+			defaultRoleValue,
+			"openrouter/z-ai/glm-4.7@cerebras:max",
+			"temporary",
+		);
+		const settings = Settings.isolated();
+		settings.setModelRole("default", defaultRoleValue);
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model?.provider).toBe("openrouter");
+		expect(result.session.model?.id).toBe("z-ai/glm-4.7");
+		expect(
+			(result.session.model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting
+				?.only,
+		).toEqual(["cerebras"]);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.Max);
+	});
+
+	it("restores routed thinking selectors when switching sessions", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const defaultRoleValue = modelValue(defaultModel);
+		const targetSessionFile = await writeRoleModelSession(
+			defaultRoleValue,
+			"openrouter/z-ai/glm-4.7@cerebras:max",
+			"temporary",
+		);
+		const created = await createSession({
+			initialModel: defaultModel,
+			modelRoles: { default: defaultRoleValue },
+			persist: true,
+		});
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+
+		expect(created.session.model?.provider).toBe("openrouter");
+		expect(created.session.model?.id).toBe("z-ai/glm-4.7");
+		expect(
+			(created.session.model?.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting
+				?.only,
+		).toEqual(["cerebras"]);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Max);
 	});
 
 	it("activates auto thinking on startup resume when modelRoles.default carries an explicit :auto suffix", async () => {

@@ -454,6 +454,47 @@ describe("ModelRegistry", () => {
 				},
 			});
 		});
+		test("model authRef keeps exact OAuth credential affinity across retry stages", async () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const bundled = registry.find("zhipu-coding-plan", "glm-5.2");
+			if (!bundled) throw new Error("expected bundled zhipu-coding-plan/glm-5.2 model");
+
+			const resolutions: Array<{ provider: string; credentialId: number; forceRefresh: boolean | undefined }> = [];
+			let rotations = 0;
+			authStorage.getOAuthAccessByCredentialId = async (provider, credentialId, options) => {
+				resolutions.push({ provider, credentialId, forceRefresh: options?.forceRefresh });
+				return {
+					ok: true,
+					accessToken: options?.forceRefresh ? "refreshed-exact-token" : "initial-exact-token",
+					credentialId,
+					accountId: "exact-account",
+				};
+			};
+			authStorage.rotateSessionCredential = async () => {
+				rotations++;
+				return true;
+			};
+
+			const resolver = registry.resolver(
+				{ ...bundled, authRef: "oauth-credential:zhipu-coding-plan:7" },
+				"session-exact-auth-ref",
+			);
+			await expect(resolver({ lastChance: false, error: undefined, signal: undefined })).resolves.toBe(
+				"initial-exact-token",
+			);
+			await expect(resolver({ lastChance: false, error: new Error("expired"), signal: undefined })).resolves.toBe(
+				"refreshed-exact-token",
+			);
+			await expect(
+				resolver({ lastChance: true, error: new Error("still expired"), signal: undefined }),
+			).resolves.toBeUndefined();
+
+			expect(resolutions).toEqual([
+				{ provider: "zhipu-coding-plan", credentialId: 7, forceRefresh: false },
+				{ provider: "zhipu-coding-plan", credentialId: 7, forceRefresh: true },
+			]);
+			expect(rotations).toBe(0);
+		});
 
 		test("baseUrl-only override does not affect other providers", () => {
 			const googleModels = getModelsForProvider(anthropicProxy, "google");
@@ -1438,6 +1479,99 @@ describe("ModelRegistry", () => {
 			expect(error?.message).toContain("providers.myprovider.compat.thinkingFormat");
 			expect(error?.message).toContain("deepseek");
 			expect(invalid.find("myprovider", "my-model")).toBeUndefined();
+		});
+		test("loads a custom provider authenticated only by exact model authRef", () => {
+			const authRef = "oauth-credential:exact-oauth:7";
+			writeRawModelsJson({
+				"exact-oauth": {
+					baseUrl: "https://exact-oauth.example/v1",
+					api: "openai-responses",
+					models: [{ id: "model", authRef }],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.getError()).toBeUndefined();
+			expect(registry.find("exact-oauth", "model")?.authRef).toBe(authRef);
+		});
+
+		test("requires the exact durable OAuth row for pinned model availability", async () => {
+			const provider = "pinned-oauth";
+			await authStorage.set(provider, [
+				{
+					type: "oauth",
+					access: "pinned-access",
+					refresh: "pinned-refresh",
+					expires: Date.now() + 60_000,
+					accountId: "pinned-account",
+				},
+				{
+					type: "oauth",
+					access: "sibling-access",
+					refresh: "sibling-refresh",
+					expires: Date.now() + 60_000,
+					accountId: "sibling-account",
+				},
+			]);
+			const [pinned, sibling] = authStorage.listOAuthAccounts(provider);
+			if (!pinned || !sibling) throw new Error("expected two durable OAuth rows");
+			const missingCredentialId = Number.MAX_SAFE_INTEGER;
+			writeRawModelsJson({
+				[provider]: {
+					baseUrl: "https://pinned-oauth.example/v1",
+					api: "openai-responses",
+					apiKey: "provider-level-key",
+					models: [
+						{ id: "pinned", authRef: `oauth-credential:${provider}:${pinned.credentialId}` },
+						{ id: "missing", authRef: `oauth-credential:${provider}:${missingCredentialId}` },
+						{ id: "provider-default", authRef: `provider:${provider}` },
+					],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const pinnedModel = registry.find(provider, "pinned");
+			const missingModel = registry.find(provider, "missing");
+			const providerModel = registry.find(provider, "provider-default");
+			if (!pinnedModel || !missingModel || !providerModel) throw new Error("expected configured authRef models");
+
+			expect(
+				registry
+					.getAvailable()
+					.filter(model => model.provider === provider)
+					.map(model => model.id),
+			).toEqual(["pinned", "provider-default"]);
+			expect(registry.hasConfiguredAuth(pinnedModel)).toBe(true);
+			expect(registry.hasConfiguredAuth(missingModel)).toBe(false);
+			expect(registry.hasConfiguredAuth(providerModel)).toBe(true);
+
+			expect(await authStorage.removeCredential(provider, pinned.credentialId)).toBe(true);
+			expect(authStorage.listStoredCredentials(provider).map(row => row.id)).toEqual([sibling.credentialId]);
+			expect(
+				registry
+					.getAvailable()
+					.filter(model => model.provider === provider)
+					.map(model => model.id),
+			).toEqual(["provider-default"]);
+			expect(registry.hasConfiguredAuth(pinnedModel)).toBe(false);
+			expect(registry.hasConfiguredAuth(providerModel)).toBe(true);
+		});
+
+		test("rejects a mixed custom provider when any auth-required model lacks authRef", () => {
+			writeRawModelsJson({
+				"mixed-auth": {
+					baseUrl: "https://mixed-auth.example/v1",
+					api: "openai-responses",
+					models: [{ id: "authenticated", authRef: "oauth-credential:mixed-auth:7" }, { id: "unauthenticated" }],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.getError()?.message).toContain(
+				'Provider mixed-auth: "apiKey" is required when defining custom models unless auth is "none" or "oauth".',
+			);
+			expect(registry.find("mixed-auth", "authenticated")).toBeUndefined();
+			expect(registry.find("mixed-auth", "unauthenticated")).toBeUndefined();
 		});
 
 		test("model override can change cost fields partially without dropping long-context pricing", () => {

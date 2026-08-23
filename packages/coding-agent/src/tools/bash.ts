@@ -954,7 +954,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			},
 		};
 		command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
-		const resolvedEnv = env
+		const resolvedEnvBase = env
 			? Object.fromEntries(
 					await Promise.all(
 						Object.entries(env).map(async ([key, value]) => [
@@ -968,6 +968,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					),
 				)
 			: undefined;
+		// Harness-level attribution: stamp the owning agent run on every shell this
+		// session spawns. Harness value wins over model-supplied env keys.
+		const taskRunId = this.session.getAgentId?.();
+		const resolvedEnv = taskRunId ? { ...(resolvedEnvBase ?? {}), TASK_RUN_ID: taskRunId } : resolvedEnvBase;
 
 		// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
 		if (cwd?.includes("://") || cwd?.includes("local:/")) {

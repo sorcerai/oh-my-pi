@@ -39,6 +39,7 @@ import {
 	postmortem,
 	prompt,
 	Snowflake,
+	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
@@ -69,6 +70,7 @@ import {
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	resolvePersistedModelSelector,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
@@ -117,6 +119,7 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
+import { createExternalPeerProvider, type ExternalPeerProvider } from "./integrations/prime-bridge";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -507,6 +510,8 @@ export interface CreateAgentSessionOptions {
 	lspReadOnly?: boolean;
 	/** Whether this invocation may expose IRC. `false` removes it even for subagents. */
 	enableIrc?: boolean;
+	/** Optional Prime peer provider. Settings create one only when enabled and unrestricted. */
+	externalPeerProvider?: ExternalPeerProvider;
 	/** Skip subprocess-kernel availability checks and prelude warmup */
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
@@ -773,10 +778,14 @@ export async function loadCliExtensionProviders(
 	modelRegistry: ModelRegistry,
 	settings: Settings,
 	cwd: string,
-	options: Pick<CreateAgentSessionOptions, "disableExtensionDiscovery" | "additionalExtensionPaths"> = {},
+	options: Pick<CreateAgentSessionOptions, "disableExtensionDiscovery" | "additionalExtensionPaths"> & {
+		signal?: AbortSignal;
+	} = {},
 ): Promise<void> {
 	const eventBus = new EventBus();
-	const extensionsResult = await loadSessionExtensions(options, cwd, settings, eventBus);
+	const extensionsResult = await untilAborted(options.signal, () =>
+		loadSessionExtensions(options, cwd, settings, eventBus),
+	);
 	const activeSources = extensionsResult.extensions.map(extension => extension.path);
 	modelRegistry.syncExtensionSources(activeSources);
 	for (const sourceId of new Set(activeSources)) {
@@ -1492,24 +1501,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const parsedModel = parseModelString(sessionModelStr, {
-					allowMaxSuffix: true,
-					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-				});
-				if (!parsedModel) {
+				const restored = resolvePersistedModelSelector(sessionModelStr, modelRegistry.getAvailable());
+				if (!restored || !hasModelAuth(restored.model)) {
 					failedSessionModel ??= sessionModelStr;
 					continue;
 				}
 
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && hasModelAuth(restoredModel)) {
-					model = restoredModel;
-					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
-					break;
-				}
-				failedSessionModel ??= sessionModelStr;
+				model = restored.model;
+				restoredSessionModelIndex = i;
+				restoredSessionThinkingLevel = restored.thinkingLevel;
+				break;
 			}
 			if (failedSessionModel) {
 				modelFallbackMessage = `Could not restore model ${failedSessionModel}`;
@@ -1771,6 +1772,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
 			getCodeModeDirectToolNames: () => session?.getCodeModeDirectToolNames(),
 			agentRegistry,
+			externalPeerProvider:
+				restrictToolNames || settings.get("primeBridge.enabled") !== true
+					? undefined
+					: (options.externalPeerProvider ??
+						createExternalPeerProvider({
+							enabled: true,
+							autoStart: settings.get("primeBridge.autoStart"),
+							url: settings.get("primeBridge.url"),
+							tokenPath: settings.get("primeBridge.tokenPath"),
+							originSessionId: sessionManager.getSessionId(),
+							projectRoot: cwd,
+						})),
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
@@ -2146,32 +2159,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			for (let i = 0; i < sessionRetryLimit; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const parsedModel = parseModelString(sessionModelStr, {
-					allowMaxSuffix: true,
-					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-				});
-				if (!parsedModel) continue;
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && hasModelAuth(restoredModel)) {
-					model = restoredModel;
-					modelFallbackMessage = undefined;
-					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
-					// Recompute thinking-level from scratch against the reclaimed
-					// model: any value derived from the earlier fallback model's
-					// `thinking.defaultLevel` must not become sticky.
-					thinkingLevel = pickInitialThinkingLevel(restoredModel);
-					autoThinking = thinkingLevel === AUTO_THINKING;
-					effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
-					effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-						autoThinking
-							? resolveProvisionalAutoLevel(restoredModel)
-							: resolveThinkingLevelForModel(restoredModel, effectiveThinkingLevel),
-					);
-					preconnectModelHost(restoredModel.baseUrl);
-					break;
-				}
+				const restored = resolvePersistedModelSelector(sessionModelStr, modelRegistry.getAvailable());
+				if (!restored || !hasModelAuth(restored.model)) continue;
+				model = restored.model;
+				modelFallbackMessage = undefined;
+				restoredSessionModelIndex = i;
+				restoredSessionThinkingLevel = restored.thinkingLevel;
+				// Recompute thinking-level from scratch against the reclaimed
+				// model: any value derived from the earlier fallback model's
+				// `thinking.defaultLevel` must not become sticky.
+				thinkingLevel = pickInitialThinkingLevel(restored.model);
+				autoThinking = thinkingLevel === AUTO_THINKING;
+				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+					autoThinking
+						? resolveProvisionalAutoLevel(restored.model)
+						: resolveThinkingLevelForModel(restored.model, effectiveThinkingLevel),
+				);
+				preconnectModelHost(restored.model.baseUrl);
+				break;
 			}
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
@@ -3412,7 +3418,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				sessionManager.appendModelChange(formatModelStringWithRouting(model));
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
@@ -3494,7 +3500,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigs: discoveredAdvisors.advisors,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
-			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+			thinkingLevel: autoThinking ? AUTO_THINKING : (thinkingLevel ?? effectiveThinkingLevel),
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,

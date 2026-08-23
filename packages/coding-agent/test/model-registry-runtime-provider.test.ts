@@ -138,6 +138,35 @@ describe("ModelRegistry runtime provider registration", () => {
 		const afterAnthropicCount = registry.getAll().filter(model => model.provider === "anthropic").length;
 		expect(afterAnthropicCount).toBe(beforeAnthropicCount);
 	});
+	test("rejects every malformed or provider-mismatched authRef before accepting provider apiKey", () => {
+		const apiKey = "runtime-provider-key-must-not-leak";
+		for (const authRef of ["provider:other-provider", "oauth-credential:strict-runtime:not-a-row"]) {
+			let message = "";
+			try {
+				registry.registerProvider(
+					"strict-runtime",
+					{
+						baseUrl: "https://strict-runtime.example/v1",
+						api: "openai-responses",
+						apiKey,
+						models: [
+							{ ...baseModel, id: "provider-default" },
+							{ ...baseModel, id: "pinned", authRef },
+						],
+					},
+					"ext://atomic",
+				);
+			} catch (error) {
+				message = error instanceof Error ? error.message : String(error);
+			}
+
+			expect(message).toBe('Provider strict-runtime, model pinned: invalid "authRef".');
+			expect(message).not.toContain(apiKey);
+			expect(message).not.toContain(authRef);
+			expect(registry.find("strict-runtime", "provider-default")).toBeUndefined();
+			expect(registry.find("strict-runtime", "pinned")).toBeUndefined();
+		}
+	});
 
 	test("registerProvider rebuilds inferred computer capability after OpenAI runtime reroutes", async () => {
 		const modelId = "gpt-5.4";

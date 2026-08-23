@@ -76,6 +76,14 @@ export function renderFormula(version: string, sums: Record<string, string>): st
       url "https://github.com/${REPO}/releases/download/v#{version}/omp-darwin-arm64",
           using: :nounzip
       sha256 "${sums["omp-darwin-arm64"]}"
+      # The native Nemotron STT worker ships as its own bare-binary asset.
+      # The installed omp resolves it only beside its executable
+      # (bin/stt-nemotron), so the formula must install the pair together.
+      resource "stt_nemotron" do
+        url "https://github.com/${REPO}/releases/download/v#{version}/omp-stt-nemotron-darwin-arm64",
+            using: :nounzip
+        sha256 "${sums["omp-stt-nemotron-darwin-arm64"]}"
+      end
     end
     on_intel do
       url "https://github.com/${REPO}/releases/download/v#{version}/omp-darwin-x64",
@@ -99,6 +107,12 @@ export function renderFormula(version: string, sums: Record<string, string>): st
 
   def install
     bin.install Dir["omp-*"].first => "omp"
+    if OS.mac? && Hardware::CPU.arm?
+      resource("stt_nemotron").stage do
+        bin.install Dir["omp-stt-nemotron-*"].first => "stt-nemotron"
+      end
+      (bin/"stt-nemotron").chmod 0555
+    end
     (bin/"omp").chmod 0555
     with_env(HOME: buildpath) do
       generate_completions_from_executable(bin/"omp", "completions", shells: [:bash, :zsh, :fish])
@@ -117,7 +131,13 @@ async function main(): Promise<void> {
 	const version = tag.replace(/^v/, "");
 	const assets = await fetchAssets(tag);
 
-	const targets = ["omp-darwin-arm64", "omp-darwin-x64", "omp-linux-arm64", "omp-linux-x64"];
+	const targets = [
+		"omp-darwin-arm64",
+		"omp-darwin-x64",
+		"omp-linux-arm64",
+		"omp-linux-x64",
+		"omp-stt-nemotron-darwin-arm64",
+	];
 	const sums: Record<string, string> = {};
 	for (const name of targets) sums[name] = sha256For(assets, name);
 

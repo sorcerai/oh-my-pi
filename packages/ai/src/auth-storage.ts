@@ -164,6 +164,38 @@ export interface StoredAuthCredential {
 	credential: AuthCredential;
 	disabledCause: string | null;
 }
+/**
+ * Store-level result for an atomic create-only credential insertion.
+ * The rows are internal state used to refresh {@link AuthStorage}'s cache.
+ */
+export interface StoredCredentialInsertResult {
+	inserted: boolean;
+	rows: StoredAuthCredential[];
+}
+
+/**
+ * Public result for {@link AuthStorage.insertCredentialsIfProviderAbsent}.
+ * Contains row identity and type only. Credential values are intentionally omitted.
+ */
+export interface CredentialInsertResult {
+	inserted: boolean;
+	provider: string;
+	rows: Array<{ id: number; type: AuthCredential["type"] }>;
+}
+/**
+ * Public result for an atomic create-only credential batch.
+ * Provider values and credential payloads are intentionally omitted.
+ */
+export interface CredentialBatchInsertResult {
+	inserted: string[];
+	skipped: string[];
+}
+
+/** One provider's create-only credential payload for a batch insert. */
+export interface CredentialBatchInsert {
+	provider: string;
+	credentials: AuthCredential[];
+}
 
 /** One persisted rate-limit block: credential row id + provider-type key + optional scope. */
 export interface StoredCredentialBlock {
@@ -391,6 +423,17 @@ export interface AuthCredentialStore {
 	/** Optional hook to notify the underlying store that usage report cache is stale. */
 	invalidateUsageCache?(signal?: AbortSignal): Promise<void>;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
+	/**
+	 * Atomically process multiple providers: active providers are skipped and
+	 * every absent provider is inserted, or the entire batch is rolled back.
+	 */
+	insertCredentialsIfProvidersAbsent?(batch: CredentialBatchInsert[]): CredentialBatchInsertResult;
+	/**
+	 * Atomically insert all supplied credentials only when the provider has no
+	 * active credentials. Stores that cannot provide this guarantee omit it.
+	 */
+	insertCredentialsIfProviderAbsent?(provider: string, credentials: AuthCredential[]): StoredCredentialInsertResult;
+
 	/**
 	 * Optional store hook to re-hydrate the credential snapshot from its
 	 * backing source. Remote broker stores re-fetch `GET /v1/snapshot` so a
@@ -1348,26 +1391,28 @@ export class AuthStorage {
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	#closed = false;
 
-	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
+	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}, skipStoreHygiene = false) {
 		this.#store = store;
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
-		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
-		// cache rows (24h last-good retention). A cheap indexed DELETE;
-		// failures must never block construction.
-		try {
-			this.#store.cleanExpiredCache();
-		} catch {
-			// Best-effort.
-		}
-		try {
-			this.#store.cleanExpiredCredentialBlocks?.(Date.now());
-		} catch (err) {
-			// Best-effort, but init-time corruption must latch the block store
-			// immediately so the first evaluation doesn't re-query a broken DB.
-			this.#handlePersistedBlockStoreError(err);
+		if (!skipStoreHygiene) {
+			// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
+			// cache rows (24h last-good retention). A cheap indexed DELETE;
+			// failures must never block construction.
+			try {
+				this.#store.cleanExpiredCache();
+			} catch {
+				// Best-effort.
+			}
+			try {
+				this.#store.cleanExpiredCredentialBlocks?.(Date.now());
+			} catch (err) {
+				// Best-effort, but init-time corruption must latch the block store
+				// immediately so the first evaluation doesn't re-query a broken DB.
+				this.#handlePersistedBlockStoreError(err);
+			}
 		}
 		this.#usageFetch = options.usageFetch ?? fetch;
 		this.#usageRequestTimeoutMs = options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS;
@@ -1395,6 +1440,18 @@ export class AuthStorage {
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		return new AuthStorage(store, options);
+	}
+	/**
+	 * Open an already validated database without schema initialization or
+	 * constructor hygiene writes.
+	 */
+	static async createExisting(
+		dbPath: string,
+		options: AuthStorageOptions = {},
+		expectedIdentity?: { readonly dev: number; readonly ino: number },
+	): Promise<AuthStorage> {
+		const store = await SqliteAuthCredentialStore.openExisting(dbPath, expectedIdentity);
+		return new AuthStorage(store, options, true);
 	}
 
 	/**
@@ -1607,9 +1664,9 @@ export class AuthStorage {
 	 * @param provider - Provider name (e.g., "anthropic", "openai")
 	 * @param credentials - Array of stored credentials to cache
 	 */
-	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
+	#setStoredCredentials(provider: string, credentials: StoredCredential[], notifyGeneration = true): boolean {
 		const current = this.#data.get(provider) ?? [];
-		if (storedCredentialArraysEqual(current, credentials)) return;
+		if (storedCredentialArraysEqual(current, credentials)) return false;
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
 		if (trackedBearerFingerprints) {
 			const activeOAuthIds = new Set(
@@ -1625,7 +1682,8 @@ export class AuthStorage {
 		} else {
 			this.#data.set(provider, credentials);
 		}
-		this.#bumpGeneration("credentials");
+		if (notifyGeneration) this.#bumpGeneration("credentials");
+		return true;
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -2403,6 +2461,77 @@ export class AuthStorage {
 			stored.map(record => ({ id: record.id, credential: record.credential })),
 		);
 		this.#resetProviderAssignments(provider);
+	}
+	/**
+	 * Insert credentials only when the provider has no active credentials.
+	 *
+	 * This deliberately requires a store-level atomic capability. A read-then-write
+	 * fallback would be unsafe for remote or concurrent stores.
+	 */
+	insertCredentialsIfProviderAbsent(provider: string, credentials: AuthCredential[]): CredentialInsertResult {
+		if (provider.trim().length === 0) {
+			throw new AIError.ConfigurationError("Credential provider must be a non-empty string");
+		}
+		const insert = this.#store.insertCredentialsIfProviderAbsent;
+		if (!insert) {
+			throw new AIError.ConfigurationError("Credential store lacks atomic create-only credential insertion");
+		}
+		const deduped = this.#dedupeOAuthCredentials(provider, credentials);
+		const outcome = insert.call(this.#store, provider, deduped);
+		this.#setStoredCredentials(
+			provider,
+			outcome.rows.map(record => ({ id: record.id, credential: record.credential })),
+		);
+		if (outcome.inserted) this.#resetProviderAssignments(provider);
+		return {
+			inserted: outcome.inserted,
+			provider,
+			rows: outcome.rows.map(record => ({ id: record.id, type: record.credential.type })),
+		};
+	}
+	/**
+	 * Atomically insert every absent provider in a credential batch.
+	 */
+	insertCredentialsIfProvidersAbsent(batch: CredentialBatchInsert[]): CredentialBatchInsertResult {
+		const insert = this.#store.insertCredentialsIfProvidersAbsent;
+		if (!insert) {
+			throw new AIError.ConfigurationError("Credential store lacks atomic create-only credential batch insertion");
+		}
+		if (!Array.isArray(batch)) {
+			throw new AIError.ConfigurationError("Credential batch must be an array");
+		}
+		const seenProviders = new Set<string>();
+		for (const entry of batch) {
+			if (!entry || typeof entry.provider !== "string" || entry.provider.trim().length === 0) {
+				throw new AIError.ConfigurationError("Credential provider must be a non-empty string");
+			}
+			if (seenProviders.has(entry.provider)) {
+				throw new AIError.ConfigurationError("Credential batch contains duplicate providers");
+			}
+			if (!Array.isArray(entry.credentials)) {
+				throw new AIError.ConfigurationError("Credential batch credentials must be an array");
+			}
+			seenProviders.add(entry.provider);
+		}
+		const deduped = batch.map(entry => ({
+			provider: entry.provider,
+			credentials: this.#dedupeOAuthCredentials(entry.provider, entry.credentials),
+		}));
+		const outcome = insert.call(this.#store, deduped);
+		const insertedProviders = new Set(outcome.inserted);
+		let cacheChanged = false;
+		for (const provider of [...outcome.inserted, ...outcome.skipped]) {
+			const rows = this.#store.listAuthCredentials(provider);
+			cacheChanged =
+				this.#setStoredCredentials(
+					provider,
+					rows.map(record => ({ id: record.id, credential: record.credential })),
+					false,
+				) || cacheChanged;
+			if (insertedProviders.has(provider)) this.#resetProviderAssignments(provider);
+		}
+		if (cacheChanged) this.#bumpGeneration("credentials");
+		return outcome;
 	}
 
 	/**
@@ -5301,9 +5430,11 @@ export class AuthStorage {
 		provider: string,
 		selection: { credential: OAuthCredential; index: number },
 		options: AuthApiKeyOptions | undefined,
+		credentialId?: number,
 	): Promise<boolean> {
 		const stored = this.#getStoredCredentials(provider);
-		const selected = stored[selection.index];
+		const selected =
+			credentialId === undefined ? stored[selection.index] : stored.find(candidate => candidate.id === credentialId);
 		if (selected?.credential.type !== "oauth") return false;
 
 		const prepare = this.#store.prepareForRequest?.bind(this.#store);
@@ -5333,6 +5464,8 @@ export class AuthStorage {
 			blockScopes?: readonly string[];
 			/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 			allowFallback?: boolean;
+			/** Durable row id for target-only resolution. */
+			credentialId?: number;
 		},
 	): Promise<OAuthResolutionResult | undefined> {
 		const {
@@ -5347,6 +5480,7 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
+			credentialId: targetCredentialId,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -5355,14 +5489,15 @@ export class AuthStorage {
 			return undefined;
 		}
 
-		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
+		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options, targetCredentialId))) {
 			return undefined;
 		}
 		// Capture the row id once, immediately after #prepareOAuthCredentialForRequest
 		// resynced selection.index from the store. A concurrent disable during the
 		// usage/refresh awaits below can shift positional indices, so every later
 		// refresh / persist / CAS-disable addresses the row by this stable id.
-		const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+		const credentialId = targetCredentialId ?? this.#getStoredCredentials(provider)[selection.index]?.id;
+		const forceRefresh = targetCredentialId !== undefined && options?.forceRefresh === true;
 
 		const planRequirement = providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
@@ -5406,7 +5541,7 @@ export class AuthStorage {
 			if (customProvider) {
 				const refreshedCredentials = await this.#refreshOAuthCredential(
 					provider,
-					selection.credential,
+					forceRefresh ? { ...selection.credential, expires: 0 } : selection.credential,
 					credentialId,
 					options?.signal,
 				);
@@ -5422,7 +5557,7 @@ export class AuthStorage {
 				// auth failure and soft-disable a still-valid credential.
 				const refreshedCredentials = await this.#refreshOAuthCredential(
 					provider,
-					selection.credential,
+					forceRefresh ? { ...selection.credential, expires: 0 } : selection.credential,
 					credentialId,
 					options?.signal,
 				);
@@ -5710,7 +5845,12 @@ export class AuthStorage {
 				providerKey,
 				undefined,
 				options,
-				{ checkUsage: false, allowBlocked: true, allowFallback: false },
+				{
+					checkUsage: false,
+					allowBlocked: true,
+					allowFallback: false,
+					credentialId: selection.credentialId,
+				},
 			);
 			if (!resolved) {
 				return {
@@ -5866,17 +6006,14 @@ export class AuthStorage {
 	 * requested row, preserving exact-account affinity for operations whose
 	 * provenance and policy boundary are tied to one workspace.
 	 *
-	 * Returns `undefined` when the row does not exist for `provider` or an
-	 * explicit runtime/config API-key override suppresses OAuth.
+	 * Returns `undefined` when the row does not exist for `provider`. Provider-wide
+	 * API-key overrides do not apply because this method explicitly addresses an OAuth row.
 	 */
 	async getOAuthAccessByCredentialId(
 		provider: string,
 		credentialId: number,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccessResolution | undefined> {
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
-			return undefined;
-		}
 		const selection = this.#getStoredOAuthSelections(provider).find(
 			candidate => candidate.credentialId === credentialId,
 		);
