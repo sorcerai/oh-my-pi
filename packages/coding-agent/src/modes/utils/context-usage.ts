@@ -4,7 +4,8 @@ import { effectiveReserveTokens, estimateTokens, resolveThresholdTokens } from "
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import type { Skill } from "../../extensibility/skills";
+import type { SkillsSettings } from "../../config/settings";
+import { type Skill, selectSkillsForPrompt } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
 import type { Tool } from "../../tools";
@@ -50,27 +51,12 @@ export interface NonMessageTokenSource {
 		};
 	};
 	readonly skills?: readonly Skill[];
+	readonly skillsSettings?: Pick<SkillsSettings, "promptMode" | "promptSkills">;
 }
 
 const EMPTY_STRING_PARTS: string[] = [];
 const EMPTY_TOOLS: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">> = [];
 const EMPTY_SKILLS: readonly Skill[] = [];
-
-/**
- * Skills actually rendered into the system prompt, mirroring the filter in
- * `buildSystemPrompt` (`system-prompt.ts`): the `read` tool must be present so
- * the model can fetch skill content, and skills with frontmatter `hide: true`
- * (or `disable-model-invocation`, normalized onto `hide`) are excluded.
- * Accounting must count only these so the Skills category and the System-prompt
- * subtraction stay aligned with the provider-facing prompt.
- */
-function renderedSkills(
-	skills: readonly Skill[],
-	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>,
-): readonly Skill[] {
-	if (!tools.some(tool => tool.name === "read")) return EMPTY_SKILLS;
-	return skills.filter(skill => skill.hide !== true);
-}
 
 export function estimateSkillsTokens(skills: readonly Skill[]): number {
 	const fragments: string[] = [];
@@ -127,6 +113,7 @@ interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
 	toolsRef: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>;
 	skillsRef: readonly Skill[];
+	skillsSettingsRef: Pick<SkillsSettings, "promptMode" | "promptSkills"> | undefined;
 	tokens: number | undefined;
 	breakdown:
 		| {
@@ -149,16 +136,25 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource): NonMessageTo
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const skillsRef = session.skills ?? EMPTY_SKILLS;
+	const skillsSettingsRef = session.skillsSettings;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
 	if (
 		entry &&
 		entry.systemPromptRef === systemPromptRef &&
 		entry.toolsRef === toolsRef &&
-		entry.skillsRef === skillsRef
+		entry.skillsRef === skillsRef &&
+		entry.skillsSettingsRef === skillsSettingsRef
 	) {
 		return entry;
 	}
-	entry = { systemPromptRef, toolsRef, skillsRef, tokens: undefined, breakdown: undefined };
+	entry = {
+		systemPromptRef,
+		toolsRef,
+		skillsRef,
+		skillsSettingsRef,
+		tokens: undefined,
+		breakdown: undefined,
+	};
 	cachedSession[NON_MESSAGE_TOKEN_CACHE] = entry;
 	return entry;
 }
@@ -188,7 +184,11 @@ export function computeNonMessageBreakdown(session: NonMessageTokenSource): {
 	const entry = nonMessageTokenCacheEntry(session);
 	if (entry.breakdown) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools));
+	// selectSkillsForPrompt keeps this count aligned with the provider-facing prompt.
+	const hasReadTool = tools.some(tool => tool.name === "read");
+	const skillsTokens = estimateSkillsTokens(
+		selectSkillsForPrompt(session.skills ?? EMPTY_SKILLS, hasReadTool, session.skillsSettings),
+	);
 	const toolsTokens = estimateToolSchemaTokens(tools);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = countTokens(systemPromptParts.slice(1));

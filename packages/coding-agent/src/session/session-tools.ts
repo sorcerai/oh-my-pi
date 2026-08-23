@@ -237,6 +237,8 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	#skillRefreshTail: Promise<void> = Promise.resolve();
+
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
@@ -1007,7 +1009,13 @@ export class SessionTools {
 	}
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	async refreshSkills(): Promise<void> {
+	refreshSkills(): Promise<void> {
+		const refresh = this.#skillRefreshTail.then(() => this.#refreshSkills());
+		this.#skillRefreshTail = refresh.catch(() => {});
+		return refresh;
+	}
+
+	async #refreshSkills(): Promise<void> {
 		resetCapabilities();
 		if (this.#skillsReloadable) {
 			const skillsSettings = this.#host.settings.getGroup("skills");
@@ -1334,6 +1342,9 @@ export class SessionTools {
 
 	async #refreshBaseSystemPrompt(): Promise<void> {
 		if (this.#host.isDisposed() || !this.#rebuildSystemPrompt) return;
+		if (this.#skillsSettings) {
+			this.#skillsSettings = this.#host.settings.getGroup("skills");
+		}
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;

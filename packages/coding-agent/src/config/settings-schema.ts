@@ -4840,6 +4840,20 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
+	"skills.promptMode": {
+		type: "enum",
+		values: ["all", "core", "allowlist"] as const,
+		default: "all",
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Prompt Skill Exposure",
+			description: "Choose which discovered skill summaries enter system prompts",
+		},
+	},
+
+	"skills.promptSkills": { type: "array", default: [] as string[] },
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -5778,6 +5792,8 @@ export interface SkillsSettings {
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
+	promptMode?: "all" | "core" | "allowlist";
+	promptSkills?: string[];
 	disabledExtensions?: string[];
 }
 
