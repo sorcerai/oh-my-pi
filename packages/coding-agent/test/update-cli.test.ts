@@ -30,6 +30,7 @@ import {
 	resolveUpdateMethodForTest,
 	resolveUpdateTargetFromPath,
 	shouldForceBinaryUpdate,
+	sttWorkerAssetNameForBinaryName,
 	sweepStaleUpdateArtifacts,
 	updateViaBinaryAt,
 	updateViaManager,
@@ -1436,6 +1437,167 @@ describe("update-cli concurrent binary updates", () => {
 
 		expect(await Bun.file(targetPath).bytes()).toEqual(new Uint8Array(payload));
 		const residue = (await fs.readdir(dir)).filter(name => name.endsWith(".bak") || name.endsWith(".new"));
+		expect(residue).toEqual([]);
+	});
+});
+
+describe("update-cli stt-nemotron worker distribution", () => {
+	const version = "998.0.0";
+	const binaryName = "omp-darwin-arm64";
+	const workerName = "omp-stt-nemotron-darwin-arm64";
+	const binaryPayload = Buffer.alloc(512, 0x42);
+	const workerPayload = Buffer.alloc(256, 0x57);
+	const binaryDigest = `sha256:${createHash("sha256").update(binaryPayload).digest("hex")}`;
+	const workerDigest = `sha256:${createHash("sha256").update(workerPayload).digest("hex")}`;
+	const downloadUrl = (name: string) => `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${name}`;
+
+	function metadata(withWorker: boolean): Response {
+		const assets = [
+			{
+				name: binaryName,
+				state: "uploaded",
+				size: binaryPayload.byteLength,
+				digest: binaryDigest,
+				browser_download_url: downloadUrl(binaryName),
+			},
+		];
+		if (withWorker) {
+			assets.push({
+				name: workerName,
+				state: "uploaded",
+				size: workerPayload.byteLength,
+				digest: workerDigest,
+				browser_download_url: downloadUrl(workerName),
+			});
+		}
+		return Response.json({ tag_name: `v${version}`, draft: false, prerelease: false, assets });
+	}
+
+	function fetchFor(options: { withWorker: boolean; failWorkerDownload?: boolean }) {
+		return async (input: string | URL | Request): Promise<Response> => {
+			const requestUrl = String(input);
+			if (requestUrl.startsWith("https://api.github.com/")) return metadata(options.withWorker);
+			if (requestUrl === downloadUrl(binaryName)) return new Response(binaryPayload);
+			if (requestUrl === downloadUrl(workerName)) {
+				if (options.failWorkerDownload) return new Response(null, { status: 404, statusText: "Not Found" });
+				return new Response(workerPayload);
+			}
+			throw new Error(`Unexpected request: ${requestUrl}`);
+		};
+	}
+
+	const verifyOk = async () => ({ ok: true, actual: version });
+	const verifyFail = async () => ({ ok: false });
+
+	async function preparePair(): Promise<{ dir: string; targetPath: string; workerPath: string }> {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "omp");
+		const workerPath = path.join(dir, "stt-nemotron");
+		await Bun.write(targetPath, "old omp");
+		await Bun.write(workerPath, "old worker");
+		await fs.chmod(workerPath, 0o755);
+		return { dir, targetPath, workerPath };
+	}
+
+	it("maps only the darwin-arm64 binary asset to a worker asset name", () => {
+		expect(sttWorkerAssetNameForBinaryName("omp-darwin-arm64")).toBe("omp-stt-nemotron-darwin-arm64");
+		for (const other of [
+			"omp-darwin-x64",
+			"omp-linux-x64",
+			"omp-linux-arm64",
+			"omp-linux-musl-x64",
+			"omp-linux-musl-arm64",
+			"omp-windows-x64.exe",
+		]) {
+			expect(sttWorkerAssetNameForBinaryName(other)).toBeNull();
+		}
+	});
+
+	it("installs the downloaded worker beside the replaced darwin-arm64 binary", async () => {
+		const { targetPath, workerPath } = await preparePair();
+
+		await updateViaBinaryAt(targetPath, version, {
+			binaryName,
+			fetchImpl: fetchFor({ withWorker: true }),
+			verifyInstalledVersion: verifyOk,
+		});
+
+		expect(Buffer.from(await Bun.file(targetPath).arrayBuffer()).equals(binaryPayload)).toBe(true);
+		expect(Buffer.from(await Bun.file(workerPath).arrayBuffer()).equals(workerPayload)).toBe(true);
+		// The runtime spawns the worker — it must land executable.
+		expect((await fs.stat(workerPath)).mode & 0o100).toBe(0o100);
+	});
+
+	it("rolls the pair back together when version verification fails", async () => {
+		const { targetPath, workerPath } = await preparePair();
+
+		await expect(
+			updateViaBinaryAt(targetPath, version, {
+				binaryName,
+				fetchImpl: fetchFor({ withWorker: true }),
+				verifyInstalledVersion: verifyFail,
+			}),
+		).rejects.toThrow();
+
+		expect(await Bun.file(targetPath).text()).toBe("old omp");
+		expect(await Bun.file(workerPath).text()).toBe("old worker");
+	});
+
+	it("restores omp even when restoring the worker backup fails", async () => {
+		const { targetPath, workerPath } = await preparePair();
+		const realRename = nodeFs.promises.rename;
+		const renameSpy = spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
+			if (String(from).includes("stt-nemotron.") && String(from).endsWith(".bak") && String(to) === workerPath) {
+				throw Object.assign(new Error("EPERM: worker restore failed"), { code: "EPERM" });
+			}
+			return await realRename(from, to);
+		});
+		try {
+			await expect(
+				updateViaBinaryAt(targetPath, version, {
+					binaryName,
+					fetchImpl: fetchFor({ withWorker: true }),
+					verifyInstalledVersion: verifyFail,
+				}),
+			).rejects.toThrow("rollback incomplete");
+		} finally {
+			renameSpy.mockRestore();
+		}
+
+		expect(await Bun.file(targetPath).text()).toBe("old omp");
+	});
+
+	it("refuses a darwin-arm64 release that is missing the worker asset", async () => {
+		const { targetPath, workerPath } = await preparePair();
+
+		await expect(
+			updateViaBinaryAt(targetPath, version, {
+				binaryName,
+				fetchImpl: fetchFor({ withWorker: false }),
+				verifyInstalledVersion: verifyOk,
+			}),
+		).rejects.toThrow(`0 assets named ${workerName}`);
+
+		// Nothing was installed: omp and its worker are untouched.
+		expect(await Bun.file(targetPath).text()).toBe("old omp");
+		expect(await Bun.file(workerPath).text()).toBe("old worker");
+	});
+
+	it("never replaces omp or deletes the existing worker when only the worker download fails", async () => {
+		const { dir, targetPath, workerPath } = await preparePair();
+
+		await expect(
+			updateViaBinaryAt(targetPath, version, {
+				binaryName,
+				fetchImpl: fetchFor({ withWorker: true, failWorkerDownload: true }),
+				verifyInstalledVersion: verifyOk,
+			}),
+		).rejects.toThrow("Download failed");
+
+		expect(await Bun.file(targetPath).text()).toBe("old omp");
+		expect(await Bun.file(workerPath).text()).toBe("old worker");
+		const residue = (await fs.readdir(dir)).filter(name => name.endsWith(".new"));
 		expect(residue).toEqual([]);
 	});
 });
