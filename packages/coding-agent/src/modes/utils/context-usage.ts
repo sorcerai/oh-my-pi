@@ -4,7 +4,8 @@ import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-age
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import type { Skill } from "../../extensibility/skills";
+import type { SkillsSettings } from "../../config/settings";
+import { type Skill, selectSkillsForPrompt } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { resolveSpeculationMethod } from "../../session/compaction-methods";
 import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
@@ -80,7 +81,6 @@ export function computeCompactionBoundaries(
 	};
 }
 
-/** Stable inputs used to cache non-message token estimates. */
 export interface NonMessageTokenSource {
 	readonly systemPrompt?: string[];
 	readonly agent?: {
@@ -89,6 +89,7 @@ export interface NonMessageTokenSource {
 		};
 	};
 	readonly skills?: readonly Skill[];
+	readonly skillsSettings?: Pick<SkillsSettings, "promptMode" | "promptSkills">;
 }
 
 const EMPTY_STRING_PARTS: string[] = [];
@@ -96,19 +97,22 @@ const EMPTY_TOOLS: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters
 const EMPTY_SKILLS: readonly Skill[] = [];
 
 /**
- * Skills actually rendered into the system prompt, mirroring the filter in
- * `buildSystemPrompt` (`system-prompt.ts`): the `read` tool must be present so
- * the model can fetch skill content, and skills with frontmatter `hide: true`
- * (or `disable-model-invocation`, normalized onto `hide`) are excluded.
- * Accounting must count only these so the Skills category and the System-prompt
- * subtraction stay aligned with the provider-facing prompt.
+ * Skills actually rendered into the system prompt, using the same selection
+ * gates as `buildSystemPrompt` (`system-prompt.ts`): the `read` tool must be
+ * present, prompt-mode settings select the discovered set, and hidden skills
+ * are excluded. Accounting must count only these so the Skills category and
+ * system-prompt subtraction stay aligned with the provider-facing prompt.
  */
 function renderedSkills(
 	skills: readonly Skill[],
 	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>,
+	settings?: Pick<SkillsSettings, "promptMode" | "promptSkills">,
 ): readonly Skill[] {
-	if (!tools.some(tool => tool.name === "read")) return EMPTY_SKILLS;
-	return skills.filter(skill => skill.hide !== true);
+	return selectSkillsForPrompt(
+		skills,
+		tools.some(tool => tool.name === "read"),
+		settings,
+	);
 }
 
 export function estimateSkillsTokens(skills: readonly Skill[], tokenizer: Tokenizer): number {
@@ -160,19 +164,20 @@ export function estimateToolSchemaTokens(
  * cadence — non-message recomputed only when the inputs identity changes,
  * messages walked incrementally as new entries append.
  */
-// Non-message inputs (system prompt, tools, skills) change rarely — at most
-// once per turn via setSystemPrompt/setTools — but the per-turn compaction and
-// threshold paths call these helpers several times: getContextBreakdown calls
-// both, and #estimateStoredContextTokens adds a third. Memoize on the identity
-// of the three input arrays so the expensive parts (system-prompt tokenization
-// and the per-tool JSON.stringify(toolWireSchema) inside estimateToolSchemaTokens)
-// run at most once per input change rather than per call. The identity keys are
-// the same stable references the StatusLineComponent cache already trusts
-// (setSystemPrompt/setTools replace the array reference rather than mutating it).
+// Non-message inputs (system prompt, tools, skills, and skill prompt settings)
+// change rarely — at most once per turn via setSystemPrompt/setTools — but the
+// per-turn compaction and threshold paths call these helpers several times:
+// getContextBreakdown calls both, and #estimateStoredContextTokens adds a third.
+// Memoize on the identity of these inputs so expensive tokenization and
+// per-tool JSON.stringify(toolWireSchema) run at most once per input change.
+// The identity keys are the same stable references the StatusLineComponent cache
+// already trusts (setSystemPrompt/setTools replace the array reference rather
+// than mutating it).
 interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
 	toolsRef: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>;
 	skillsRef: readonly Skill[];
+	skillsSettingsRef: Pick<SkillsSettings, "promptMode" | "promptSkills"> | undefined;
 	// The Agent swaps its Tokenizer instance when the model's encoding changes,
 	// so instance identity doubles as the encoding key.
 	tokenizerRef: Tokenizer;
@@ -198,17 +203,27 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: To
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const skillsRef = session.skills ?? EMPTY_SKILLS;
+	const skillsSettingsRef = session.skillsSettings;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
 	if (
 		entry &&
 		entry.systemPromptRef === systemPromptRef &&
 		entry.toolsRef === toolsRef &&
 		entry.skillsRef === skillsRef &&
+		entry.skillsSettingsRef === skillsSettingsRef &&
 		entry.tokenizerRef === tokenizer
 	) {
 		return entry;
 	}
-	entry = { systemPromptRef, toolsRef, skillsRef, tokenizerRef: tokenizer, tokens: undefined, breakdown: undefined };
+	entry = {
+		systemPromptRef,
+		toolsRef,
+		skillsRef,
+		skillsSettingsRef,
+		tokenizerRef: tokenizer,
+		tokens: undefined,
+		breakdown: undefined,
+	};
 	cachedSession[NON_MESSAGE_TOKEN_CACHE] = entry;
 	return entry;
 }
@@ -216,11 +231,9 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: To
 export function computeNonMessageTokens(session: NonMessageTokenSource, tokenizer: Tokenizer): number {
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.tokens !== undefined) return entry.tokens;
-	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
-	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const tokens =
-		tokenizer.countTokens(Array.from(systemPromptParts, part => part ?? "")) +
-		estimateToolSchemaTokens(tools, tokenizer);
+		tokenizer.countTokens(Array.from(entry.systemPromptRef, part => part ?? "")) +
+		estimateToolSchemaTokens(entry.toolsRef, tokenizer);
 	entry.tokens = tokens;
 	return tokens;
 }
@@ -242,10 +255,12 @@ export function computeNonMessageBreakdown(
 } {
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
-	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
-	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
-	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
+	const skillsTokens = estimateSkillsTokens(
+		renderedSkills(entry.skillsRef, entry.toolsRef, entry.skillsSettingsRef),
+		tokenizer,
+	);
+	const toolsTokens = estimateToolSchemaTokens(entry.toolsRef, tokenizer);
+	const systemPromptParts = entry.systemPromptRef;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
 	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);
 	const breakdown = { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens };

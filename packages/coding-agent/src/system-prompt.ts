@@ -23,7 +23,7 @@ import { findConfigFile } from "./config";
 import type { Personality, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
-import { loadSkills, type Skill } from "./extensibility/skills";
+import { loadSkills, type Skill, selectSkillsForPrompt } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
@@ -937,11 +937,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 				}),
 			);
 
-	// Filter skills for the rendered system prompt:
-	// - require the `read` tool so the model can actually fetch skill content;
-	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
-	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	// Skill selection owns the prompt-mode filter, read-tool gate, and hidden-skill drop.
+	const filteredSkills = selectSkillsForPrompt(skills, inventoryToolNames.includes("read"), skillsSettings);
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
