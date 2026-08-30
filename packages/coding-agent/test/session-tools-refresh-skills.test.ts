@@ -4,6 +4,7 @@ import { Settings } from "../src/config/settings";
 import type { LoadSkillsResult, Skill } from "../src/extensibility/skills";
 import * as skillsModule from "../src/extensibility/skills";
 import { SessionTools, type SessionToolsHost } from "../src/session/session-tools";
+import type { XdevState } from "../src/tools/xdev";
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -26,21 +27,46 @@ function makeSkill(name: string): Skill {
 }
 
 type SessionToolsTestOptions = {
+	settings?: Settings;
+	toolRegistry?: Map<string, AgentTool>;
+	builtInToolNames?: Iterable<string>;
+	activeToolNames?: readonly string[];
+	presentationPinnedToolNames?: ReadonlySet<string>;
+	xdev?: XdevState;
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
 	onNotify?: () => void;
 	onSetSystemPrompt?: (prompt: string[]) => void;
 };
 
+function makeTestTool(name: string): AgentTool {
+	return { name } as AgentTool;
+}
+
 function makeSessionTools(options: SessionToolsTestOptions = {}): SessionTools {
-	const settings = Settings.isolated({
-		"skills.enabled": true,
-		includeModelInPrompt: false,
-	});
+	const settings =
+		options.settings ??
+		Settings.isolated({
+			"skills.enabled": true,
+			includeModelInPrompt: false,
+		});
+	const toolRegistry = options.toolRegistry ?? new Map<string, AgentTool>();
+	const activeToolNames = options.activeToolNames ?? [...toolRegistry.keys()];
+	const agentState = {
+		tools: activeToolNames.flatMap(name => (toolRegistry.has(name) ? [toolRegistry.get(name)!] : [])),
+		systemPrompt: ["initial"],
+	};
 	const host = {
 		agent: {
-			state: { tools: [] },
-			setSystemPrompt: (prompt: string[]) => options.onSetSystemPrompt?.(prompt),
+			state: agentState,
+			setTools: (tools: AgentTool[]) => {
+				agentState.tools = tools;
+			},
+			setSystemPrompt: (prompt: string[]) => {
+				agentState.systemPrompt = prompt;
+				options.onSetSystemPrompt?.(prompt);
+			},
 		} as unknown as Agent,
+
 		sessionManager: { getCwd: () => "/tmp/session" },
 		settings,
 		agentKind: () => "sub" as const,
@@ -56,6 +82,7 @@ function makeSessionTools(options: SessionToolsTestOptions = {}): SessionTools {
 		clearInheritedProviderPromptCacheKey: () => undefined,
 		clearMemoryPromotionSnapshot: () => undefined,
 		captureMemoryPromotionSnapshot: () => undefined,
+		emitNotice: () => undefined,
 		notifyCommandMetadataChanged: () => options.onNotify?.(),
 		localProtocolOptions: () => ({}),
 		getInspectImageModeOverride: () => undefined,
@@ -63,7 +90,10 @@ function makeSessionTools(options: SessionToolsTestOptions = {}): SessionTools {
 	} as unknown as SessionToolsHost;
 
 	return new SessionTools(host, {
-		toolRegistry: new Map<string, AgentTool>(),
+		toolRegistry,
+		builtInToolNames: options.builtInToolNames,
+		presentationPinnedToolNames: options.presentationPinnedToolNames,
+		xdev: options.xdev,
 		baseSystemPrompt: ["initial"],
 		rebuildSystemPrompt: options.rebuildSystemPrompt ?? (async () => ({ systemPrompt: ["rebuilt"] })),
 		getLocalCalendarDate: () => "2026-08-22",
@@ -74,6 +104,220 @@ function makeSessionTools(options: SessionToolsTestOptions = {}): SessionTools {
 afterEach(() => vi.restoreAllMocks());
 
 describe("SessionTools.refreshSkills", () => {
+	it("adds skill_search after skills are enabled without recreating the session", async () => {
+		const settings = Settings.isolated({
+			includeModelInPrompt: false,
+		});
+		settings.set("skills.enabled", false);
+		const read = makeTestTool("read");
+		const toolRegistry = new Map<string, AgentTool>([["read", read]]);
+		const promptSnapshots: Array<{ names: string[]; hasSkillSearch: boolean }> = [];
+		const sessionTools = makeSessionTools({
+			settings,
+			toolRegistry,
+			builtInToolNames: ["read"],
+			rebuildSystemPrompt: async (names, tools) => {
+				promptSnapshots.push({ names, hasSkillSearch: tools.has("skill_search") });
+				return { systemPrompt: ["rebuilt"] };
+			},
+		});
+
+		await sessionTools.refreshSkills();
+		expect(sessionTools.getAllToolNames()).toEqual(["read"]);
+
+		settings.set("skills.enabled", true);
+		await sessionTools.refreshSkills();
+
+		expect(sessionTools.getAllToolNames()).toContain("skill_search");
+		expect(sessionTools.getActiveToolNames()).toContain("skill_search");
+		expect(promptSnapshots.at(-1)).toEqual({ names: ["read", "skill_search"], hasSkillSearch: true });
+	});
+
+	it("removes skill_search after skills are disabled without recreating the session", async () => {
+		const settings = Settings.isolated({
+			includeModelInPrompt: false,
+		});
+		const read = makeTestTool("read");
+		const skillSearch = makeTestTool("skill_search");
+		const toolRegistry = new Map<string, AgentTool>([
+			["read", read],
+			["skill_search", skillSearch],
+		]);
+		const sessionTools = makeSessionTools({
+			settings,
+			toolRegistry,
+			builtInToolNames: ["read", "skill_search"],
+		});
+
+		await sessionTools.refreshSkills();
+		expect(sessionTools.getAllToolNames()).toEqual(["read", "skill_search"]);
+
+		settings.set("skills.enabled", false);
+		await sessionTools.refreshSkills();
+
+		expect(sessionTools.getAllToolNames()).toEqual(["read"]);
+		expect(sessionTools.getActiveToolNames()).not.toContain("skill_search");
+	});
+
+	it("rolls back registry, provenance, active routing, xdev state, and prompt on enable rebuild failure", async () => {
+		const settings = Settings.isolated({
+			"skills.enabled": false,
+			includeModelInPrompt: false,
+		});
+		const read = makeTestTool("read");
+		const write = makeTestTool("write");
+		const toolRegistry = new Map<string, AgentTool>([
+			["read", read],
+			["write", write],
+		]);
+		const xdev: XdevState = {
+			tools: toolRegistry,
+			mountedNames: new Set(),
+			builtInNames: new Set(["read", "write"]),
+			isActive: () => true,
+		};
+		const rebuildSystemPrompt = vi.fn(async () => {
+			throw new Error("enable prompt rebuild failed");
+		});
+		const appliedPrompts: string[][] = [];
+		vi.spyOn(skillsModule, "loadSkills").mockResolvedValue({ skills: [], warnings: [] });
+		const sessionTools = makeSessionTools({
+			settings,
+			toolRegistry,
+			builtInToolNames: ["read", "write"],
+			activeToolNames: ["read", "write"],
+			xdev,
+			rebuildSystemPrompt,
+			onSetSystemPrompt: prompt => appliedPrompts.push(prompt),
+		});
+		const previousRegistry = [...toolRegistry.entries()];
+		const previousActive = sessionTools.getActiveToolNames();
+		const previousMounted = [...xdev.mountedNames];
+		const previousPrompt = [...sessionTools.baseSystemPrompt];
+
+		settings.set("skills.enabled", true);
+		await expect(sessionTools.refreshSkills()).rejects.toThrow("enable prompt rebuild failed");
+
+		expect(rebuildSystemPrompt).toHaveBeenCalledTimes(1);
+		expect([...toolRegistry.entries()]).toEqual(previousRegistry);
+		expect(sessionTools.getAllToolInfos().map(tool => [tool.name, tool.sourceInfo?.source])).toEqual([
+			["read", "builtin"],
+			["write", "builtin"],
+		]);
+		expect(sessionTools.getActiveToolNames()).toEqual(previousActive);
+		expect([...xdev.mountedNames]).toEqual(previousMounted);
+		expect(sessionTools.getEnabledToolNames()).toEqual(previousActive);
+		expect(sessionTools.baseSystemPrompt).toEqual(previousPrompt);
+		expect(appliedPrompts).toEqual([]);
+	});
+
+	it("rolls back registry, provenance, active routing, xdev state, and prompt on disable rebuild failure", async () => {
+		const settings = Settings.isolated({
+			"skills.enabled": true,
+			includeModelInPrompt: false,
+		});
+		const read = makeTestTool("read");
+		const write = makeTestTool("write");
+		const skillSearch = makeTestTool("skill_search");
+		const toolRegistry = new Map<string, AgentTool>([
+			["read", read],
+			["write", write],
+			["skill_search", skillSearch],
+		]);
+		const xdev: XdevState = {
+			tools: toolRegistry,
+			mountedNames: new Set(["skill_search"]),
+			builtInNames: new Set(["read", "write"]),
+			isActive: () => true,
+		};
+		const rebuildSystemPrompt = vi.fn(async () => {
+			throw new Error("disable prompt rebuild failed");
+		});
+		const appliedPrompts: string[][] = [];
+		vi.spyOn(skillsModule, "loadSkills").mockResolvedValue({ skills: [], warnings: [] });
+		const sessionTools = makeSessionTools({
+			settings,
+			toolRegistry,
+			builtInToolNames: ["read", "write", "skill_search"],
+			activeToolNames: ["read", "write"],
+			xdev,
+			rebuildSystemPrompt,
+			onSetSystemPrompt: prompt => appliedPrompts.push(prompt),
+		});
+		const previousRegistry = [...toolRegistry.entries()];
+		const previousActive = sessionTools.getActiveToolNames();
+		const previousMounted = [...xdev.mountedNames];
+		const previousPrompt = [...sessionTools.baseSystemPrompt];
+
+		settings.set("skills.enabled", false);
+		await expect(sessionTools.refreshSkills()).rejects.toThrow("disable prompt rebuild failed");
+
+		expect(rebuildSystemPrompt).toHaveBeenCalledTimes(1);
+		expect([...toolRegistry.entries()]).toEqual(previousRegistry);
+		expect(sessionTools.getAllToolInfos().map(tool => [tool.name, tool.sourceInfo?.source])).toEqual([
+			["read", "builtin"],
+			["write", "builtin"],
+			["skill_search", "builtin"],
+		]);
+		expect(sessionTools.getActiveToolNames()).toEqual(previousActive);
+		expect([...xdev.mountedNames]).toEqual(previousMounted);
+		expect(sessionTools.getEnabledToolNames()).toEqual([...previousActive, "skill_search"]);
+		expect(sessionTools.baseSystemPrompt).toEqual(previousPrompt);
+		expect(appliedPrompts).toEqual([]);
+	});
+
+	it("does not add skill_search outside the original requested-tool restriction", async () => {
+		const settings = Settings.isolated({
+			includeModelInPrompt: false,
+		});
+		settings.set("skills.enabled", false);
+		const read = makeTestTool("read");
+		const toolRegistry = new Map<string, AgentTool>([["read", read]]);
+		const sessionTools = makeSessionTools({
+			settings,
+			toolRegistry,
+			builtInToolNames: ["read"],
+			presentationPinnedToolNames: new Set(["read"]),
+		});
+
+		settings.set("skills.enabled", true);
+		await sessionTools.refreshSkills();
+
+		expect(sessionTools.getAllToolNames()).not.toContain("skill_search");
+		expect(sessionTools.getActiveToolNames()).not.toContain("skill_search");
+	});
+
+	it("does not duplicate skill_search when concurrent refreshes race a live enable", async () => {
+		const settings = Settings.isolated({
+			includeModelInPrompt: false,
+		});
+		settings.set("skills.enabled", false);
+		const read = makeTestTool("read");
+		const toolRegistry = new Map<string, AgentTool>([["read", read]]);
+		const sessionTools = makeSessionTools({
+			settings,
+			toolRegistry,
+			builtInToolNames: ["read"],
+		});
+		const first = deferred<LoadSkillsResult>();
+		const second = deferred<LoadSkillsResult>();
+		let calls = 0;
+		vi.spyOn(skillsModule, "loadSkills").mockImplementation(async () => {
+			const result = [first, second][calls++];
+			if (!result) throw new Error("unexpected third skill reload");
+			return result.promise;
+		});
+
+		settings.set("skills.enabled", true);
+		const refreshOne = sessionTools.refreshSkills();
+		const refreshTwo = sessionTools.refreshSkills();
+		first.resolve({ skills: [], warnings: [] });
+		second.resolve({ skills: [], warnings: [] });
+		await Promise.all([refreshOne, refreshTwo]);
+
+		expect([...toolRegistry.keys()].filter(name => name === "skill_search")).toHaveLength(1);
+	});
+
 	it("serializes concurrent reloads and keeps completion order deterministic", async () => {
 		const first = deferred<LoadSkillsResult>();
 		const second = deferred<LoadSkillsResult>();

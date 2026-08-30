@@ -225,12 +225,11 @@ export function resolveReleaseBinaryAsset(
 	};
 }
 
-async function getReleaseBinaryAsset(
+async function fetchReleaseMetadata(
 	expectedVersion: string,
-	binaryName: string,
 	fetchImpl: Fetch = fetch,
 	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
-): Promise<ReleaseBinaryAsset> {
+): Promise<unknown> {
 	const tag = `v${expectedVersion}`;
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
@@ -259,7 +258,20 @@ async function getReleaseBinaryAsset(
 		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
 	}
 
-	return resolveReleaseBinaryAsset(await response.json(), tag, binaryName);
+	return response.json();
+}
+
+async function getReleaseBinaryAsset(
+	expectedVersion: string,
+	binaryName: string,
+	fetchImpl: Fetch = fetch,
+	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
+): Promise<ReleaseBinaryAsset> {
+	return resolveReleaseBinaryAsset(
+		await fetchReleaseMetadata(expectedVersion, fetchImpl, githubToken),
+		`v${expectedVersion}`,
+		binaryName,
+	);
 }
 
 export interface VerifiedBinaryDownloadOptions {
@@ -337,13 +349,19 @@ export interface InstalledVersionVerification {
 	path?: string;
 }
 
-/** Paths and verifier used while replacing a downloaded binary update. */
+/**
+ * Paths and verifier used while replacing a downloaded binary update. When
+ * `worker` is set (Darwin arm64 binary updates) the `stt-nemotron` worker is
+ * swapped inside the same transaction: both files install together, and a
+ * failure of either rolls both back.
+ */
 export interface BinaryReplacementOptions {
 	targetPath: string;
 	tempPath: string;
 	backupPath: string;
 	expectedVersion: string;
 	verifyInstalledVersion: (expectedVersion: string) => Promise<InstalledVersionVerification>;
+	worker?: { targetPath: string; tempPath: string; backupPath: string };
 }
 
 /**
@@ -1013,6 +1031,19 @@ function getBinaryName(): string {
 }
 
 /**
+ * Release asset name of the adjacent Nemotron STT worker for a binary asset,
+ * or null when that platform ships no worker (everything but darwin-arm64).
+ * The compiled runtime resolves the worker only beside `process.execPath`
+ * (src/stt/nemotron-worker-client.ts) with no fallback, so every
+ * darwin-arm64 binary install must also fetch this asset and install it as
+ * `stt-nemotron` beside omp. Keyed on the binary asset name (not the host)
+ * so overrides like `binaryName` keep the pair consistent.
+ */
+export function sttWorkerAssetNameForBinaryName(binaryName: string): string | null {
+	return binaryName === "omp-darwin-arm64" ? "omp-stt-nemotron-darwin-arm64" : null;
+}
+
+/**
  * Resolve the path that `omp` maps to in the user's PATH.
  */
 function resolveOmpPath(): string | undefined {
@@ -1023,16 +1054,25 @@ function resolveOmpPath(): string | undefined {
  * Run a specific binary and check if it reports the expected version.
  */
 async function verifyBinaryAtPath(binaryPath: string, expectedVersion: string): Promise<InstalledVersionVerification> {
+	const captureDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `${APP_NAME}-version-`));
+	const stdoutPath = path.join(captureDir, "stdout");
+	const stderrPath = path.join(captureDir, "stderr");
 	try {
-		const result = await $`${binaryPath} --version`.quiet().nothrow();
-		if (result.exitCode !== 0) return { ok: false, path: binaryPath };
-		const output = result.text().trim();
+		const proc = Bun.spawn([binaryPath, "--version"], {
+			stdout: Bun.file(stdoutPath),
+			stderr: Bun.file(stderrPath),
+		});
+		const exitCode = await proc.exited;
+		if (exitCode !== 0) return { ok: false, path: binaryPath };
+		const output = (await Bun.file(stdoutPath).text()).trim();
 		// Output format: "omp/X.Y.Z"
 		const match = output.match(/\/(\d+\.\d+\.\d+)/);
 		const actual = match?.[1];
 		return { ok: actual === expectedVersion, actual, path: binaryPath };
 	} catch {
 		return { ok: false, path: binaryPath };
+	} finally {
+		await fs.promises.rm(captureDir, { recursive: true, force: true });
 	}
 }
 
@@ -1046,7 +1086,8 @@ async function verifyInstalledVersion(expectedVersion: string): Promise<Installe
 }
 
 function printVerifiedVersion(expectedVersion: string): void {
-	console.log(chalk.green(`\n${theme.status.success} Updated to ${expectedVersion}`));
+	const success = theme?.status?.success ?? "✓";
+	console.log(chalk.green(`\n${success} Updated to ${expectedVersion}`));
 }
 
 function formatVerificationFailure(result: InstalledVersionVerification, expectedVersion: string): string {
@@ -1147,10 +1188,31 @@ export async function sweepStaleUpdateArtifacts(targetPath: string): Promise<voi
 
 /**
  * Atomically replace the installed binary and roll back if version verification fails.
+ *
+ * When `options.worker` is set, the adjacent `stt-nemotron` worker swaps
+ * inside the same transaction: it installs FIRST, so a worker-side failure
+ * aborts before the omp binary is touched, and any later failure rolls the
+ * pair back together — never a new worker beside a restored older omp, and
+ * never a replaced omp without its worker.
  */
 export async function replaceBinaryForUpdate(options: BinaryReplacementOptions): Promise<InstalledVersionVerification> {
+	const worker = options.worker;
 	let backupReady = false;
+	let workerBackupReady = false;
+	let workerInstalled = false;
 	try {
+		if (worker) {
+			// Move any existing worker aside (no previous worker is fine on a
+			// fresh install); the catch below restores it untouched on failure.
+			try {
+				await fs.promises.rename(worker.targetPath, worker.backupPath);
+				workerBackupReady = true;
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+			}
+			await fs.promises.rename(worker.tempPath, worker.targetPath);
+			workerInstalled = true;
+		}
 		// `backupPath` is unique per attempt (see updateViaBinaryAt), so this rename
 		// never has to overwrite — or unlink — a possibly-locked leftover from an
 		// earlier run. Renaming the running executable itself is permitted on
@@ -1170,14 +1232,39 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 		// Swap done and verified. On Windows the backup is still the running
 		// process image and cannot be unlinked until this process exits, so a
 		// failure here must NOT fail an otherwise-successful update.
+		if (worker) {
+			await removeBackupBestEffort(worker.backupPath);
+		}
 		await removeBackupBestEffort(options.backupPath);
 		return verification;
 	} catch (err) {
-		if (backupReady) {
-			await unlinkIfExists(options.targetPath);
-			await fs.promises.rename(options.backupPath, options.targetPath);
+		const rollbackErrors: unknown[] = [];
+		const attemptRollback = async (operation: () => Promise<unknown>): Promise<void> => {
+			try {
+				await operation();
+			} catch (rollbackError) {
+				rollbackErrors.push(rollbackError);
+			}
+		};
+		if (worker) {
+			if (workerInstalled) {
+				await attemptRollback(() => unlinkIfExists(worker.targetPath));
+			}
+			if (workerBackupReady) {
+				await attemptRollback(() => fs.promises.rename(worker.backupPath, worker.targetPath));
+			} else {
+				await attemptRollback(() => unlinkIfExists(worker.tempPath));
+			}
 		}
-		await unlinkIfExists(options.tempPath);
+		if (backupReady) {
+			await attemptRollback(() => unlinkIfExists(options.targetPath));
+			await attemptRollback(() => fs.promises.rename(options.backupPath, options.targetPath));
+		}
+		await attemptRollback(() => unlinkIfExists(options.tempPath));
+		if (rollbackErrors.length > 0) {
+			const message = err instanceof Error ? err.message : String(err);
+			throw new AggregateError(rollbackErrors, `${message}; rollback incomplete`, { cause: err });
+		}
 		throw err;
 	}
 }
@@ -1458,6 +1545,10 @@ let updateAttemptSeq = 0;
 
 /**
  * Download a release binary to a target path, replacing an existing file.
+ *
+ * On darwin-arm64 the release's `stt-nemotron` worker asset downloads and
+ * swaps in the same transaction, so the updated omp is never left without
+ * its adjacent worker (and a worker-side failure never touches omp).
  */
 export async function updateViaBinaryAt(
 	targetPath: string,
@@ -1470,6 +1561,7 @@ export async function updateViaBinaryAt(
 	} = {},
 ): Promise<void> {
 	const binaryName = options.binaryName ?? getBinaryName();
+	const workerAssetName = sttWorkerAssetNameForBinaryName(binaryName);
 	// Unique per attempt so two overlapping `omp update` runs never share a temp
 	// or backup path. A fixed temp name (`<binary>.new`) let the second run's
 	// pre-download unlink delete the first run's still-downloading temp file; the
@@ -1482,16 +1574,42 @@ export async function updateViaBinaryAt(
 	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
 	const tempPath = `${targetPath}.${attempt}.new`;
 	const backupPath = `${targetPath}.${attempt}.bak`;
-	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, options.fetchImpl, options.githubToken);
-	console.log(chalk.dim(`Downloading ${binaryName}…`));
-	await downloadVerifiedBinary({
-		url: asset.url,
-		targetPath: tempPath,
-		expectedSize: asset.size,
-		expectedDigest: asset.digest,
-		fetchImpl: options.fetchImpl,
-	});
-	console.log(chalk.dim(`Verified ${asset.digest}`));
+	// The worker installs under its runtime-facing name beside the binary; the
+	// same unique-attempt suffixing lets the artifact sweep reclaim its temps.
+	const workerTargetPath = path.join(path.dirname(targetPath), "stt-nemotron");
+	const workerTempPath = `${workerTargetPath}.${attempt}.new`;
+	const workerBackupPath = `${workerTargetPath}.${attempt}.bak`;
+	const release = await fetchReleaseMetadata(expectedVersion, options.fetchImpl, options.githubToken);
+	const tag = `v${expectedVersion}`;
+	const asset = resolveReleaseBinaryAsset(release, tag, binaryName);
+	// A darwin-arm64 release without its worker asset is broken; refuse the
+	// update rather than install a workerless omp.
+	const workerAsset = workerAssetName ? resolveReleaseBinaryAsset(release, tag, workerAssetName) : null;
+	try {
+		console.log(chalk.dim(`Downloading ${binaryName}…`));
+		await downloadVerifiedBinary({
+			url: asset.url,
+			targetPath: tempPath,
+			expectedSize: asset.size,
+			expectedDigest: asset.digest,
+			fetchImpl: options.fetchImpl,
+		});
+		console.log(chalk.dim(`Verified ${asset.digest}`));
+		if (workerAsset && workerAssetName) {
+			console.log(chalk.dim(`Downloading ${workerAssetName}…`));
+			await downloadVerifiedBinary({
+				url: workerAsset.url,
+				targetPath: workerTempPath,
+				expectedSize: workerAsset.size,
+				expectedDigest: workerAsset.digest,
+				fetchImpl: options.fetchImpl,
+			});
+			console.log(chalk.dim(`Verified ${workerAsset.digest}`));
+		}
+	} catch (error) {
+		await Promise.allSettled([unlinkIfExists(tempPath), unlinkIfExists(workerTempPath)]);
+		throw error;
+	}
 
 	// Serialize the target swap and stale-artifact sweep per target so two
 	// overlapping `omp update` runs never replace the same binary concurrently
@@ -1505,9 +1623,15 @@ export async function updateViaBinaryAt(
 			backupPath,
 			expectedVersion,
 			verifyInstalledVersion: options.verifyInstalledVersion ?? verifyInstalledVersion,
+			worker: workerAsset
+				? { targetPath: workerTargetPath, tempPath: workerTempPath, backupPath: workerBackupPath }
+				: undefined,
 		});
 		// Reclaim backups from earlier updates whose owning process has since exited.
 		await sweepStaleUpdateArtifacts(targetPath);
+		if (workerAsset) {
+			await sweepStaleUpdateArtifacts(workerTargetPath);
+		}
 	});
 	printVerifiedVersion(expectedVersion);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));

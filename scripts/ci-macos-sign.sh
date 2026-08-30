@@ -22,7 +22,11 @@
 #   APPLE_API_ISSUER_ID          App Store Connect API issuer id (UUID)
 #   APPLE_API_KEY                base64 of the App Store Connect .p8 private key
 #
-# Usage: scripts/ci-macos-sign.sh <path-to-binary>
+#   --stdin-eof-launch-check
+#                         launch an stdin-protocol executable with immediate
+#                         EOF instead of passing omp CLI flags
+#
+# Usage: scripts/ci-macos-sign.sh [--stdin-eof-launch-check] <path-to-binary>
 
 set -euo pipefail
 
@@ -31,9 +35,15 @@ if [[ "${OSTYPE:-}" != darwin* ]]; then
 	exit 1
 fi
 
+LAUNCH_CHECK=omp
+if [[ "${1:-}" == "--stdin-eof-launch-check" ]]; then
+	LAUNCH_CHECK=stdin-eof
+	shift
+fi
+
 BINARY="${1:-}"
 if [[ -z "$BINARY" ]]; then
-	echo "usage: ci-macos-sign.sh <path-to-binary>" >&2
+	echo "usage: ci-macos-sign.sh [--stdin-eof-launch-check] <path-to-binary>" >&2
 	exit 1
 fi
 if [[ ! -f "$BINARY" ]]; then
@@ -99,11 +109,13 @@ if [[ -z "$IDENTITY" ]]; then
 fi
 echo "ci-macos-sign: signing as: $IDENTITY"
 
-codesign --force --timestamp --options runtime \
-	--entitlements "$ENTITLEMENTS" \
-	--sign "$IDENTITY" \
-	"$BINARY"
-
+codesign_args=(--force --timestamp --options runtime --sign "$IDENTITY")
+if [[ "$LAUNCH_CHECK" == "omp" ]]; then
+	# Bun and its extracted native addon require these exemptions. The Swift
+	# worker does not; keep its hardened-runtime signature privilege-free.
+	codesign_args+=(--entitlements "$ENTITLEMENTS")
+fi
+codesign "${codesign_args[@]}" "$BINARY"
 echo "ci-macos-sign: verifying signature"
 codesign --verify --strict --verbose=4 "$BINARY"
 codesign -dvvv "$BINARY" 2>&1 | grep -E "Authority|TeamIdentifier|flags=|Timestamp" || true
@@ -111,10 +123,15 @@ codesign -dvvv "$BINARY" 2>&1 | grep -E "Authority|TeamIdentifier|flags=|Timesta
 # Fail fast before the slower notarization round-trip: a hardened-runtime binary
 # missing an entitlement still signs cleanly but aborts at launch (e.g. the
 # native-addon Team ID check). Exercise the runtime in an isolated HOME.
-echo "ci-macos-sign: launch check under the hardened-runtime signature"
 run_home="$WORKDIR/home"
-HOME="$run_home" XDG_DATA_HOME="$run_home/xdg" "$BINARY" --version
-HOME="$run_home" XDG_DATA_HOME="$run_home/xdg" "$BINARY" --smoke-test
+if [[ "$LAUNCH_CHECK" == "stdin-eof" ]]; then
+	echo "ci-macos-sign: stdin EOF launch check under the hardened-runtime signature"
+	HOME="$run_home" XDG_DATA_HOME="$run_home/xdg" "$BINARY" </dev/null
+else
+	echo "ci-macos-sign: omp launch checks under the hardened-runtime signature"
+	HOME="$run_home" XDG_DATA_HOME="$run_home/xdg" "$BINARY" --version
+	HOME="$run_home" XDG_DATA_HOME="$run_home/xdg" "$BINARY" --smoke-test
+fi
 
 echo "ci-macos-sign: submitting for notarization"
 /usr/bin/ditto -c -k --keepParent "$BINARY" "$ZIP_PATH"

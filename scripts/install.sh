@@ -243,7 +243,7 @@ install_binary() {
     if [ -n "$REF" ]; then
         echo "Fetching release $REF..."
         if RELEASE_JSON=$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${REPO}/releases/tags/${REF}"); then
-            LATEST=$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+            LATEST=$(printf '%s\n' "$RELEASE_JSON" | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')
         else
             echo "Release tag not found: $REF"
             echo "For branch/commit installs, use --source with --ref."
@@ -252,7 +252,7 @@ install_binary() {
     else
         echo "Fetching latest release..."
         RELEASE_JSON=$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/${REPO}/releases/latest")
-        LATEST=$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+        LATEST=$(printf '%s\n' "$RELEASE_JSON" | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')
     fi
 
     if [ -z "$LATEST" ]; then
@@ -262,21 +262,118 @@ install_binary() {
     echo "Using version: $LATEST"
 
     mkdir -p "$INSTALL_DIR"
+
+    # Stage every download as a temp file INSIDE the install dir (same
+    # filesystem, so the final renames are atomic). Nothing is renamed into
+    # place until all downloads succeeded, so a failed fetch can never leave
+    # a workerless omp — or touch existing files at all.
+    OMP_STAGE="$(mktemp "${INSTALL_DIR}/.omp.install.XXXXXX")"
+    WORKER_STAGE=""
+    OMP_BACKUP=""
+    WORKER_BACKUP=""
+
     # Download binary
     BINARY_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
     echo "Downloading ${BINARY}..."
-    curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "${INSTALL_DIR}/omp"
-    chmod +x "${INSTALL_DIR}/omp"
+    if ! curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "$OMP_STAGE"; then
+        rm -f "$OMP_STAGE"
+        echo "Failed to download ${BINARY}"
+        exit 1
+    fi
+    chmod +x "$OMP_STAGE"
+    [ -s "$OMP_STAGE" ] || { rm -f "$OMP_STAGE"; echo "Downloaded ${BINARY} is empty"; exit 1; }
+
+    # Darwin arm64 releases may ship the Nemotron STT worker as a separate
+    # asset. Older releases predate that asset; keep them installable and let
+    # the runtime use its Bun transport fallback when the metadata omits it.
+    if [ "$PLATFORM" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+        WORKER="omp-stt-nemotron-${PLATFORM}-${ARCH}"
+        if echo "$RELEASE_JSON" | grep -q "\"${WORKER}\""; then
+            WORKER_URL="https://github.com/${REPO}/releases/download/${LATEST}/${WORKER}"
+            WORKER_STAGE="$(mktemp "${INSTALL_DIR}/.stt-nemotron.install.XXXXXX")"
+            echo "Downloading ${WORKER}..."
+            if ! curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$WORKER_URL" -o "$WORKER_STAGE"; then
+                rm -f "$OMP_STAGE" "$WORKER_STAGE"
+                echo "Failed to download ${WORKER}"
+                exit 1
+            fi
+            chmod +x "$WORKER_STAGE"
+            [ -s "$WORKER_STAGE" ] || { rm -f "$OMP_STAGE" "$WORKER_STAGE"; echo "Downloaded ${WORKER} is empty"; exit 1; }
+        else
+            echo "Release ${LATEST} has no ${WORKER}; installing omp without the native speech worker."
+        fi
+    fi
+
+    # Preserve any existing files so the post-install smoke below can roll
+    # the whole pair back if the new binary cannot start.
+    if [ -e "${INSTALL_DIR}/omp" ]; then
+        OMP_BACKUP="$(mktemp "${INSTALL_DIR}/.omp.backup.XXXXXX")"
+        cp -p "${INSTALL_DIR}/omp" "$OMP_BACKUP"
+    fi
+    if [ -n "$WORKER_STAGE" ] && [ -e "${INSTALL_DIR}/stt-nemotron" ]; then
+        WORKER_BACKUP="$(mktemp "${INSTALL_DIR}/.stt-nemotron.backup.XXXXXX")"
+        cp -p "${INSTALL_DIR}/stt-nemotron" "$WORKER_BACKUP"
+    fi
+
+    # Paired rename: worker first, then omp. A worker-side failure aborts
+    # before the omp binary is touched; any rename failure restores the
+    # previous pair exactly instead of exiting mid-swap via set -e.
+    install_failed=""
+    if [ -n "$WORKER_STAGE" ]; then
+        if ! mv -f "$WORKER_STAGE" "${INSTALL_DIR}/stt-nemotron"; then
+            install_failed="stt-nemotron worker"
+        fi
+    fi
+    if [ -z "$install_failed" ]; then
+        if ! mv -f "$OMP_STAGE" "${INSTALL_DIR}/omp"; then
+            install_failed="omp"
+        fi
+    fi
+    if [ -n "$install_failed" ]; then
+        echo "✗ Failed to install the ${install_failed}; rolling back."
+        rollback_failed=""
+        if [ -n "$WORKER_STAGE" ]; then
+            # The worker rename may have succeeded before the failure — undo it.
+            if [ -n "$WORKER_BACKUP" ]; then
+                mv -f "$WORKER_BACKUP" "${INSTALL_DIR}/stt-nemotron" || rollback_failed=1
+            else
+                rm -f "${INSTALL_DIR}/stt-nemotron" || rollback_failed=1
+            fi
+        fi
+        # omp was never renamed on a worker failure; on an omp-rename failure
+        # its destination is unchanged, so restoring the backup is a no-op of
+        # identical bytes and keeps a fresh-install dir clean.
+        if [ -n "$OMP_BACKUP" ]; then
+            mv -f "$OMP_BACKUP" "${INSTALL_DIR}/omp" || rollback_failed=1
+        fi
+        [ -z "$OMP_STAGE" ] || rm -f "$OMP_STAGE" || rollback_failed=1
+        [ -z "$WORKER_STAGE" ] || rm -f "$WORKER_STAGE" || rollback_failed=1
+        [ -z "$rollback_failed" ] || echo "✗ Rollback was incomplete; inspect ${INSTALL_DIR}."
+        exit 1
+    fi
 
     # Verify the freshly installed binary can actually start before reporting
     # success. Bun's musl-target binaries link libstdc++/libgcc dynamically,
     # which stock Alpine/musl systems do not ship, so the download succeeds while
     # the binary exits 127 with relocation errors. Never claim success for a
-    # binary that cannot run.
+    # binary that cannot run — and never leave a half-installed pair behind.
     if ! SMOKE_OUTPUT="$("${INSTALL_DIR}/omp" --version 2>&1)"; then
         echo ""
-        echo "✗ omp was downloaded to ${INSTALL_DIR}/omp but cannot start:"
+        echo "✗ omp was installed to ${INSTALL_DIR}/omp but cannot start:"
         echo "$SMOKE_OUTPUT" | sed 's/^/    /'
+        rollback_failed=""
+        if [ -n "$OMP_BACKUP" ]; then
+            mv -f "$OMP_BACKUP" "${INSTALL_DIR}/omp" || rollback_failed=1
+        else
+            rm -f "${INSTALL_DIR}/omp" || rollback_failed=1
+        fi
+        if [ -n "$WORKER_STAGE" ] || [ -n "$WORKER_BACKUP" ]; then
+            if [ -n "$WORKER_BACKUP" ]; then
+                mv -f "$WORKER_BACKUP" "${INSTALL_DIR}/stt-nemotron" || rollback_failed=1
+            else
+                rm -f "${INSTALL_DIR}/stt-nemotron" || rollback_failed=1
+            fi
+        fi
         if [ "$PLATFORM" = "linux-musl" ]; then
             echo ""
             echo "The musl build links libstdc++/libgcc dynamically. Install them, then re-run 'omp':"
@@ -286,11 +383,23 @@ install_binary() {
                 echo "    (install the libstdc++ and libgcc runtime packages for your distro)"
             fi
         fi
+        echo ""
+        if [ -n "$rollback_failed" ]; then
+            echo "Rollback was incomplete; inspect ${INSTALL_DIR}."
+        else
+            echo "Rolled back; previous files (if any) were restored."
+        fi
         exit 1
     fi
 
+    [ -z "$OMP_BACKUP" ] || rm -f "$OMP_BACKUP"
+    [ -z "$WORKER_BACKUP" ] || rm -f "$WORKER_BACKUP"
+
     echo ""
     echo "✓ Installed omp to ${INSTALL_DIR}/omp"
+    if [ -n "$WORKER_STAGE" ]; then
+        echo "✓ Installed stt-nemotron speech worker to ${INSTALL_DIR}/stt-nemotron"
+    fi
 
     # Check if in PATH
     case ":$PATH:" in

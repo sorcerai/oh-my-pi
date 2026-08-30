@@ -5765,6 +5765,7 @@ export interface MemoriesSettings {
 	phase2RetryDelaySeconds: number;
 	phase2HeartbeatSeconds: number;
 	rolloutPayloadPercent: number;
+	phase1InputTokenLimit: number;
 	fallbackTokenLimit: number;
 	summaryInjectionTokenLimit: number;
 }

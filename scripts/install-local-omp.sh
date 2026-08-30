@@ -19,6 +19,11 @@ backup_ready=0
 had_target=0
 previous_kind=
 previous_link=
+worker_install_stage=
+worker_target=
+worker_backup=
+had_worker=0
+worker_backup_ready=0
 
 fail() {
 	printf '%s: %s\n' "$name" "$*" >&2
@@ -27,6 +32,20 @@ fail() {
 
 rollback() {
 	set +e
+	if [ "$worker_backup_ready" -eq 1 ]; then
+		if [ "$had_worker" -eq 1 ]; then
+			if mv -f "$worker_backup" "$worker_target"; then
+				worker_backup_ready=0
+				printf '%s: restored previous stt-nemotron worker from %s\n' "$name" "$worker_backup" >&2
+			else
+				printf '%s: automatic worker restore failed; backup remains at %s\n' "$name" "$worker_backup" >&2
+			fi
+		else
+			rm -f "$worker_target"
+			worker_backup_ready=0
+			printf '%s: removed failed stt-nemotron worker; no previous worker existed\n' "$name" >&2
+		fi
+	fi
 	if [ "$had_target" -eq 1 ]; then
 		restore_stage_dir=$(mktemp -d "$global_bin/.omp.restore.XXXXXX") || restore_stage_dir=
 		restore_ok=0
@@ -93,6 +112,7 @@ on_exit() {
 	if [ "$status" -ne 0 ] && [ "$backup_ready" -eq 1 ]; then
 		rollback
 	fi
+	[ -z "$worker_install_stage" ] || rm -f "$worker_install_stage"
 	[ -z "$install_stage" ] || rm -f "$install_stage"
 	[ -z "$backup_stage" ] || rm -f "$backup_stage"
 	[ -z "$backup_stage_dir" ] || rm -rf "$backup_stage_dir"
@@ -183,6 +203,10 @@ git -C "$repo_root" worktree add --detach "$build_root" "$head_commit" >/dev/nul
 	fail "cannot create disposable detached worktree"
 worktree_added=1
 built=$build_root/packages/coding-agent/dist/omp
+# Darwin arm64 builds stage the Swift STT worker beside dist/omp
+# (scripts/build-binary.ts); install it with the same atomic pattern so the
+# installed omp is never left without its adjacent stt-nemotron worker.
+built_worker=$build_root/packages/coding-agent/dist/stt-nemotron
 
 printf '%s: installing frozen dependencies in disposable worktree\n' "$name"
 (cd "$build_root" && bun install --frozen-lockfile)
@@ -202,6 +226,8 @@ mkdir -p "$global_bin" || fail "cannot create Bun global bin directory: $global_
 global_bin=$(CDPATH='' cd -- "$global_bin" && pwd -P) || fail "cannot resolve Bun global bin directory"
 target=$global_bin/omp
 backup=$global_bin/omp.backup
+worker_target=$global_bin/stt-nemotron
+worker_backup=$global_bin/stt-nemotron.backup
 
 install_stage=$(mktemp "$global_bin/.omp.install.XXXXXX") || fail "cannot create install staging file"
 cp "$built" "$install_stage" || fail "cannot stage built executable"
@@ -209,6 +235,17 @@ chmod +x "$install_stage" || fail "cannot make staged executable runnable"
 built_sum=$(sha256_file "$built") || fail "cannot checksum built executable"
 staged_sum=$(sha256_file "$install_stage") || fail "cannot checksum staged executable"
 [ "$built_sum" = "$staged_sum" ] || fail "staged executable checksum does not match the build"
+
+if [ -f "$built_worker" ]; then
+	worker_install_stage=$(mktemp "$global_bin/.stt-nemotron.install.XXXXXX") || fail "cannot create worker staging file"
+	cp "$built_worker" "$worker_install_stage" || fail "cannot stage built stt-nemotron worker"
+	chmod +x "$worker_install_stage" || fail "cannot make staged worker runnable"
+	built_worker_sum=$(sha256_file "$built_worker") || fail "cannot checksum built worker"
+	staged_worker_sum=$(sha256_file "$worker_install_stage") || fail "cannot checksum staged worker"
+	[ "$built_worker_sum" = "$staged_worker_sum" ] || fail "staged worker checksum does not match the build"
+else
+	printf '%s: build staged no stt-nemotron worker; installing executable only\n' "$name"
+fi
 
 lock_dir=$global_bin/.omp.install-local.lock
 if ! mkdir "$lock_dir"; then
@@ -233,8 +270,21 @@ if [ -e "$target" ] || [ -L "$target" ]; then
 	rmdir "$backup_stage_dir" || fail "cannot remove backup staging directory"
 	backup_stage_dir=
 fi
+if [ -n "$worker_install_stage" ]; then
+	if [ -e "$worker_target" ]; then
+		had_worker=1
+		cp -p "$worker_target" "$worker_backup" || fail "cannot preserve existing stt-nemotron worker"
+	fi
+	worker_backup_ready=1
+fi
 backup_ready=1
 
+if [ -n "$worker_install_stage" ]; then
+	mv -f "$worker_install_stage" "$worker_target" || fail "cannot install stt-nemotron worker: $worker_target"
+	worker_install_stage=
+	installed_worker_sum=$(sha256_file "$worker_target") || fail "cannot checksum installed worker"
+	[ "$built_worker_sum" = "$installed_worker_sum" ] || fail "installed worker checksum does not match the build"
+fi
 mv -f "$install_stage" "$target" || fail "cannot install executable: $target"
 install_stage=
 installed_sum=$(sha256_file "$target") || fail "cannot checksum installed executable"
@@ -375,4 +425,7 @@ if [ "$had_target" -eq 1 ]; then
 	printf '%s: installed %s (sha256 %s); previous executable: %s\n' "$name" "$target" "$installed_sum" "$backup"
 else
 	printf '%s: installed %s (sha256 %s); no previous executable to back up\n' "$name" "$target" "$installed_sum"
+fi
+if [ -n "$installed_worker_sum" ]; then
+	printf '%s: installed %s (sha256 %s)\n' "$name" "$worker_target" "$installed_worker_sum"
 fi
