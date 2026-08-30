@@ -163,6 +163,8 @@ export const packages: PublishPackage[] = [
 		extraTypeConfigs: ["tsconfig.publish.client.json"],
 	},
 	{ dir: "packages/agent", kind: "typescript" },
+	{ dir: "packages/prime-bridge-protocol", kind: "typescript" },
+	{ dir: "packages/prime-bridge", kind: "typescript" },
 	{ dir: "packages/coding-agent", kind: "typescript", publishBin: { omp: "dist/cli.js" } },
 ];
 

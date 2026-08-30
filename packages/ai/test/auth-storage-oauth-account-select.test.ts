@@ -7,6 +7,7 @@ import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 
 const PROVIDER = "unit-oauth-select";
+const SOURCE = "auth-storage-oauth-account-select-test";
 
 function oauthCredential(suffix: string) {
 	return {
@@ -32,6 +33,7 @@ describe("AuthStorage OAuth account selection", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		oauthUtils.unregisterOAuthProviders(SOURCE);
 		store?.close();
 		store = null;
 		authStorage = null;
@@ -121,17 +123,33 @@ describe("AuthStorage OAuth account selection", () => {
 		}
 	});
 
-	test("getOAuthAccessByCredentialId refreshes only the durable requested row", async () => {
+	test("getOAuthAccessByCredentialId force-refreshes only the still-valid durable requested row", async () => {
 		const storage = authStorage;
-		if (!storage) throw new Error("test setup failed");
-		const seen: string[] = [];
-		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
-			const credential = credentials[provider];
-			if (!credential) return null;
-			seen.push(credential.access);
-			return { newCredentials: credential, apiKey: credential.access };
+		const credentialStore = store;
+		if (!storage || !credentialStore) throw new Error("test setup failed");
+		const refreshedRows: string[] = [];
+		oauthUtils.registerOAuthProvider({
+			id: PROVIDER,
+			name: "Exact OAuth Selection Unit",
+			sourceId: SOURCE,
+			async login() {
+				return oauthCredential("login");
+			},
+			async refreshToken(credentials) {
+				refreshedRows.push(credentials.refresh);
+				return {
+					...credentials,
+					access: `minted-${credentials.accountId}`,
+					refresh: `rotated-${credentials.accountId}`,
+					expires: Date.now() + 60 * 60_000,
+				};
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
 		});
 		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		const before = credentialStore.listAuthCredentials(PROVIDER);
 		const target = storage.listOAuthAccounts(PROVIDER)[1];
 		if (!target) throw new Error("expected second OAuth account");
 
@@ -141,8 +159,54 @@ describe("AuthStorage OAuth account selection", () => {
 		if (!result?.ok) throw new Error("expected ok resolution");
 		expect(result.credentialId).toBe(target.credentialId);
 		expect(result.accountId).toBe("acc-b");
-		expect(result.accessToken).toBe("access-b");
-		expect(seen).toEqual(["access-b"]);
+		expect(result.accessToken).toBe("minted-acc-b");
+		expect(refreshedRows).toEqual(["refresh-b"]);
+		const after = credentialStore.listAuthCredentials(PROVIDER);
+		expect(after.map(row => row.id)).toEqual(before.map(row => row.id));
+		expect(after[0]?.credential).toEqual(before[0]?.credential);
+		expect(after[2]?.credential).toEqual(before[2]?.credential);
+		expect(after[1]?.credential).toMatchObject({
+			type: "oauth",
+			access: "minted-acc-b",
+			refresh: "rotated-acc-b",
+			accountId: "acc-b",
+		});
+	});
+
+	test("getOAuthAccessByCredentialId ignores provider-wide API-key overrides", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		oauthUtils.registerOAuthProvider({
+			id: PROVIDER,
+			name: "Exact OAuth Selection Unit",
+			sourceId: SOURCE,
+			async login() {
+				return oauthCredential("login");
+			},
+			async refreshToken(credentials) {
+				return credentials;
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const target = storage.listOAuthAccounts(PROVIDER)[1];
+		if (!target) throw new Error("expected second OAuth account");
+
+		storage.setConfigApiKey(PROVIDER, "config-api-key");
+		expect(await storage.getApiKey(PROVIDER)).toBe("config-api-key");
+		const withConfigOverride = await storage.getOAuthAccessByCredentialId(PROVIDER, target.credentialId);
+		expect(withConfigOverride?.ok).toBe(true);
+		if (!withConfigOverride?.ok) throw new Error("expected config-override resolution");
+		expect(withConfigOverride.accessToken).toBe("access-b");
+
+		storage.setRuntimeApiKey(PROVIDER, "runtime-api-key");
+		expect(await storage.getApiKey(PROVIDER)).toBe("runtime-api-key");
+		const withRuntimeOverride = await storage.getOAuthAccessByCredentialId(PROVIDER, target.credentialId);
+		expect(withRuntimeOverride?.ok).toBe(true);
+		if (!withRuntimeOverride?.ok) throw new Error("expected runtime-override resolution");
+		expect(withRuntimeOverride.accessToken).toBe("access-b");
 	});
 
 	test("getOAuthAccessByCredentialId does not substitute a sibling on failure", async () => {

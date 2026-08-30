@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { compileCodingAgent } from "./compile-binary";
@@ -70,8 +71,64 @@ async function runCommand(
 	}
 }
 
+/**
+ * Stages the Swift `stt-nemotron` worker beside a compiled binary. The
+ * compiled runtime resolves the worker only next to `process.execPath`
+ * (src/stt/nemotron-worker-client.ts) and never falls back to workspace
+ * build output, so a Darwin arm64 build that skips staging ships an `omp`
+ * that cannot run Nemotron STT. `stagedName` defaults to the runtime-facing
+ * `stt-nemotron`; release packaging overrides it with the per-platform asset
+ * name (`omp-stt-nemotron-darwin-arm64`) so the worker rides the existing
+ * bare-binary `omp-*` release globs.
+ */
+export function stageNemotronWorker({
+	binaryPath,
+	workerPath,
+	stagedName = "stt-nemotron",
+}: {
+	binaryPath: string;
+	workerPath: string;
+	stagedName?: string;
+}): void {
+	const stagedPath = path.join(path.dirname(binaryPath), stagedName);
+	const workerMode = fs.statSync(workerPath).mode & 0o7777;
+	fs.copyFileSync(workerPath, stagedPath);
+	fs.chmodSync(stagedPath, workerMode | 0o100);
+}
+
+/**
+ * Whether a build must also build and stage the Nemotron STT worker. The
+ * worker is a SwiftPM macOS executable, so only a Darwin arm64 host can
+ * produce it, and it ships only for Darwin arm64 targets — covering the
+ * native build and the same-host `CROSS_TARGET=darwin-arm64` build. Every
+ * other target (including cross-compiling away from a Mac, and non-arm64
+ * hosts targeting darwin-arm64) stays unchanged.
+ */
+export function shouldStageNemotronWorker(
+	crossBuild: CrossBuild | null,
+	host: { platform: NodeJS.Platform; arch: string } = process,
+): boolean {
+	const targetPlatform = crossBuild?.platform ?? host.platform;
+	const targetArch = crossBuild?.arch ?? host.arch;
+	return host.platform === "darwin" && host.arch === "arm64" && targetPlatform === "darwin" && targetArch === "arm64";
+}
+
+/**
+ * Release asset name for the Nemotron STT worker, or null when the target
+ * ships none. The worker is a Swift macOS executable that only exists for
+ * Darwin arm64; release packaging stages it into `binaries/` under the
+ * `omp-*` prefix so the existing checksum and GitHub-release globs publish
+ * it with the binary, keeping the bare-binary (no-archive) release layout.
+ */
+export function releaseSttWorkerAssetName(target: { platform: string; arch: string }): string | null {
+	return target.platform === "darwin" && target.arch === "arm64"
+		? `omp-stt-nemotron-${target.platform}-${target.arch}`
+		: null;
+}
+
 async function main(): Promise<void> {
 	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
+	const shouldBuildNemotronWorker = shouldStageNemotronWorker(crossBuild);
 	const shouldAdhocSign = process.platform === "darwin" && !crossBuild && Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
 	const outName = crossBuild ? `omp-${crossBuild.id}` : "omp";
 	const outputPath = path.join(packageDir, "dist", outName);
@@ -101,6 +158,13 @@ async function main(): Promise<void> {
 
 			if (shouldAdhocSign) {
 				await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
+			}
+			if (shouldBuildNemotronWorker) {
+				await runCommand(["bun", "run", "build:stt-worker"]);
+				stageNemotronWorker({
+					binaryPath: outputPath,
+					workerPath: path.join(packageDir, "native", "stt-nemotron", ".build", "release", "stt-nemotron"),
+				});
 			}
 		} finally {
 			await runCommand(["bun", "--cwd=../natives", "run", "gen:native:reset"]);

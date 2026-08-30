@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, UsageProvider } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, FetchImpl, LocalAuthRef, UsageProvider } from "@oh-my-pi/pi-ai";
+import { parseLocalAuthRef, resolveLocalAuthRef } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -886,7 +887,8 @@ export class ModelRegistry {
 			const supportsTools = replacementModel.supportsTools ?? existing.supportsTools;
 			return {
 				...replacementModel,
-				contextWindow: replacementModel.contextWindow ?? existing.contextWindow,
+				contextWindow:
+					replacementModel.contextWindow !== undefined ? replacementModel.contextWindow : existing.contextWindow,
 				maxTokens: replacementModel.maxTokens ?? existing.maxTokens,
 				omitMaxOutputTokens: replacementModel.omitMaxOutputTokens ?? existing.omitMaxOutputTokens,
 				...(supportsTools !== undefined ? { supportsTools } : {}),
@@ -2191,6 +2193,33 @@ export class ModelRegistry {
 		};
 	}
 
+	/** Check model-local auth references without resolving credential bytes. */
+	#createAuthRefAvailabilityCheck(): (model: Model<Api>) => boolean {
+		const oauthCredentialIds = new Map<string, Set<number>>();
+		return model => {
+			if (model.authRef === undefined) return true;
+			let authRef: LocalAuthRef;
+			try {
+				authRef = parseLocalAuthRef(model.authRef, model.provider);
+			} catch {
+				return false;
+			}
+			if (authRef.kind === "provider") return true;
+
+			let providerCredentialIds = oauthCredentialIds.get(model.provider);
+			if (!providerCredentialIds) {
+				providerCredentialIds = new Set(
+					this.authStorage
+						.listStoredCredentials(model.provider)
+						.filter(row => row.credential.type === "oauth")
+						.map(row => row.id),
+				);
+				oauthCredentialIds.set(model.provider, providerCredentialIds);
+			}
+			return providerCredentialIds.has(authRef.credentialId);
+		};
+	}
+
 	/**
 	 * Get authenticated models for an explicit provider set without materializing
 	 * unrelated cached catalogs. Startup role resolution uses this before the
@@ -2199,9 +2228,13 @@ export class ModelRegistry {
 	getAvailableForProviders(providers: ReadonlySet<string>): Model<Api>[] {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
+		const isAuthRefAvailable = this.#createAuthRefAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
 			return this.#models.filter(
-				model => requested.has(model.provider.toLowerCase()) && isProviderAvailable(model.provider),
+				model =>
+					requested.has(model.provider.toLowerCase()) &&
+					isProviderAvailable(model.provider) &&
+					isAuthRefAvailable(model),
 			);
 		}
 		const availableProviders = new Set(
@@ -2209,7 +2242,7 @@ export class ModelRegistry {
 				provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
 			),
 		);
-		return this.#composeStaticModels(availableProviders);
+		return this.#composeStaticModels(availableProviders).filter(isAuthRefAvailable);
 	}
 
 	/**
@@ -2242,6 +2275,22 @@ export class ModelRegistry {
 	 * ignores that alias so SuperGrok is not auto-selected from a paid key.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
+		if (model.authRef !== undefined) {
+			let authRef: LocalAuthRef;
+			try {
+				authRef = parseLocalAuthRef(model.authRef, model.provider);
+			} catch {
+				return false;
+			}
+			if (
+				authRef.kind === "oauth-credential" &&
+				!this.authStorage
+					.listStoredCredentials(model.provider)
+					.some(row => row.id === authRef.credentialId && row.credential.type === "oauth")
+			) {
+				return false;
+			}
+		}
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
 			isCommandConfigValue(keyConfig) ||
@@ -2351,6 +2400,12 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { signal?: AbortSignal },
 	): Promise<string | undefined> {
+		if (model.authRef !== undefined) {
+			return resolveLocalAuthRef(this.authStorage, model.authRef, model.provider, {
+				sessionId,
+				signal: options?.signal,
+			});
+		}
 		const commandKey = this.#resolveCommandBackedApiKey(model.provider);
 		if (commandKey.configured) return commandKey.value;
 		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
@@ -2422,6 +2477,7 @@ export class ModelRegistry {
 		}
 		return createApiKeyResolver(this, target.provider, {
 			...options,
+			authRef: target.authRef,
 			baseUrl: target.baseUrl,
 			modelId: target.id,
 		});
@@ -2814,6 +2870,7 @@ export interface ProviderConfigInput {
 	) => Promise<readonly NonNullable<ProviderConfigInput["models"]>[number][]>;
 	models?: Array<{
 		id: string;
+		authRef?: string;
 		name: string;
 		api?: Api;
 		baseUrl?: string;
@@ -2822,7 +2879,7 @@ export interface ProviderConfigInput {
 		input: ("text" | "image")[];
 		supportsTools?: boolean;
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-		contextWindow: number;
+		contextWindow: number | null;
 		maxTokens: number;
 		/** Whether Codex requests should prefer WebSocket transport. */
 		preferWebsockets?: boolean;

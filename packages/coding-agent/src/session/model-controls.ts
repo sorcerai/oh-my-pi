@@ -67,6 +67,8 @@ export class ModelControls {
 	readonly #host: ModelControlsHost;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	#thinkingLevel: ThinkingLevel | undefined;
+	/** The configured selector, retained separately from the model-clamped effort. */
+	#configuredThinkingLevel: ConfiguredThinkingLevel | undefined;
 	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: Effort | undefined;
 	#autoThinking = false;
@@ -86,6 +88,7 @@ export class ModelControls {
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
+		this.#configuredThinkingLevel = options.thinkingLevel;
 		if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
 			this.#autoThinking = true;
@@ -118,9 +121,9 @@ export class ModelControls {
 		return this.#thinkingLevelCeiling;
 	}
 
-	/** Configured selector, preserving `auto` while classification is active. */
+	/** Configured selector, preserving `auto` and explicit levels across model clamping. */
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		return this.#autoThinking ? AUTO_THINKING : this.#thinkingLevel;
+		return this.#configuredThinkingLevel;
 	}
 
 	/** Whether per-turn automatic thinking classification is enabled. */
@@ -155,6 +158,7 @@ export class ModelControls {
 
 	/** Restores thinking state from a transcript without persisting a new entry. */
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		this.#configuredThinkingLevel = level;
 		this.#autoThinking = level === AUTO_THINKING;
 		this.#autoResolvedLevel = undefined;
 		this.#thinkingLevel =
@@ -174,6 +178,7 @@ export class ModelControls {
 	/** Restores an exact thinking snapshot after a failed session switch. */
 	restoreThinkingSnapshot(level: ThinkingLevel | undefined, auto: boolean, resolved: Effort | undefined): void {
 		this.#thinkingLevel = level;
+		this.#configuredThinkingLevel = auto ? AUTO_THINKING : level;
 		this.#autoThinking = auto;
 		this.#autoResolvedLevel = resolved;
 		this.#applyThinkingLevelToAgent(level);
@@ -231,7 +236,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(targetModel), role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -277,7 +282,7 @@ export class ModelControls {
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
 		this.#host.sessionManager.appendModelChange(
-			`${targetModel.provider}/${targetModel.id}`,
+			formatModelStringWithRouting(targetModel),
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
@@ -436,7 +441,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(next.model));
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
@@ -467,7 +472,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(nextModel));
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
@@ -503,6 +508,7 @@ export class ModelControls {
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+		this.#configuredThinkingLevel = level;
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -560,7 +566,11 @@ export class ModelControls {
 	 * preferred default or the current effective level.
 	 */
 	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+		this.setThinkingLevel(
+			this.#autoThinking
+				? AUTO_THINKING
+				: (preferredDefault ?? this.#configuredThinkingLevel ?? this.#thinkingLevel),
+		);
 	}
 
 	/**

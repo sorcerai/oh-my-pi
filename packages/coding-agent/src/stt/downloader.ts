@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import { sttClient } from "./asr-client";
@@ -16,7 +17,7 @@ export interface EnsureOptions {
 	onProgress?: (progress: DownloadProgress) => void;
 }
 
-// ── ONNX Whisper model ─────────────────────────────────────────────
+// ── Speech model downloads ──────────────────────────────────────────
 
 /**
  * Real-progress event for a speech-model download, surfaced to UI callers.
@@ -47,6 +48,32 @@ export interface SttDownloadProgress {
  */
 export async function isSttModelCached(key: string): Promise<boolean> {
 	const spec = resolveSttModelSpec(key);
+	if (spec.engine === "nemotron") {
+		// FluidAudio cache layout (shared with VoxKey): <Application
+		// Support>/FluidAudio/Models/nemotron-multilingual/<variant>/<chunkMs>ms/.
+		// `Repo.folderName` — *not* the HuggingFace repo id — is the on-disk name.
+		// Requires all five exact root entries: metadata.json, tokenizer.json,
+		// encoder.mlmodelc, decoder.mlmodelc, and joint.mlmodelc.
+		try {
+			const variantDir = path.join(
+				os.homedir(),
+				"Library/Application Support/FluidAudio/Models",
+				"nemotron-multilingual",
+				spec.variantDir,
+				`${spec.chunkMs}ms`,
+			);
+			const root = new Set(await fs.readdir(variantDir));
+			return (
+				root.has("metadata.json") &&
+				root.has("tokenizer.json") &&
+				root.has("encoder.mlmodelc") &&
+				root.has("decoder.mlmodelc") &&
+				root.has("joint.mlmodelc")
+			);
+		} catch {
+			return false;
+		}
+	}
 	const repoDir = path.join(getTinyModelsCacheDir(), spec.repo);
 	if (spec.engine === "sherpa") {
 		try {
@@ -77,7 +104,7 @@ export async function isSttModelCached(key: string): Promise<boolean> {
 }
 
 /**
- * Download (or warm from cache) the selected ONNX Whisper model via the speech
+ * Download (or warm from cache) the selected model tier via the speech
  * worker, resolving once the model is fully present and loaded. Streams real
  * Hub progress with an aggregated integer percent. Rejects if the worker cannot
  * obtain the model. Safe to call non-interactively.

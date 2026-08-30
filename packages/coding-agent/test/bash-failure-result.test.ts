@@ -7,12 +7,13 @@ afterEach(() => {
 	mock.restore();
 });
 
-function makeSession(): ToolSession {
+function makeSession(agentId?: string): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
+		getAgentId: () => agentId,
 		settings: {
 			get(key: string) {
 				if (key === "async.enabled") return false;
@@ -95,6 +96,17 @@ describe("BashTool execution results", () => {
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("hi");
 		expect(text).not.toContain("Command exited with code");
+	});
+
+	it("stamps the harness task run id over a caller-supplied value", async () => {
+		const tool = new BashTool(makeSession("agent-run-123"));
+		const result = await tool.execute("call-task-run-id", {
+			command: 'printf "%s" "$TASK_RUN_ID"',
+			env: { TASK_RUN_ID: "spoofed" },
+		});
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		expect(text).toContain("agent-run-123");
+		expect(text).not.toContain("spoofed");
 	});
 
 	it("preserves final-stage output when a pipeline ends in head or tail", async () => {

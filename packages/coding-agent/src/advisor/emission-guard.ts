@@ -113,15 +113,41 @@ const DEFAULT_HISTORY_CAPACITY = 4096;
  * {@link reset}. Per-update gate is cleared at the start of every advisor
  * `agent.prompt()` cycle via {@link beginUpdate}.
  */
-export class AdvisorEmissionGuard {
+export class AdvisorEmissionHistory {
 	#seen = new Set<string>();
 	/** Insertion-order log to drive FIFO eviction without an extra Map. */
 	#seenOrder: string[] = [];
-	#consumedThisUpdate = false;
-	readonly #capacity: number;
 
-	constructor(opts: { capacity?: number } = {}) {
-		this.#capacity = opts.capacity ?? DEFAULT_HISTORY_CAPACITY;
+	constructor(readonly capacity = DEFAULT_HISTORY_CAPACITY) {}
+
+	has(key: string): boolean {
+		return this.#seen.has(key);
+	}
+
+	add(key: string): void {
+		this.#seen.add(key);
+		this.#seenOrder.push(key);
+		if (this.#seenOrder.length > this.capacity) {
+			const stale = this.#seenOrder.shift();
+			if (stale !== undefined) this.#seen.delete(stale);
+		}
+	}
+
+	reset(): void {
+		this.#seen.clear();
+		this.#seenOrder.length = 0;
+	}
+}
+
+export class AdvisorEmissionGuard {
+	#consumedThisUpdate = false;
+	readonly #history: AdvisorEmissionHistory;
+
+	constructor(historyOrOptions: AdvisorEmissionHistory | { capacity?: number } = {}) {
+		this.#history =
+			historyOrOptions instanceof AdvisorEmissionHistory
+				? historyOrOptions
+				: new AdvisorEmissionHistory(historyOrOptions.capacity);
 	}
 
 	/**
@@ -131,8 +157,7 @@ export class AdvisorEmissionGuard {
 	 * advisor can re-raise old issues (the primary transcript was rewritten).
 	 */
 	reset(): void {
-		this.#seen.clear();
-		this.#seenOrder.length = 0;
+		this.#history.reset();
 		this.#consumedThisUpdate = false;
 	}
 
@@ -158,15 +183,10 @@ export class AdvisorEmissionGuard {
 		const key = normalizeAdvisorNote(note);
 		if (!key) return false;
 		if (SUPPRESSED_NORMALIZED_PHRASES[key]) return false;
-		if (this.#seen.has(key)) return false;
+		if (this.#history.has(key)) return false;
 		if (this.#consumedThisUpdate) return false;
 		this.#consumedThisUpdate = true;
-		this.#seen.add(key);
-		this.#seenOrder.push(key);
-		if (this.#seenOrder.length > this.#capacity) {
-			const stale = this.#seenOrder.shift();
-			if (stale !== undefined) this.#seen.delete(stale);
-		}
+		this.#history.add(key);
 		return true;
 	}
 }

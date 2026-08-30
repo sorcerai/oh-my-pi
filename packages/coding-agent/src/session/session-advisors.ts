@@ -42,6 +42,7 @@ import {
 	type AdvisorAgent,
 	type AdvisorConfig,
 	AdvisorEmissionGuard,
+	AdvisorEmissionHistory,
 	AdvisorLoopGuard,
 	type AdvisorMessageDetails,
 	type AdvisorNote,
@@ -58,7 +59,7 @@ import {
 	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
-	slugifyAdvisorName,
+	resolveAdvisorRosterIdentities,
 } from "../advisor";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -74,6 +75,7 @@ import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
 import { estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
+import adversarialAdvisorSystemPrompt from "../prompts/advisor/adversarial-system.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
@@ -83,6 +85,7 @@ import {
 	toReasoningEffort,
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { AdvisorToolPools } from "./agent-session-types";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder } from "./compaction-methods";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
@@ -182,6 +185,8 @@ interface AdvisorRuntimeDescriptor {
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
 	tools?: AgentTool[];
+	/** Independently constructed tools and Cursor factories for each advisor seat. */
+	toolPools?: AdvisorToolPools;
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
 	 * match cap. The advisor's tools are fixed instances carrying session
@@ -290,6 +295,7 @@ export interface SessionAdvisorsHost {
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
 	#advisorEnabled: boolean;
+	#advisorToolPools: AdvisorToolPools | undefined;
 	#advisorTools: AgentTool[] | undefined;
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
 	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
@@ -301,6 +307,7 @@ export class SessionAdvisors {
 	#advisorStreamFn: StreamFn | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
+	readonly #advisorEmissionHistory = new AdvisorEmissionHistory();
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
@@ -327,6 +334,7 @@ export class SessionAdvisors {
 		this.#host = host;
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
+		this.#advisorToolPools = options.toolPools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
 		this.#advisorCreateEditTool = options.createEditTool;
 		this.#advisorGetToolContext = options.getToolContext;
@@ -363,6 +371,11 @@ export class SessionAdvisors {
 
 	/** Rebuilds live advisors when role assignments alter their resolved runtime inputs. */
 	onModelRolesChanged(): void {
+		this.onPrimaryModelChanged();
+	}
+
+	/** Rebuilds live advisors when the primary model selector changes. */
+	onPrimaryModelChanged(): void {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
@@ -684,19 +697,8 @@ export class SessionAdvisors {
 	}
 
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
-		const legacy = !this.#advisorConfigs?.length;
-		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
-		const usedSlugs = new Set<string>();
-		for (const config of roster) {
-			let slug = legacy ? "" : slugifyAdvisorName(config.name);
-			if (slug) {
-				let candidate = slug;
-				let n = 2;
-				while (usedSlugs.has(candidate)) candidate = `${slug}-${n++}`;
-				slug = candidate;
-				usedSlugs.add(slug);
-			}
+		for (const { config, slug } of resolveAdvisorRosterIdentities(this.#advisorConfigs)) {
 			// Per-advisor toggle: skip disabled advisors but keep them in the
 			// status map so they show `○` rather than disappearing.
 			if (config.enabled === false) {
@@ -770,9 +772,15 @@ export class SessionAdvisors {
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
-			"\u001f",
-		);
+		return [
+			config.name,
+			slug,
+			config.role ?? "",
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -821,19 +829,22 @@ export class SessionAdvisors {
 				signature,
 			} = descriptor;
 
-			const emissionGuard = new AdvisorEmissionGuard();
+			const emissionGuard = new AdvisorEmissionGuard(this.#advisorEmissionHistory);
 			const adviseTool = new AdviseTool((note, severity) => this.#routeAdvice(advisorRef, note, severity));
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [advisorSystemPrompt];
+			const systemPrompt = [config.role === "adversarial" ? adversarialAdvisorSystemPrompt : advisorSystemPrompt];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
 			if (this.#advisorSharedInstructions) systemPrompt.push(this.#advisorSharedInstructions);
 			if (config.instructions?.trim()) systemPrompt.push(config.instructions.trim());
 
 			const names = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
-			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
+			const toolPool = this.#advisorToolPools
+				? (this.#advisorToolPools.toolsBySlug.get(slug) ?? [])
+				: (this.#advisorTools ?? []);
+			const tools = toolPool.filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			const availableAdvisorToolNames = new Set<string>();
@@ -900,10 +911,12 @@ export class SessionAdvisors {
 			// swaps in a `replace` instance for the exec channel only — the
 			// advisor's own loop keeps the tool it was given — and only when
 			// `edit` was actually granted.
+			const createEditTool = this.#advisorToolPools?.createEditToolBySlug.get(slug) ?? this.#advisorCreateEditTool;
+			const createGrepTool = this.#advisorToolPools?.createGrepToolBySlug.get(slug) ?? this.#advisorCreateGrepTool;
 			const advisorCursorExecHandlers = new CursorExecHandlers({
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
-				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				tools: bridgeToolMap(advisorToolMap, createEditTool),
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool resolves as `yolo`.
 				getToolContext: this.#advisorGetToolContext,
@@ -911,7 +924,7 @@ export class SessionAdvisors {
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
 				// without `grep` a search tool it was denied.
-				createGrepTool: advisorToolMap.has("grep") ? this.#advisorCreateGrepTool : undefined,
+				createGrepTool: advisorToolMap.has("grep") ? createGrepTool : undefined,
 				// Advisors share the session's live MCP connections, so their
 				// resource frames answer from the same catalog the primary sees.
 				// Not gated on a tool grant: reading what a server advertises is
@@ -1247,6 +1260,7 @@ export class SessionAdvisors {
 	}
 
 	#stopAdvisorRuntime(): void {
+		this.#advisorEmissionHistory.reset();
 		// Detach each recorder feed BEFORE aborting its advisor agent: dispose() aborts
 		// the loop, and an abort emits a final `message_end` we must not enqueue against
 		// a closing recorder (it would reopen and resurrect an already-released file).
@@ -1789,7 +1803,12 @@ export class SessionAdvisors {
 	 *
 	 * @returns the number of advisors active after the rebuild.
 	 */
-	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
+	applyAdvisorConfigs(
+		advisors: AdvisorConfig[],
+		sharedInstructions: string | undefined,
+		toolPools?: AdvisorToolPools,
+	): number {
+		if (toolPools) this.#advisorToolPools = toolPools;
 		this.#advisorConfigs = advisors;
 		this.#advisorSharedInstructions = sharedInstructions;
 		if (!this.#advisorEnabled) return 0;
@@ -1847,8 +1866,9 @@ export class SessionAdvisors {
 	 * verify the advisor inherits the session's provider-shaping options
 	 * (`streamFn`, `promptCacheKey`, `providerSessionState`, ...).
 	 */
-	getAdvisorAgent(): Agent | undefined {
-		return this.#advisors[0]?.agent;
+	getAdvisorAgent(nameOrSlug?: string): Agent | undefined {
+		if (nameOrSlug === undefined) return this.#advisors[0]?.agent;
+		return this.#advisors.find(advisor => advisor.name === nameOrSlug || advisor.slug === nameOrSlug)?.agent;
 	}
 
 	/**

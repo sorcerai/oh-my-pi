@@ -13,6 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AdvisorToolPools } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -162,6 +163,90 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.isAdvisorActive()).toBe(true);
 		expect(session.isAdvisorEnabled()).toBe(true);
 		expect(session.formatAdvisorStatus()).toContain("Advisor is enabled (anthropic/claude-sonnet-4-5)");
+	});
+
+	it("builds two roster advisors with distinct role-specific system prompt baselines", async () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(
+			await session.applyAdvisorConfigs(
+				[
+					{ name: "Task", role: "task" },
+					{ name: "Adversarial", role: "adversarial" },
+				],
+				undefined,
+			),
+		).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const task = session.getAdvisorAgent("Task");
+		const adversarial = session.getAdvisorAgent("Adversarial");
+		if (!task || !adversarial) throw new Error("Expected both named advisor agents to exist");
+		const taskPrompt = task.state.systemPrompt.join("\n");
+		const adversarialPrompt = adversarial.state.systemPrompt.join("\n");
+
+		expect(taskPrompt).toContain("User, code-quality, robustness advocate; peer-shadow main agent.");
+		expect(adversarialPrompt).toContain("Name the assumption you are attacking.");
+		expect(adversarialPrompt).toContain("Cite the evidence that makes it vulnerable.");
+		expect(adversarialPrompt).toContain("State the falsifier that would clear or reverse the concern.");
+		expect(taskPrompt).not.toBe(adversarialPrompt);
+	});
+
+	it("rebuilds the live advisor runtime and prompt when only its role changes", async () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(await session.applyAdvisorConfigs([{ name: "Review Seat", role: "task" }], undefined)).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const before = session.getAdvisorAgent("Review Seat");
+		if (!before) throw new Error("Expected the task advisor agent to exist");
+		const beforePrompt = before.state.systemPrompt.join("\n");
+		expect(beforePrompt).toContain("User, code-quality, robustness advocate; peer-shadow main agent.");
+
+		expect(await session.applyAdvisorConfigs([{ name: "Review Seat", role: "adversarial" }], undefined)).toBe(1);
+
+		const after = session.getAdvisorAgent("Review Seat");
+		if (!after) throw new Error("Expected the adversarial advisor agent to exist");
+		const afterPrompt = after.state.systemPrompt.join("\n");
+		expect(after).not.toBe(before);
+		expect(afterPrompt).not.toBe(beforePrompt);
+		expect(afterPrompt).toContain("Name the assumption you are attacking.");
+		expect(afterPrompt).toContain("Cite the evidence that makes it vulnerable.");
+		expect(afterPrompt).toContain("State the falsifier that would clear or reverse the concern.");
+	});
+
+	it("keeps the newest roster when tool-pool builds resolve out of order", async () => {
+		const first = Promise.withResolvers<AdvisorToolPools>();
+		const second = Promise.withResolvers<AdvisorToolPools>();
+		let buildCount = 0;
+		const customSettings = Settings.isolated({ "advisor.enabled": true });
+		customSettings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const customSession = new AgentSession({
+			agent: new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: customSettings,
+			modelRegistry,
+			advisorTools: [],
+			advisorToolPoolBuilder: () => (buildCount++ === 0 ? first.promise : second.promise),
+		});
+		const emptyPools: AdvisorToolPools = {
+			toolsBySlug: new Map(),
+			createGrepToolBySlug: new Map(),
+			createEditToolBySlug: new Map(),
+		};
+		try {
+			const older = customSession.applyAdvisorConfigs([{ name: "Older" }], undefined);
+			const newer = customSession.applyAdvisorConfigs([{ name: "Newest" }], undefined);
+			second.resolve(emptyPools);
+			await newer;
+			first.resolve(emptyPools);
+			await older;
+
+			expect(customSession.getAdvisorAgent("Newest")).toBeDefined();
+			expect(customSession.getAdvisorAgent("Older")).toBeUndefined();
+		} finally {
+			await customSession.dispose();
+		}
 	});
 
 	it("explicit enable rebuilds the runtime when the advisor role changes", () => {
@@ -466,11 +551,11 @@ describe("AgentSession advisor toggle", () => {
 			oauthSpy.mockRestore();
 		}
 	});
-	it("retains total advisor cost after the live roster changes", () => {
+	it("retains total advisor cost after the live roster changes", async () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);
 
-		expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
+		expect(await session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 		expect(session.formatAdvisorStatus()).toContain("$0.5000");
 	});

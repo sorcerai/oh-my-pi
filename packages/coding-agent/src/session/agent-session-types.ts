@@ -119,6 +119,16 @@ export interface InitialRetryFallbackState {
 	pinned?: boolean;
 }
 
+export interface AdvisorToolPools {
+	toolsBySlug: ReadonlyMap<string, AgentTool[]>;
+	createGrepToolBySlug: ReadonlyMap<
+		string,
+		(options: { context?: number; totalMatchLimit?: number }) => AgentTool | undefined
+	>;
+	createEditToolBySlug: ReadonlyMap<string, () => AgentTool | undefined>;
+}
+
+export type AdvisorToolPoolBuilder = (advisors: readonly AdvisorConfig[]) => Promise<AdvisorToolPools>;
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
@@ -260,6 +270,11 @@ export interface AgentSessionConfig {
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */
 	advisorTools?: AgentTool[];
+
+	/** Independently constructed tools and Cursor factories for each advisor seat. */
+	advisorToolPools?: AdvisorToolPools;
+	/** Rebuild seat-scoped pools when a live WATCHDOG roster changes. */
+	advisorToolPoolBuilder?: AdvisorToolPoolBuilder;
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
 	 * match cap, against the advisor-scoped tool session. Without it an advisor

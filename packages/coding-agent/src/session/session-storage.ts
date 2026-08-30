@@ -74,6 +74,17 @@ export interface SessionStorage {
 	readText(path: string): Promise<string>;
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/** Persist a staged file before it can be published. */
+	fsyncFile?(path: string): Promise<void>;
+	/** Persist directory metadata after a create-only publication. */
+	fsyncDirectory?(path: string): Promise<void>;
+	/**
+	 * Atomically publish a sibling staged file without replacing an existing
+	 * destination. Once linked, the destination is committed and source cleanup
+	 * is best effort.
+	 */
+	publishCreateOnly?(source: string, destination: string): Promise<void>;
+	writeTextCreateOnly?(path: string, content: string): Promise<void>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
@@ -293,6 +304,103 @@ export class FileSessionStorage implements SessionStorage {
 
 	async writeText(path: string, content: string): Promise<void> {
 		await Bun.write(path, content, { createPath: true });
+	}
+	async writeTextCreateOnly(fpath: string, content: string): Promise<void> {
+		const dir = path.dirname(fpath);
+		await fs.promises.mkdir(dir, { recursive: true });
+		const handle = await fs.promises.open(fpath, "wx", 0o600);
+		let failure: unknown;
+		let ownedFile: fs.Stats | undefined;
+		try {
+			await handle.writeFile(content);
+		} catch (error) {
+			failure = error;
+			try {
+				ownedFile = await handle.stat();
+			} catch {
+				// Preserve the write error if the descriptor cannot be inspected.
+			}
+		}
+		try {
+			await handle.close();
+		} catch (closeError) {
+			if (failure === undefined) throw closeError;
+		}
+		if (failure === undefined) return;
+
+		if (ownedFile !== undefined) {
+			try {
+				const currentFile = await fs.promises.lstat(fpath);
+				if (ownedFile.dev === currentFile.dev && ownedFile.ino === currentFile.ino) {
+					await fs.promises.unlink(fpath);
+				}
+			} catch (cleanupError) {
+				if (!isEnoent(cleanupError)) {
+					logger.warn("Failed to remove partially-created session file", {
+						sessionFile: fpath,
+						error: toError(cleanupError).message,
+					});
+				}
+			}
+		}
+		throw failure;
+	}
+
+	async fsyncFile(fpath: string): Promise<void> {
+		const handle = await fs.promises.open(fpath, "r");
+		try {
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	}
+
+	async fsyncDirectory(dir: string): Promise<void> {
+		const handle = await fs.promises.open(dir, "r");
+		try {
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	}
+
+	async publishCreateOnly(source: string, destination: string): Promise<void> {
+		await fs.promises.link(source, destination);
+
+		// The hard link is the commit point. Source cleanup is best-effort and
+		// must never turn an owned publication into a reported failure.
+		let sourceStat: fs.Stats;
+		let destinationStat: fs.Stats;
+		try {
+			[sourceStat, destinationStat] = await Promise.all([fs.promises.lstat(source), fs.promises.lstat(destination)]);
+		} catch (cleanupError) {
+			if (!isEnoent(cleanupError)) {
+				logger.warn("Session publication committed but source cleanup could not be checked", {
+					source,
+					destination,
+					error: toError(cleanupError).message,
+				});
+			}
+			return;
+		}
+		if (sourceStat.dev !== destinationStat.dev || sourceStat.ino !== destinationStat.ino) {
+			logger.warn("Session publication committed but staged source inode changed", {
+				source,
+				destination,
+			});
+			return;
+		}
+		try {
+			await fs.promises.unlink(source);
+		} catch (cleanupError) {
+			if (!isEnoent(cleanupError)) {
+				logger.warn("Session publication committed but source cleanup failed", {
+					source,
+					destination,
+					error: toError(cleanupError).message,
+				});
+			}
+		}
 	}
 
 	async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
@@ -751,6 +859,27 @@ export class MemorySessionStorage implements SessionStorage {
 	}
 
 	writeText(path: string, content: string): Promise<void> {
+		this.writeTextSync(path, content);
+		return Promise.resolve();
+	}
+
+	async fsyncFile(_path: string): Promise<void> {}
+
+	async fsyncDirectory(_path: string): Promise<void> {}
+
+	async publishCreateOnly(source: string, destination: string): Promise<void> {
+		if (this.#files.has(destination))
+			throw Object.assign(new Error(`File exists: ${destination}`), { code: "EEXIST" });
+		const entry = this.#files.get(source);
+		if (!entry) throw Object.assign(new Error(`File not found: ${source}`), { code: "ENOENT" });
+		this.#files.set(destination, entry);
+		this.#files.delete(source);
+	}
+
+	writeTextCreateOnly(path: string, content: string): Promise<void> {
+		if (this.#files.has(path)) {
+			return Promise.reject(Object.assign(new Error(`File exists: ${path}`), { code: "EEXIST" }));
+		}
 		this.writeTextSync(path, content);
 		return Promise.resolve();
 	}

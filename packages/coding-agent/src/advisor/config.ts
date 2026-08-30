@@ -10,16 +10,20 @@ import { collectConfigCandidates } from "./watchdog";
 /**
  * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
  * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
- * resolved exactly like any other model override; `tools` is a subset of
- * `BUILTIN_TOOL_NAMES` — any built-in name, including mutating tools such as
- * `edit`/`write`/`bash` (the advisor is a full agent). Omitted falls back to
- * the default `read`/`grep`/`glob` subset; an explicit empty list grants no
- * tools. `instructions` is the advisor's specialization, appended to the shared
- * baseline.
+ * resolved exactly like any other model override; `role` selects the task or
+ * adversarial system prompt and omitted `role` uses the task baseline; `tools`
+ * is a subset of `BUILTIN_TOOL_NAMES` — any built-in name, including mutating
+ * tools such as `edit`/`write`/`bash` (the advisor is a full agent). Omitted
+ * falls back to the default `read`/`grep`/`glob` subset; an explicit empty
+ * list grants no tools. `instructions` is the advisor's specialization,
+ * appended to the shared baseline.
  */
+export type AdvisorRole = "task" | "adversarial";
+
 export interface AdvisorConfig {
 	name: string;
 	model?: string;
+	role?: AdvisorRole;
 	tools?: string[];
 	instructions?: string;
 	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
@@ -52,6 +56,7 @@ export interface DiscoveredAdvisors {
 const advisorEntrySchema = type({
 	name: "string",
 	"model?": "string",
+	"role?": "'task' | 'adversarial'",
 	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
@@ -74,6 +79,32 @@ export function slugifyAdvisorName(name: string): string {
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-+|-+$/g, "");
 	return slug || "advisor";
+}
+
+export interface AdvisorRosterIdentity {
+	config: AdvisorConfig;
+	name: string;
+	slug: string;
+}
+
+/** Resolve the ordered advisor roster and its collision-safe runtime slugs. */
+export function resolveAdvisorRosterIdentities(configs: readonly AdvisorConfig[] | undefined): AdvisorRosterIdentity[] {
+	const legacy = !configs?.length;
+	const roster: readonly AdvisorConfig[] = legacy ? [{ name: "default" }] : configs;
+	const identities: AdvisorRosterIdentity[] = [];
+	const usedSlugs = new Set<string>();
+	for (const config of roster) {
+		let slug = legacy ? "" : slugifyAdvisorName(config.name);
+		if (slug) {
+			let candidate = slug;
+			let suffix = 2;
+			while (usedSlugs.has(candidate)) candidate = `${slug}-${suffix++}`;
+			slug = candidate;
+			usedSlugs.add(slug);
+		}
+		identities.push({ config, name: config.name, slug });
+	}
+	return identities;
 }
 
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -170,6 +201,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 			advisors.set(slug, {
 				name: entry.name,
 				model: entry.model?.trim() || undefined,
+				role: entry.role,
 				tools: filterAdvisorTools(entry.tools, item.path),
 				instructions,
 				enabled: entry.enabled,
@@ -256,6 +288,7 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 	const advisors = (result.advisors ?? []).map(a => {
 		const advisor: AdvisorConfig = { name: a.name };
 		if (a.model?.trim()) advisor.model = a.model;
+		if (a.role !== undefined) advisor.role = a.role;
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
@@ -303,6 +336,7 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 		for (const advisor of doc.advisors) {
 			lines.push(`  - name: ${YAML.stringify(advisor.name)}`);
 			if (advisor.model?.trim()) lines.push(`    model: ${YAML.stringify(advisor.model)}`);
+			if (advisor.role !== undefined) lines.push(`    role: ${advisor.role}`);
 			if (advisor.tools !== undefined) {
 				if (advisor.tools.length === 0) {
 					lines.push("    tools: []");

@@ -317,7 +317,10 @@ export class SelectorController {
 					// Re-discover the merged roster (project + user) so the live advisors
 					// reflect cross-level precedence, not just the edited file.
 					const discovered = await discoverAdvisorConfigs(cwd, agentDir);
-					const count = this.ctx.session.applyAdvisorConfigs(discovered.advisors, discovered.sharedInstructions);
+					const count = await this.ctx.session.applyAdvisorConfigs(
+						discovered.advisors,
+						discovered.sharedInstructions,
+					);
 					this.ctx.statusLine.invalidate();
 					this.ctx.showStatus(
 						count > 0

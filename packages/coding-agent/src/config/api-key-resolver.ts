@@ -1,8 +1,17 @@
-import { type Api, type ApiKeyResolver, type AuthStorage, isUsageLimitOutcome, type Model } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type ApiKeyResolver,
+	type AuthStorage,
+	isUsageLimitOutcome,
+	type LocalAuthRefStorage,
+	type Model,
+	parseLocalAuthRef,
+	resolveLocalAuthRef,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
-export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
+export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "authRef">;
 
 export interface ApiKeyResolverOptions {
 	/** Session id for credential stickiness; read at resolve time by the caller. */
@@ -11,6 +20,8 @@ export interface ApiKeyResolverOptions {
 	baseUrl?: string;
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
+	/** Model-scoped local auth reference, when the resolver is built from a model. */
+	authRef?: string;
 }
 
 /**
@@ -24,7 +35,7 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
-	authStorage: Pick<AuthStorage, "rotateSessionCredential">;
+	authStorage: Pick<AuthStorage, "rotateSessionCredential"> & LocalAuthRefStorage;
 	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
 	 * policy: initial → resolve; step (b) → force-refresh same account; step (c)
@@ -49,8 +60,43 @@ export function createApiKeyResolver(
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
-	const { sessionId, baseUrl, modelId } = options;
+	const { sessionId, baseUrl, modelId, authRef } = options;
+	const parsedAuthRef = authRef === undefined ? undefined : parseLocalAuthRef(authRef, provider);
 	return async ({ lastChance, error, signal, previousKey }) => {
+		if (parsedAuthRef?.kind === "oauth-credential") {
+			const exactAuthRef = `oauth-credential:${parsedAuthRef.providerId}:${parsedAuthRef.credentialId}`;
+			if (lastChance) return undefined;
+			return resolveLocalAuthRef(registry.authStorage, exactAuthRef, provider, {
+				sessionId,
+				signal,
+				forceRefresh: error !== undefined,
+			});
+		}
+		if (parsedAuthRef?.kind === "provider") {
+			const providerAuthRef = `provider:${parsedAuthRef.providerId}`;
+			if (error === undefined) {
+				return resolveLocalAuthRef(registry.authStorage, providerAuthRef, provider, { sessionId, signal });
+			}
+			if (lastChance) {
+				const switched = await registry.authStorage.rotateSessionCredential(provider, sessionId, {
+					error,
+					modelId,
+					signal,
+					apiKey: previousKey,
+				});
+				if (!switched) {
+					const status = AIError.status(error);
+					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
+				}
+				return resolveLocalAuthRef(registry.authStorage, providerAuthRef, provider, { sessionId, signal });
+			}
+			return resolveLocalAuthRef(registry.authStorage, providerAuthRef, provider, {
+				sessionId,
+				signal,
+				forceRefresh: true,
+			});
+		}
 		if (error === undefined) {
 			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
 		}

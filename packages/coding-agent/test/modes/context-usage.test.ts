@@ -9,10 +9,12 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { selectSkillsForPrompt } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	type ContextBreakdown,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
+	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	renderContextUsage,
 } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
@@ -221,8 +223,8 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 	// First prompt block as rendered: only the visible skill appears.
 	const renderedPrompt = "You are an agent.\nSkills:\n- vis: small visible skill\n";
 
-	function session(tools: unknown[], skills: unknown[]) {
-		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills } as never;
+	function session(tools: unknown[], skills: unknown[], skillsSettings?: unknown) {
+		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills, skillsSettings } as never;
 	}
 
 	it("excludes hidden skills and does not clamp System prompt to 0", () => {
@@ -237,6 +239,60 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 		const b = computeNonMessageBreakdown(session([], [hidden, visible]), tokenizer);
 		expect(b.skillsTokens).toBe(0);
 		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
+	});
+	it("uses the same selected skill set as prompt rendering for core and allowlist modes", () => {
+		const native = {
+			name: "native-workflow",
+			description: "native skill",
+			filePath: "/s/native.md",
+			baseDir: "/s",
+			source: "native",
+		};
+		const local = {
+			name: "local-workflow",
+			description: "local skill",
+			filePath: "/s/local.md",
+			baseDir: "/s",
+			source: "test",
+		};
+		const coreSettings = { promptMode: "core" as const };
+		const coreSession = session([readTool], [native, local], coreSettings);
+		const coreSelected = selectSkillsForPrompt([native, local], true, coreSettings);
+		expect(computeNonMessageBreakdown(coreSession, tokenizer).skillsTokens).toBe(
+			estimateSkillsTokens(coreSelected, tokenizer),
+		);
+
+		const allowlistSettings = { promptMode: "allowlist" as const, promptSkills: ["local-*"] };
+		const allowlistSession = session([readTool], [native, local], allowlistSettings);
+		const allowlistSelected = selectSkillsForPrompt([native, local], true, allowlistSettings);
+		expect(computeNonMessageBreakdown(allowlistSession, tokenizer).skillsTokens).toBe(
+			estimateSkillsTokens(allowlistSelected, tokenizer),
+		);
+	});
+
+	it("invalidates accounting when skills prompt settings change", () => {
+		const native = {
+			name: "native-workflow",
+			description: "native skill",
+			filePath: "/s/native.md",
+			baseDir: "/s",
+			source: "native",
+		};
+		const local = {
+			name: "local-workflow",
+			description: "local skill with a deliberately longer description ".repeat(10),
+			filePath: "/s/local.md",
+			baseDir: "/s",
+			source: "test",
+		};
+		const source = session([readTool], [native, local], { promptMode: "core" as const }) as {
+			skillsSettings?: unknown;
+		};
+		const coreTokens = computeNonMessageBreakdown(source as never, tokenizer).skillsTokens;
+		source.skillsSettings = { promptMode: "allowlist" as const, promptSkills: ["local-*"] };
+		const allowlistTokens = computeNonMessageBreakdown(source as never, tokenizer).skillsTokens;
+		expect(allowlistTokens).toBe(estimateSkillsTokens([local], tokenizer));
+		expect(allowlistTokens).not.toBe(coreTokens);
 	});
 });
 

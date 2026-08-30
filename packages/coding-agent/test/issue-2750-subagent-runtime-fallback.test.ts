@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -573,5 +574,187 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
 		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
+	});
+
+	it("resolves forwarded extension providers from the reused parent registry", async () => {
+		const flash = model("pi-antigravity", "gemini-3.6-flash");
+		let childModel: Model | undefined;
+		const loadProviders = vi.spyOn(sdkModule, "loadCliExtensionProviders");
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childModel = options.model;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "flash-worker", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 0,
+			id: "extension-provider",
+			modelOverride: "pi-antigravity/gemini-3.6-flash",
+			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [flash],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(loadProviders).not.toHaveBeenCalled();
+		expect(childModel?.provider).toBe("pi-antigravity");
+		expect(childModel?.id).toBe("gemini-3.6-flash");
+	});
+
+	it("passes the retained extension runtime to the fresh-registry child once", async () => {
+		const flash = model("pi-antigravity", "gemini-3.6-flash");
+		const retainedEventBus = { retained: true };
+		const retainedExtensions = {
+			extensions: [],
+			errors: [],
+			runtime: { flagValues: new Map(), pendingProviderRegistrations: [] },
+		};
+		let factoryRuns = 0;
+		let childOptions: { eventBus?: unknown; preloadedExtensions?: unknown } | undefined;
+		vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
+		vi.spyOn(sdkModule, "loadCliExtensionProviders").mockImplementation(async registry => {
+			factoryRuns += 1;
+			registry.getAvailable = () => [flash];
+			registry.getApiKey = async () => "test-key";
+			return { eventBus: retainedEventBus, extensionsResult: retainedExtensions } as never;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childOptions = options;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "fresh-registry-worker", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 0,
+			id: "retained-extension-runtime",
+			modelOverride: "pi-antigravity/gemini-3.6-flash",
+			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			authStorage: {
+				setFallbackResolver: () => {},
+				setConfigApiKey: () => {},
+				removeConfigApiKey: () => {},
+				hasAuth: () => false,
+			} as never,
+			settings: Settings.isolated(),
+			enableLsp: false,
+		});
+		expect(result.error).toBeUndefined();
+		expect(factoryRuns).toBe(1);
+		expect(childOptions?.eventBus).toBe(retainedEventBus);
+		expect(childOptions?.preloadedExtensions).toBe(retainedExtensions);
+	});
+
+	it("skips extension preload for a restricted child with a reused registry", async () => {
+		const flash = model("pi-antigravity", "gemini-3.6-flash");
+		const childPreloads: Array<{
+			extensions: string[] | undefined;
+			customTools: Array<{ path: string }> | undefined;
+		}> = [];
+		let childModel: Model | undefined;
+		const loadProviders = vi.spyOn(sdkModule, "loadCliExtensionProviders");
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childPreloads.push({
+				extensions: options.preloadedExtensionPaths,
+				customTools: options.preloadedCustomToolPaths,
+			});
+			childModel = options.model;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "restricted", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 0,
+			id: "restricted-extension-provider",
+			restrictToolNames: true,
+			modelOverride: "pi-antigravity/gemini-3.6-flash",
+			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			preloadedCustomToolPaths: [{ path: "/tmp/custom-tool.ts" }],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [flash],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(loadProviders).not.toHaveBeenCalled();
+		expect(childModel).toBe(flash);
+		expect(childPreloads).toContainEqual({ extensions: [], customTools: [] });
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "restricted-empty", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 1,
+			id: "restricted-empty-extension-provider",
+			restrictToolNames: true,
+			modelOverride: "pi-antigravity/gemini-3.6-flash",
+			preloadedExtensionPaths: [],
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [flash],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+		expect(loadProviders).not.toHaveBeenCalled();
+	});
+
+	it("passes cancellation into provider preload", async () => {
+		const preloadStarted = Promise.withResolvers<void>();
+		let loaderSignal: AbortSignal | undefined;
+		vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
+		vi.spyOn(sdkModule, "loadCliExtensionProviders").mockImplementation(
+			async (_registry, _settings, _cwd, options) => {
+				preloadStarted.resolve();
+				loaderSignal = options?.signal;
+				if (!loaderSignal) throw new Error("Expected provider preload signal");
+				await new Promise<never>((_resolve, reject) => {
+					if (loaderSignal?.aborted) reject(loaderSignal.reason);
+					else loaderSignal?.addEventListener("abort", () => reject(loaderSignal?.reason), { once: true });
+				});
+			},
+		);
+		const abortController = new AbortController();
+		const run = runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "cancelled-preload", description: "test", systemPrompt: "test", source: "user" },
+			task: "work",
+			index: 0,
+			id: "cancelled-provider-preload",
+			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
+			authStorage: {
+				setFallbackResolver: () => {},
+				setConfigApiKey: () => {},
+				removeConfigApiKey: () => {},
+				hasAuth: () => false,
+			} as never,
+			settings: Settings.isolated(),
+			enableLsp: false,
+			signal: abortController.signal,
+		});
+
+		await preloadStarted.promise;
+		abortController.abort("cancelled during provider preload");
+		const earlyResult = await Promise.race([run.then(() => "settled"), Bun.sleep(20).then(() => "pending")]);
+		const result = await run;
+		expect(earlyResult).toBe("settled");
+		expect(loaderSignal?.aborted).toBe(true);
+		expect(result.aborted).toBe(true);
 	});
 });

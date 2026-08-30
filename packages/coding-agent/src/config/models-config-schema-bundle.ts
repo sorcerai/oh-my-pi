@@ -166,12 +166,24 @@ export const getModelsConfigSchemaBundle = once(() => {
 		}
 		return true;
 	});
+	/**
+	 * Harness-namespaced, non-secret passthrough fields. The namespace set matches the
+	 * ModelSpecV1 interchange contract, and undeclared namespaces are rejected here so a
+	 * typo fails with a config-shaped error instead of a converter TypeError at load.
+	 */
+	const ModelExtensionsSchema = type({
+		"+": "reject",
+		"prime?": { "[string]": "unknown" },
+		"omp?": { "[string]": "unknown" },
+	});
 
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
 		"api?": ApiSchema,
 		"baseUrl?": "string",
+		"authRef?": "string",
+		"extensions?": ModelExtensionsSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
@@ -185,7 +197,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 			cacheWrite: "number",
 		},
 		"premiumMultiplier?": "number",
-		"contextWindow?": "number",
+		"contextWindow?": "number | null",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",
@@ -223,6 +235,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 	});
 
 	const ModelOverrideSchema = type({
+		"authRef?": "string",
+		"extensions?": ModelExtensionsSchema,
 		"name?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
@@ -237,7 +251,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"cacheWrite?": "number",
 		},
 		"premiumMultiplier?": "number",
-		"contextWindow?": "number",
+		"contextWindow?": "number | null",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",

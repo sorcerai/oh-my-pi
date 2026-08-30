@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { AdvisorEmissionGuard, normalizeAdvisorNote } from "../../src/advisor/emission-guard";
+import { AdvisorEmissionGuard, AdvisorEmissionHistory, normalizeAdvisorNote } from "../../src/advisor/emission-guard";
 
 describe("normalizeAdvisorNote", () => {
 	it("collapses punctuation, casing, and surrounding whitespace into one canonical key", () => {
@@ -46,6 +46,30 @@ describe("AdvisorEmissionGuard", () => {
 		// land twice in the primary transcript.
 		expect(guard.accept("move retries into the queue, not the request path")).toBe(false);
 		expect(guard.accept("Move retries into the queue, not the request path!")).toBe(false);
+	});
+
+	it("shares normalized history across seats without sharing per-update budgets", () => {
+		const history = new AdvisorEmissionHistory();
+		const first = new AdvisorEmissionGuard(history);
+		const second = new AdvisorEmissionGuard(history);
+
+		first.beginUpdate();
+		second.beginUpdate();
+		expect(first.accept("Missing rollback")).toBe(true);
+		expect(second.accept("missing rollback!")).toBe(false);
+		// A duplicate does not consume the second seat's independent budget.
+		expect(second.accept("Add a falsifier check")).toBe(true);
+
+		history.reset();
+		// Resetting shared history does not reset either seat's current budget.
+		expect(first.accept("Missing rollback")).toBe(false);
+		expect(second.accept("Different falsifier note")).toBe(false);
+
+		first.beginUpdate();
+		expect(first.accept("Missing rollback")).toBe(true);
+		second.beginUpdate();
+		// The first seat's re-emission is again shared with the second seat.
+		expect(second.accept("MISSING ROLLBACK.")).toBe(false);
 	});
 
 	it("rate-limits to one accepted advise per advisor update cycle", () => {

@@ -39,13 +39,17 @@ import {
 	postmortem,
 	prompt,
 	Snowflake,
+	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
+	ADVISOR_DEFAULT_TOOL_NAMES,
+	type AdvisorConfig,
 	discoverAdvisorConfigs,
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
+	resolveAdvisorRosterIdentities,
 } from "./advisor";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
@@ -69,6 +73,7 @@ import {
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	resolvePersistedModelSelector,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
@@ -119,6 +124,7 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
+import { createExternalPeerProvider, type ExternalPeerProvider } from "./integrations/prime-bridge";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -149,6 +155,7 @@ import {
 	type SecretObfuscator,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import type { AdvisorToolPools } from "./session/agent-session-types";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { withDateCwdReminder } from "./session/date-cwd-reminder";
@@ -531,6 +538,8 @@ export interface CreateAgentSessionOptions {
 	lspReadOnly?: boolean;
 	/** Whether this invocation may expose IRC. `false` removes it even for subagents. */
 	enableIrc?: boolean;
+	/** Optional Prime peer provider. Settings create one only when enabled and unrestricted. */
+	externalPeerProvider?: ExternalPeerProvider;
 	/** Skip subprocess-kernel availability checks and prelude warmup */
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
@@ -799,10 +808,17 @@ export async function loadCliExtensionProviders(
 	modelRegistry: ModelRegistry,
 	settings: Settings,
 	cwd: string,
-	options: Pick<CreateAgentSessionOptions, "disableExtensionDiscovery" | "additionalExtensionPaths"> = {},
-): Promise<void> {
+	options: Pick<CreateAgentSessionOptions, "disableExtensionDiscovery" | "additionalExtensionPaths"> & {
+		signal?: AbortSignal;
+	} = {},
+): Promise<{ eventBus: EventBus; extensionsResult: LoadExtensionsResult } | undefined> {
 	const eventBus = new EventBus();
-	const extensionsResult = await loadSessionExtensions(options, cwd, settings, eventBus);
+	const extensionsResult = await untilAborted(options.signal, () =>
+		loadSessionExtensions(options, cwd, settings, eventBus),
+	);
+	// `untilAborted` rejects the caller immediately, but the loader callback can
+	// continue after an abort. Guard the mutation boundary as well.
+	await untilAborted(options.signal, Promise.resolve());
 	const activeSources = extensionsResult.extensions.map(extension => extension.path);
 	modelRegistry.syncExtensionSources(activeSources);
 	for (const sourceId of new Set(activeSources)) {
@@ -813,6 +829,7 @@ export async function loadCliExtensionProviders(
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
 	await modelRegistry.refreshRuntimeProviders();
+	return { eventBus, extensionsResult };
 }
 
 /**
@@ -1528,24 +1545,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const parsedModel = parseModelString(sessionModelStr, {
-					allowMaxSuffix: true,
-					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-				});
-				if (!parsedModel) {
+				const restored = resolvePersistedModelSelector(sessionModelStr, modelRegistry.getAvailable());
+				if (!restored || !hasModelAuth(restored.model)) {
 					failedSessionModel ??= sessionModelStr;
 					continue;
 				}
 
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && hasModelAuth(restoredModel)) {
-					model = restoredModel;
-					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
-					break;
-				}
-				failedSessionModel ??= sessionModelStr;
+				model = restored.model;
+				restoredSessionModelIndex = i;
+				restoredSessionThinkingLevel = restored.thinkingLevel;
+				break;
 			}
 			if (failedSessionModel) {
 				modelFallbackMessage = `Could not restore model ${failedSessionModel}`;
@@ -1808,6 +1817,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
 			getCodeModeDirectToolNames: () => session?.getCodeModeDirectToolNames(),
 			agentRegistry,
+			externalPeerProvider:
+				restrictToolNames || settings.get("primeBridge.enabled") !== true
+					? undefined
+					: (options.externalPeerProvider ??
+						createExternalPeerProvider({
+							enabled: true,
+							autoStart: settings.get("primeBridge.autoStart"),
+							url: settings.get("primeBridge.url"),
+							tokenPath: settings.get("primeBridge.tokenPath"),
+							originSessionId: sessionManager.getSessionId(),
+							projectRoot: cwd,
+						})),
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
@@ -2127,22 +2148,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 			);
-			for (const { path, error } of extensionsResult.errors) {
-				logger.error("Failed to bind extension", { path, error });
-			}
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
-			for (const { path, error } of extensionsResult.errors) {
-				logger.error("Failed to load extension", { path, error });
-			}
 		} else {
 			extensionPaths = await logger.time("discoverSessionExtensionPaths", () =>
 				discoverSessionExtensionPaths(options, cwd, settings),
 			);
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
+		}
+		if (!restrictToolNames && !options.preloadedExtensions) {
+			const action = options.preloadedPreparedExtensions ? "bind" : "load";
 			for (const { path, error } of extensionsResult.errors) {
-				logger.error("Failed to load extension", { path, error });
+				logger.error(`Failed to ${action} extension`, { path, error });
 			}
 		}
 		// Forward the source-path list (NOT the loaded instances) so subagents
@@ -2217,32 +2235,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
 					const sessionModelStr = sessionModelStrings[i];
-					const parsedModel = parseModelString(sessionModelStr, {
-						allowMaxSuffix: true,
-						allowAutoAlias: true,
-						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-					});
-					if (!parsedModel) continue;
-					const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-					if (restoredModel && hasModelAuth(restoredModel)) {
-						model = restoredModel;
-						modelFallbackMessage = undefined;
-						restoredSessionModelIndex = i;
-						restoredSessionThinkingLevel = parsedModel.thinkingLevel;
-						// Recompute thinking-level from scratch against the reclaimed
-						// model: any value derived from the earlier fallback model's
-						// `thinking.defaultLevel` must not become sticky.
-						thinkingLevel = pickInitialThinkingLevel(restoredModel);
-						autoThinking = thinkingLevel === AUTO_THINKING;
-						effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
-						effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-							autoThinking
-								? resolveProvisionalAutoLevel(restoredModel)
-								: resolveThinkingLevelForModel(restoredModel, effectiveThinkingLevel),
-						);
-						preconnectModelHost(restoredModel.baseUrl);
-						return true;
-					}
+					const persisted = resolvePersistedModelSelector(sessionModelStr, modelRegistry.getAvailable());
+					const parsedModel = persisted
+						? undefined
+						: parseModelString(sessionModelStr, {
+								allowMaxSuffix: true,
+								allowAutoAlias: true,
+								isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+							});
+					const restoredModel =
+						persisted?.model ??
+						(parsedModel ? modelRegistry.find(parsedModel.provider, parsedModel.id) : undefined);
+					if (!restoredModel || !hasModelAuth(restoredModel)) continue;
+					model = restoredModel;
+					modelFallbackMessage = undefined;
+					restoredSessionModelIndex = i;
+					restoredSessionThinkingLevel = persisted?.thinkingLevel ?? parsedModel?.thinkingLevel;
+					// Recompute thinking-level from scratch against the reclaimed
+					// model: any value derived from the earlier fallback model's
+					// `thinking.defaultLevel` must not become sticky.
+					thinkingLevel = pickInitialThinkingLevel(restoredModel);
+					autoThinking = thinkingLevel === AUTO_THINKING;
+					effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+					effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+						autoThinking
+							? resolveProvisionalAutoLevel(restoredModel)
+							: resolveThinkingLevelForModel(restoredModel, effectiveThinkingLevel),
+					);
+					preconnectModelHost(restoredModel.baseUrl);
+					return true;
 				}
 				return false;
 			};
@@ -3536,7 +3557,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				sessionManager.appendModelChange(formatModelStringWithRouting(model));
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
@@ -3550,54 +3571,75 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
-		// Full toolset for the advisor, built unconditionally so it can be toggled at
-		// runtime. Bound to a DISTINCT ToolSession (its own `-advisor` session id +
-		// agent id) so the advisor's tool state — snapshot, seen-lines, conflict, and
-		// summary caches, all keyed on session identity — stays isolated from the
-		// primary, while edit/bash/write stay fully functional: the advisor is a full
-		// agent and its config's `tools` selects which of these it actually gets
-		// (defaulting to read/grep/glob).
-		const advisorToolSession: ToolSession = {
-			...toolSession,
-			// The primary may carry a dormant xd:// write transport. Advisors use
-			// their own configured tool slate, so a selected write is always full.
-			deviceOnlyWrite: undefined,
-			pendingFullWriteDescription: undefined,
-			get cwd() {
-				return sessionManager.getCwd();
-			},
-			hasEditTool: true,
-			requireYieldTool: false,
-			getSessionId: () => {
-				const id = sessionManager.getSessionId?.();
-				return id ? `${id}-advisor` : null;
-			},
-			queueLaunchCompletion: notification =>
-				session?.queueLaunchCompletion(notification) ??
-				Promise.reject(new Error("Session unavailable for launch completion delivery")),
-			getAgentId: () => "advisor",
-			// The primary's availability signals are wrong for advisors: their tool
-			// slate is filtered separately at runtime (default read/grep/glob, no
-			// write transport), so xd:// devices are unreachable and read must never
-			// advertise inspect_image — images are inlined, and the provider
-			// boundary handles text-only advisor models.
-			xdev: undefined,
-			isToolActive: name => name !== "inspect_image" && toolSession.isToolActive?.(name) === true,
+		// Build one complete tool pool per configured advisor. Tool instances close
+		// over ToolSession state, so sharing a pool would couple caches, snapshots,
+		// conflict state, and identity across concurrently running seats.
+		const buildAdvisorToolPools = async (configs: readonly AdvisorConfig[]): Promise<AdvisorToolPools> => {
+			const toolsBySlug = new Map<string, Tool[]>();
+			const createGrepToolBySlug = new Map<
+				string,
+				(options: { context?: number; totalMatchLimit?: number }) => AgentTool | undefined
+			>();
+			const createEditToolBySlug = new Map<string, () => AgentTool | undefined>();
+			for (const { config, slug } of resolveAdvisorRosterIdentities(configs)) {
+				const identity = slug ? `advisor:${slug}` : "advisor";
+				const sessionSuffix = slug ? `advisor-${slug}` : "advisor";
+				const grantedToolNames = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
+				const seatToolSession: ToolSession = {
+					...toolSession,
+					deviceOnlyWrite: undefined,
+					pendingFullWriteDescription: undefined,
+					toolRegistry: new Map(),
+					fileSnapshotStore: undefined,
+					editClipboard: undefined,
+					conflictHistory: undefined,
+					diagnosticsLedger: undefined,
+					noopLoopGuard: undefined,
+					getToolByName: name => seatToolSession.toolRegistry?.get(name),
+					getToolForEvalBridge: name => seatToolSession.toolRegistry?.get(name),
+					getEvalBridgeToolNames: () => [...(seatToolSession.toolRegistry?.keys() ?? [])],
+					getCodeModeDirectToolNames: () => undefined,
+					setActiveToolNames: undefined,
+					get cwd() {
+						return sessionManager.getCwd();
+					},
+					hasEditTool: true,
+					requireYieldTool: false,
+					getSessionId: () => {
+						const id = sessionManager.getSessionId?.();
+						return id ? `${id}-${sessionSuffix}` : null;
+					},
+					queueLaunchCompletion: notification =>
+						session?.queueLaunchCompletion(notification) ??
+						Promise.reject(new Error("Session unavailable for launch completion delivery")),
+					getAgentId: () => identity,
+					xdev: undefined,
+					isToolActive: name => name !== "inspect_image" && grantedToolNames.has(name),
+				};
+				const builds: Array<Tool | null | Promise<Tool | null>> = [];
+				for (const name in BUILTIN_TOOLS) {
+					builds.push(BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](seatToolSession));
+				}
+				const built = await Promise.all(builds);
+				const wrappedTools = built
+					.filter((tool): tool is Tool => tool != null)
+					.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
+				for (const tool of wrappedTools) {
+					if (grantedToolNames.has(tool.name)) seatToolSession.toolRegistry?.set(tool.name, tool);
+				}
+				toolsBySlug.set(slug, wrappedTools);
+				createGrepToolBySlug.set(slug, createBridgeGrepFactory(seatToolSession, extensionRunner));
+				createEditToolBySlug.set(slug, () => createBridgeEditTool(seatToolSession, extensionRunner));
+			}
+			return { toolsBySlug, createGrepToolBySlug, createEditToolBySlug };
 		};
-		const advisorToolBuilds: Array<Tool | null | Promise<Tool | null>> = [];
-		for (const name in BUILTIN_TOOLS) {
-			advisorToolBuilds.push(BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS](advisorToolSession));
-		}
-		const built = await Promise.all(advisorToolBuilds);
-		// Wrapped like every registry tool: `ExtensionToolWrapper` is where the
-		// approval mode, per-tool `tools.approval.<tool>` policies and
-		// `autoApprove` are enforced. The advisor's loop and its Cursor exec
-		// bridge both run these instances directly, so a raw one would execute a
-		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
-		// first, matching the registry's wrap order.
-		const advisorTools: Tool[] = built
-			.filter((tool): tool is Tool => tool != null)
-			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
+		const advisorToolPools = await buildAdvisorToolPools(discoveredAdvisors.advisors);
+		const advisorTools =
+			advisorToolPools.toolsBySlug.get("") ?? advisorToolPools.toolsBySlug.values().next().value ?? [];
+		const advisorCreateGrepTool =
+			advisorToolPools.createGrepToolBySlug.get("") ?? advisorToolPools.createGrepToolBySlug.values().next().value;
+		const advisorCreateEditTool =
+			advisorToolPools.createEditToolBySlug.get("") ?? advisorToolPools.createEditToolBySlug.values().next().value;
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
 		if (initialActiveRepoContext) {
@@ -3623,7 +3665,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigs: discoveredAdvisors.advisors,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
-			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+			thinkingLevel: autoThinking ? AUTO_THINKING : (thinkingLevel ?? effectiveThinkingLevel),
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,
@@ -3722,13 +3764,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
-			// Same per-call `grep` seam the primary bridge gets, built against the
-			// advisor's own tool session so a `pi_grep` frame's context width and
-			// match cap are honored there too.
-			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner),
-			// Same `replace`-mode requirement as the primary bridge; the advisor
-			// path gates it on the advisor's own `edit` grant.
-			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
+			advisorToolPools,
+			advisorToolPoolBuilder: buildAdvisorToolPools,
+			// Compatibility fallbacks for direct/legacy single-advisor paths.
+			advisorCreateGrepTool,
+			advisorCreateEditTool,
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
 			// context — the primary bridge passes the same store.

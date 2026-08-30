@@ -6,11 +6,13 @@ import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-cod
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
+	filterSkillsForPrompt,
 	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
 	parseSkillInvocation,
 	type Skill,
+	selectSkillsForPrompt,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -46,6 +48,65 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 } as const;
 
 describe("skills", () => {
+	function makeSkill(name: string, description: string, source: string, hide = false): Skill {
+		return {
+			name,
+			description,
+			filePath: `/tmp/${name}/SKILL.md`,
+			baseDir: `/tmp/${name}`,
+			source,
+			hide,
+		};
+	}
+
+	describe("skill prompt selection", () => {
+		const skills = [
+			makeSkill("native-skill", "Native workflow", "native"),
+			makeSkill("agents-skill", "Agent-directory workflow", "agents"),
+			makeSkill("managed-skill", "Managed workflow", "omp-managed"),
+			makeSkill("local-skill", "Local workflow", "test"),
+			makeSkill("hidden-native", "Hidden native workflow", "native", true),
+		];
+
+		it("keeps all discovered skills in all mode", () => {
+			expect(filterSkillsForPrompt(skills, { promptMode: "all" }).map(skill => skill.name)).toEqual(
+				skills.map(skill => skill.name),
+			);
+		});
+
+		it("keeps only native, agents, and managed providers in core mode", () => {
+			expect(filterSkillsForPrompt(skills, { promptMode: "core" }).map(skill => skill.name)).toEqual([
+				"native-skill",
+				"agents-skill",
+				"managed-skill",
+				"hidden-native",
+			]);
+		});
+
+		it("matches allowlisted skill names with globs", () => {
+			expect(
+				filterSkillsForPrompt(
+					[
+						makeSkill("frontend-design", "UI", "test"),
+						makeSkill("frontend-testing", "Tests", "test"),
+						makeSkill("backend-design", "API", "test"),
+					],
+					{ promptMode: "allowlist", promptSkills: ["frontend-*"] },
+				).map(skill => skill.name),
+			).toEqual(["frontend-design", "frontend-testing"]);
+		});
+
+		it("drops hidden skills and requires the read tool for rendered selection", () => {
+			expect(selectSkillsForPrompt(skills, true, { promptMode: "all" }).map(skill => skill.name)).toEqual([
+				"native-skill",
+				"agents-skill",
+				"managed-skill",
+				"local-skill",
+			]);
+			expect(selectSkillsForPrompt(skills, false, { promptMode: "all" })).toEqual([]);
+		});
+	});
+
 	describe("loadSkillsFromDir", () => {
 		let fixtureRoot: LoadSkillsResult;
 

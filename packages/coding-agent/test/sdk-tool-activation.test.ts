@@ -26,6 +26,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 
@@ -2508,7 +2509,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			try {
 				// The default advisor roster is read-only (read/grep/glob); the
 				// reviewed hole needs one actually granted a mutating tool.
-				session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
+				await session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
 				const advisor = session.getAdvisorAgent();
 				if (!advisor) throw new Error("expected an advisor agent");
 				const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
@@ -2539,7 +2540,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				toolNames: ["read"],
 			});
 			try {
-				session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
+				await session.applyAdvisorConfigs([{ name: "writer", tools: ["write"], model: "gpt-4o-mini" }], undefined);
 				const advisor = session.getAdvisorAgent();
 				if (!advisor) throw new Error("expected an advisor agent");
 				const writeTool = advisor.state.tools?.find(tool => tool.name === "write");
@@ -2554,6 +2555,116 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				);
 				expect(result.isError).toBeUndefined();
 				expect(fs.readFileSync(target, "utf8")).toBe("written\n");
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("builds distinct tool instances for each advisor seat", async () => {
+		const tempDir = makeTempDir();
+		await Bun.write(
+			path.join(tempDir, "WATCHDOG.yml"),
+			[
+				"advisors:",
+				"  - name: Task",
+				"    role: task",
+				"    model: gpt-4o-mini",
+				"    tools: [read]",
+				"  - name: Adversarial",
+				"    role: adversarial",
+				"    model: gpt-4o-mini",
+				"    tools: [read]",
+			].join("\n"),
+		);
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				settings: Settings.isolated({ "advisor.enabled": true }),
+			});
+			try {
+				const taskRead = session.getAdvisorAgent("Task")?.state.tools.find(tool => tool.name === "read");
+				const adversarialRead = session
+					.getAdvisorAgent("Adversarial")
+					?.state.tools.find(tool => tool.name === "read");
+
+				expect(taskRead).toBeDefined();
+				expect(adversarialRead).toBeDefined();
+				expect(taskRead).not.toBe(adversarialRead);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("does not copy primary mutable tool state into live advisor pools", async () => {
+		const tempDir = makeTempDir();
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				settings: Settings.isolated({ "advisor.enabled": true }),
+			});
+			try {
+				const primaryRead = session.agent.state.tools.find(tool => tool.name === "read");
+				if (!primaryRead) throw new Error("expected the primary read tool");
+				const primarySession = Reflect.get(
+					Reflect.get(primaryRead, "tool") ?? primaryRead,
+					"session",
+				) as ToolSession;
+				const primarySnapshotStore = {} as NonNullable<ToolSession["fileSnapshotStore"]>;
+				primarySession.fileSnapshotStore = primarySnapshotStore;
+
+				await session.applyAdvisorConfigs(
+					[
+						{ name: "Task", role: "task", tools: ["read"], model: "gpt-4o-mini" },
+						{ name: "Adversarial", role: "adversarial", tools: ["read"], model: "gpt-4o-mini" },
+					],
+					undefined,
+				);
+				const taskRead = session.getAdvisorAgent("Task")?.state.tools.find(tool => tool.name === "read");
+				const adversarialRead = session
+					.getAdvisorAgent("Adversarial")
+					?.state.tools.find(tool => tool.name === "read");
+				if (!taskRead || !adversarialRead) throw new Error("expected both advisor read tools");
+				const taskSession = Reflect.get(Reflect.get(taskRead, "tool") ?? taskRead, "session") as ToolSession;
+				const adversarialSession = Reflect.get(
+					Reflect.get(adversarialRead, "tool") ?? adversarialRead,
+					"session",
+				) as ToolSession;
+
+				expect(taskSession).not.toBe(primarySession);
+				expect(adversarialSession).not.toBe(primarySession);
+				expect(taskSession).not.toBe(adversarialSession);
+				expect(taskSession.fileSnapshotStore).not.toBe(primarySnapshotStore);
+				expect(adversarialSession.fileSnapshotStore).not.toBe(primarySnapshotStore);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("keeps advisor eval lookup inside the seat tool grant", async () => {
+		const tempDir = makeTempDir();
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				settings: Settings.isolated({ "advisor.enabled": true }),
+				toolNames: ["read", "write"],
+			});
+			try {
+				await session.applyAdvisorConfigs(
+					[{ name: "Adversarial", role: "adversarial", tools: ["eval"], model: "gpt-4o-mini" }],
+					undefined,
+				);
+				const evalTool = session.getAdvisorAgent("Adversarial")?.state.tools.find(tool => tool.name === "eval");
+				if (!evalTool) throw new Error("expected the advisor eval tool");
+				const advisorSession = Reflect.get(Reflect.get(evalTool, "tool") ?? evalTool, "session") as ToolSession;
+
+				expect(advisorSession.getToolForEvalBridge?.("write")).toBeUndefined();
+				expect(advisorSession.getEvalBridgeToolNames?.()).not.toContain("write");
 			} finally {
 				await session.dispose();
 			}

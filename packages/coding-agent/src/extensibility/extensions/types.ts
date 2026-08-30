@@ -1593,8 +1593,8 @@ export interface ProviderModelConfig {
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** Premium Copilot requests charged per user-initiated request. */
 	premiumMultiplier?: number;
-	/** Maximum context window size in tokens. */
-	contextWindow: number;
+	/** Maximum context window size in tokens, or `null` when the limit is unknown. */
+	contextWindow: number | null;
 	/** Maximum output tokens. */
 	maxTokens: number;
 	/** Whether Codex requests should prefer WebSocket transport. */
