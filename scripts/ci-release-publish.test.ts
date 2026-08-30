@@ -69,6 +69,8 @@ describe("published legal payloads", () => {
 				"native/desktop-adapter.d.ts",
 				"native/loader-state.js",
 				"native/loader-state.d.ts",
+				"native/vcs.js",
+				"native/vcs.d.ts",
 				"native/embedded-addon.js",
 				"README.md",
 				"LICENSE",
@@ -134,5 +136,27 @@ describe("published manifest topology", () => {
 				import: "./src/ar/index.ts",
 			},
 		});
+	});
+	it("publishes prime protocol before bridge and keeps the bridge source bin", async () => {
+		const protocolIndex = packages.findIndex(entry => entry.dir === "packages/prime-bridge-protocol");
+		const bridgeIndex = packages.findIndex(entry => entry.dir === "packages/prime-bridge");
+		const codingAgentIndex = packages.findIndex(entry => entry.dir === "packages/coding-agent");
+		expect(protocolIndex).toBeGreaterThanOrEqual(0);
+		expect(bridgeIndex).toBeGreaterThan(protocolIndex);
+		expect(codingAgentIndex).toBeGreaterThan(bridgeIndex);
+
+		const protocolManifest = await rewriteManifest(packages[protocolIndex]!, false);
+		expect(protocolManifest.name).toBe("@oh-my-pi/prime-bridge-protocol");
+		expect(protocolManifest.version).toMatch(/^\d+\.\d+\.\d+$/);
+
+		const bridge = packages[bridgeIndex]!;
+		expect(bridge.publishJs).toBeUndefined();
+		expect(bridge.publishBin).toBeUndefined();
+		const bridgeManifest = await rewriteManifest(bridge, false);
+		expect(bridgeManifest.name).toBe("@oh-my-pi/prime-bridge");
+		expect(bridgeManifest.version).toBe(protocolManifest.version);
+		expect(bridgeManifest.bin).toEqual({ "omp-prime-bridge": "./src/cli.ts" });
+		expect(bridgeManifest.files).toEqual(expect.arrayContaining(["dist/types"]));
+		expect(bridgeManifest.files).not.toContain("dist/js");
 	});
 });

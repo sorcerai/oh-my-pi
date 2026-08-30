@@ -121,17 +121,50 @@ export type AdvisorEmissionDecision = "accepted" | "duplicate" | "rate_limited" 
  * {@link reset}. Per-update gate is cleared at the start of every advisor
  * `agent.prompt()` cycle via {@link beginUpdate}.
  */
-export class AdvisorEmissionGuard {
+export class AdvisorEmissionHistory {
 	#seen = new Set<string>();
 	/** Insertion-order log to drive FIFO eviction without an extra Map. */
 	#seenOrder: string[] = [];
+	readonly capacity: number;
+
+	constructor(capacity = DEFAULT_HISTORY_CAPACITY) {
+		this.capacity = capacity;
+	}
+
+	has(key: string): boolean {
+		return this.#seen.has(key);
+	}
+
+	add(key: string): void {
+		this.#seen.add(key);
+		this.#seenOrder.push(key);
+		if (this.#seenOrder.length > this.capacity) {
+			const stale = this.#seenOrder.shift();
+			if (stale !== undefined) this.#seen.delete(stale);
+		}
+	}
+
+	reset(): void {
+		this.#seen.clear();
+		this.#seenOrder.length = 0;
+	}
+}
+
+export class AdvisorEmissionGuard {
 	#acceptedThisUpdate = 0;
 	readonly #budgetPerUpdate: number;
-	readonly #capacity: number;
+	readonly #history: AdvisorEmissionHistory;
 
-	constructor(opts: { capacity?: number; budgetPerUpdate?: number } = {}) {
-		this.#capacity = opts.capacity ?? DEFAULT_HISTORY_CAPACITY;
-		const budget = opts.budgetPerUpdate;
+	constructor(
+		historyOrOptions: AdvisorEmissionHistory | { capacity?: number; budgetPerUpdate?: number } = {},
+		budgetPerUpdate?: number,
+	) {
+		const options = historyOrOptions instanceof AdvisorEmissionHistory ? {} : historyOrOptions;
+		this.#history =
+			historyOrOptions instanceof AdvisorEmissionHistory
+				? historyOrOptions
+				: new AdvisorEmissionHistory(options.capacity);
+		const budget = budgetPerUpdate ?? options.budgetPerUpdate;
 		this.#budgetPerUpdate =
 			typeof budget === "number" && Number.isFinite(budget)
 				? Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.max(1, Math.trunc(budget)))
@@ -145,8 +178,7 @@ export class AdvisorEmissionGuard {
 	 * advisor can re-raise old issues (the primary transcript was rewritten).
 	 */
 	reset(): void {
-		this.#seen.clear();
-		this.#seenOrder.length = 0;
+		this.#history.reset();
 		this.#acceptedThisUpdate = 0;
 	}
 
@@ -168,15 +200,10 @@ export class AdvisorEmissionGuard {
 	accept(note: string, severity?: AdvisorSeverity): AdvisorEmissionDecision {
 		const key = normalizeAdvisorNote(note);
 		if (!key || SUPPRESSED_NORMALIZED_PHRASES[key]) return "suppressed_noise";
-		if (this.#seen.has(key)) return "duplicate";
+		if (this.#history.has(key)) return "duplicate";
 		if (severity !== "blocker" && this.#acceptedThisUpdate >= this.#budgetPerUpdate) return "rate_limited";
 		if (severity !== "blocker") this.#acceptedThisUpdate++;
-		this.#seen.add(key);
-		this.#seenOrder.push(key);
-		if (this.#seenOrder.length > this.#capacity) {
-			const stale = this.#seenOrder.shift();
-			if (stale !== undefined) this.#seen.delete(stale);
-		}
+		this.#history.add(key);
 		return "accepted";
 	}
 }

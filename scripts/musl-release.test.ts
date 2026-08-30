@@ -14,18 +14,22 @@ async function run(
 	command: string[],
 	env: NodeJS.ProcessEnv = process.env,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-	const proc = Bun.spawn(command, {
-		cwd: repoRoot,
-		env,
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [exitCode, stdout, stderr] = await Promise.all([
-		proc.exited,
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
-	return { exitCode, stdout, stderr };
+	const captureDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-musl-output-"));
+	const stdoutPath = path.join(captureDir, "stdout");
+	const stderrPath = path.join(captureDir, "stderr");
+	try {
+		const proc = Bun.spawn(command, {
+			cwd: repoRoot,
+			env,
+			stdout: Bun.file(stdoutPath),
+			stderr: Bun.file(stderrPath),
+		});
+		const exitCode = await proc.exited;
+		const [stdout, stderr] = await Promise.all([Bun.file(stdoutPath).text(), Bun.file(stderrPath).text()]);
+		return { exitCode, stdout, stderr };
+	} finally {
+		await fs.rm(captureDir, { recursive: true, force: true });
+	}
 }
 
 async function writeExecutable(directory: string, name: string, content: string): Promise<void> {

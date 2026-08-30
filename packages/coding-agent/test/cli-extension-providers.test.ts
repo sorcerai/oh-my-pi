@@ -87,3 +87,34 @@ test("loadCliExtensionProviders makes extension providers resolvable by selector
 		authStorage.close();
 	}
 });
+
+test("loadCliExtensionProviders does not start discovery for an already-aborted signal", async () => {
+	const markerPath = tmp.join("aborted-extension-loaded");
+	const abortedExtensionPath = tmp.join("aborted-ext.ts");
+	await fs.writeFile(
+		abortedExtensionPath,
+		`import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(markerPath)}, "loaded");
+export default function () {}
+`,
+	);
+	const authStorage = await AuthStorage.create(dbPath);
+	try {
+		const settings = await Settings.init({ inMemory: true, cwd: tmp.path() });
+		const modelRegistry = new ModelRegistry(authStorage);
+		const controller = new AbortController();
+		controller.abort("cancelled before discovery");
+
+		await expect(
+			loadCliExtensionProviders(modelRegistry, settings, tmp.path(), {
+				disableExtensionDiscovery: true,
+				additionalExtensionPaths: [abortedExtensionPath],
+				signal: controller.signal,
+			}),
+		).rejects.toThrow();
+		await Bun.sleep(20);
+		expect(await Bun.file(markerPath).exists()).toBe(false);
+	} finally {
+		authStorage.close();
+	}
+});

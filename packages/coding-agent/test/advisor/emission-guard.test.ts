@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	ADVISOR_MAX_BUDGET_PER_UPDATE,
 	AdvisorEmissionGuard,
+	AdvisorEmissionHistory,
 	normalizeAdvisorNote,
 } from "../../src/advisor/emission-guard";
 
@@ -52,7 +53,55 @@ describe("AdvisorEmissionGuard", () => {
 		expect(guard.accept("Move retries into the queue, not the request path!")).toBe("duplicate");
 	});
 
+	it("shares normalized history across seats without sharing per-update budgets", () => {
+		const history = new AdvisorEmissionHistory();
+		const first = new AdvisorEmissionGuard(history);
+		const second = new AdvisorEmissionGuard(history);
+
+		first.beginUpdate();
+		second.beginUpdate();
+		expect(first.accept("Missing rollback")).toBe("accepted");
+		expect(second.accept("missing rollback!")).toBe("duplicate");
+		expect(second.accept("Add a falsifier check")).toBe("accepted");
+
+		history.reset();
+		expect(first.accept("Missing rollback")).toBe("accepted");
+		expect(second.accept("Different falsifier note")).toBe("accepted");
+
+		first.beginUpdate();
+		expect(first.accept("Missing rollback")).toBe("accepted");
+		second.beginUpdate();
+		expect(second.accept("MISSING ROLLBACK.")).toBe("duplicate");
+	});
+
 	it("rate-limits non-blockers past the default budget of 4 per advisor update cycle", () => {
+		const guard = new AdvisorEmissionGuard();
+		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe("accepted");
+		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");
+		expect(guard.accept("Third concern: unhandled rejection.")).toBe("accepted");
+		expect(guard.accept("Fourth concern: missing validation.")).toBe("accepted");
+		expect(guard.accept("Fifth concern: unhandled error.")).toBe("rate_limited");
+		guard.beginUpdate();
+		expect(guard.accept("Fifth concern: unhandled error.")).toBe("accepted");
+	});
+
+	it("honors blockers and configured budgets", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
+		expect(guard.accept("Minor naming nit.", "nit")).toBe("accepted");
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("accepted");
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("duplicate");
+		expect(guard.accept("Stop.", "blocker")).toBe("suppressed_noise");
+		guard.beginUpdate();
+		expect(guard.accept("Second concern.", "concern")).toBe("accepted");
+	});
+
+	it("clamps budgetPerUpdate to at most ADVISOR_MAX_BUDGET_PER_UPDATE", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 100 });
+		for (let i = 0; i < ADVISOR_MAX_BUDGET_PER_UPDATE; i++) {
+			expect(guard.accept(`Note ${i}`, "concern")).toBe("accepted");
+		}
+		expect(guard.accept("Note 33", "concern")).toBe("rate_limited");
+	});
 		const guard = new AdvisorEmissionGuard();
 		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe("accepted");
 		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");

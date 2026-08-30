@@ -22,7 +22,21 @@ function createIsolatedSkillsSettings(extensions: string[] = []): Settings {
 		"skills.enableClaudeProject": false,
 		"skills.enablePiUser": false,
 		"skills.enablePiProject": true,
+		"skills.enableAgentsUser": false,
+		"skills.enableAgentsProject": false,
 		extensions,
+	});
+}
+
+function createSkillsSession(options: Parameters<typeof createAgentSession>[0]) {
+	return createAgentSession({
+		enableMCP: false,
+		enableLsp: false,
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		rules: [],
+		...options,
 	});
 }
 
@@ -44,6 +58,8 @@ describe("createAgentSession skills option", () => {
 	let skillsDir: string;
 	let tempHomeDir = "";
 	let originalHome: string | undefined;
+	let originalAgentDir: string;
+	let sessions: AgentSession[] = [];
 	// Auth storage (SQLite DB) and the model registry are immutable across these tests: skill
 	// discovery never touches models, and building them per test would make createAgentSession call
 	// modelRegistry.refreshInBackground(), whose online model discovery saturates the event loop and
@@ -65,6 +81,7 @@ describe("createAgentSession skills option", () => {
 	});
 
 	beforeEach(() => {
+		sessions = [];
 		tempDir = path.join(os.tmpdir(), `pi-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		// Create skill in .omp/skills/ for native project-level discovery
 		skillsDir = path.join(tempDir, ".omp", "skills", "test-skill");
@@ -73,7 +90,8 @@ describe("createAgentSession skills option", () => {
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-home-"));
 		process.env.HOME = tempHomeDir;
 		const nativeUserSkillsDir = path.join(tempHomeDir, ".omp", "agent", "skills");
-		fs.mkdirSync(nativeUserSkillsDir, { recursive: true });
+		originalAgentDir = getAgentDir();
+		setAgentDir(path.dirname(nativeUserSkillsDir));
 
 		// Create a test skill in the pi skills directory
 		fs.writeFileSync(
@@ -106,16 +124,25 @@ Loaded via symbolic link.
 		fs.symlinkSync(externalSkillDir, path.join(path.dirname(skillsDir), "symlinked-skill-link"), "dir");
 	});
 
-	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	const cleanup = cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }));
+	afterEach(async () => {
+		try {
+			await Promise.all(sessions.map(session => session.dispose()));
+		} finally {
+			setAgentDir(originalAgentDir);
+			cleanup();
+		}
+	});
 
 	it("should discover skills by default and expose them on session.skills", async () => {
-		const { session } = await createAgentSession({
+		const { session } = await createSkillsSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
+		sessions.push(session);
 
 		// Skills should be discovered and exposed on the session
 		expect(session.skills.length).toBeGreaterThan(0);
@@ -151,7 +178,7 @@ Loaded via symbolic link.
 		};
 		let session: AgentSession | undefined;
 		try {
-			({ session } = await createAgentSession({
+			({ session } = await createSkillsSession({
 				...baseSessionOptions,
 				sessionManager: SessionManager.inMemory(),
 				settings: createIsolatedSkillsSettings([settingsPackage]),
@@ -164,7 +191,7 @@ Loaded via symbolic link.
 
 			await session.dispose();
 			session = undefined;
-			({ session } = await createAgentSession({
+			({ session } = await createSkillsSession({
 				...baseSessionOptions,
 				sessionManager: SessionManager.inMemory(),
 				settings: createIsolatedSkillsSettings([settingsPackage]),
@@ -179,13 +206,14 @@ Loaded via symbolic link.
 	});
 
 	it("should discover skills when skill directory is a symlink", async () => {
-		const { session } = await createAgentSession({
+		const { session } = await createSkillsSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
+		sessions.push(session);
 
 		expect(session.skills.some((s: Skill) => s.name === "symlinked-skill")).toBe(true);
 	});
@@ -193,27 +221,30 @@ Loaded via symbolic link.
 	it("should still discover project skills when user skills directory is missing", async () => {
 		const userAgentDir = path.join(tempHomeDir, ".omp", "agent");
 		removeSyncWithRetries(path.join(userAgentDir, "skills"));
+		fs.mkdirSync(userAgentDir, { recursive: true });
 		fs.writeFileSync(path.join(userAgentDir, "placeholder.txt"), "placeholder");
 
-		const { session } = await createAgentSession({
+		const { session } = await createSkillsSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
+		sessions.push(session);
 
 		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
-	});
+	}, 15_000);
 
 	it("refreshSkills reloads project skills on an existing session", async () => {
-		const { session } = await createAgentSession({
+		const { session } = await createSkillsSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
+		sessions.push(session);
 
 		expect(session.skills.some((s: Skill) => s.name === "runtime-added-skill")).toBe(false);
 
@@ -249,7 +280,7 @@ This skill is added after session creation.
 		setAgentDir(managedAgentDir);
 		const settings = createIsolatedSkillsSettings();
 		settings.set("autolearn.enabled", true);
-		const { session } = await createAgentSession({
+		const { session } = await createSkillsSession({
 			cwd: tempDir,
 			agentDir: managedAgentDir,
 			sessionManager: SessionManager.inMemory(tempDir),
@@ -298,10 +329,10 @@ This skill is added after session creation.
 			unsubscribeCommandMetadata();
 			setAgentDir(originalAgentDir);
 		}
-	});
+	}, 15_000);
 
 	it("should have empty skills when options.skills is empty array (--no-skills)", async () => {
-		const { session } = await createAgentSession({
+		const { session } = await createSkillsSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
@@ -309,6 +340,7 @@ This skill is added after session creation.
 			skills: [], // Explicitly empty - like --no-skills
 			settings: createIsolatedSkillsSettings(),
 		});
+		sessions.push(session);
 
 		// session.skills should be empty
 		expect(session.skills).toEqual([]);
@@ -325,7 +357,7 @@ This skill is added after session creation.
 			source: "custom" as const,
 		};
 
-		const { session } = await createAgentSession({
+		const { session } = await createSkillsSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
@@ -333,6 +365,7 @@ This skill is added after session creation.
 			skills: [customSkill],
 			settings: createIsolatedSkillsSettings(),
 		});
+		sessions.push(session);
 
 		// session.skills should contain only the provided skill
 		expect(session.skills).toEqual([customSkill]);

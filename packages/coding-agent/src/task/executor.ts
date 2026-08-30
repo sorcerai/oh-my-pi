@@ -5,11 +5,12 @@
  */
 
 import * as fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -46,7 +47,12 @@ import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
-import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
+import {
+	type CreateAgentSessionOptions,
+	createAgentSession,
+	discoverAuthStorage,
+	loadCliExtensionProviders,
+} from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
@@ -69,6 +75,19 @@ import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
+
+/** Harness-owned standing directives injected into every subagent system prompt.
+ * Optional: missing file means no directives block (byte-identical stock prompt).
+ * Read on every spawn so edits apply to new dispatches without a restart. */
+function readSubagentDirectives(): string {
+	try {
+		return readFileSync(path.join(getAgentDir(), "subagent-directives.md"), "utf8").trim();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+		throw error;
+	}
+}
+
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
@@ -2036,6 +2055,7 @@ async function driveSessionToYield(
 		}
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
+		const requiresYield = session.model?.api !== "pi-antigravity-bridge";
 
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
@@ -2114,7 +2134,7 @@ async function driveSessionToYield(
 		// injected turns just multiply the failure noise; the teardown reap
 		// still cancels and awaits their jobs before worktree capture.
 		let asyncPendingNoticeSent = false;
-		while (!abortSignal.aborted) {
+		while (requiresYield && !abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
 				// Ladder exhausted / terminal model error: classified below
@@ -3241,11 +3261,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
 				);
 			}
-			checkAbort();
 			if (!registryFromParent) {
 				modelRegistry.refreshInBackground();
 			} else {
 				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
+			}
+			checkAbort();
+			let retainedExtensionEventBus: CreateAgentSessionOptions["eventBus"];
+			let retainedExtensions: CreateAgentSessionOptions["preloadedExtensions"];
+			// A parent registry already contains the provider registrations. Only a
+			// fresh registry needs a temporary load, whose bound runtime is reused
+			// by the child session to avoid activating each extension twice.
+			if (!registryFromParent && options.preloadedExtensionPaths?.length) {
+				const preloadResult = await loadCliExtensionProviders(modelRegistry, subagentSettings, worktree ?? cwd, {
+					disableExtensionDiscovery: true,
+					additionalExtensionPaths: options.preloadedExtensionPaths,
+					signal: abortSignal,
+				});
+				retainedExtensionEventBus = preloadResult?.eventBus;
+				retainedExtensions = preloadResult?.extensionsResult;
 			}
 			checkAbort();
 
@@ -3331,6 +3365,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
+			const subagentDirectives = readSubagentDirectives();
 			const sessionManagerPromise = sessionFile
 				? SessionManager.open(sessionFile, undefined, undefined, {
 						initialCwd: effectiveCwd,
@@ -3460,8 +3495,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
 				extensionRoots: options.extensionRoots,
-				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,
+				eventBus: !restrictToolNames && retainedExtensions ? retainedExtensionEventBus : undefined,
+				preloadedExtensions: !restrictToolNames ? retainedExtensions : undefined,
+				preloadedExtensionPaths: restrictToolNames
+					? []
+					: retainedExtensions
+						? undefined
+						: options.preloadedExtensionPaths,
+				preloadedPreparedExtensions: restrictToolNames
+					? []
+					: retainedExtensions
+						? undefined
+						: options.preloadedPreparedExtensions,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
 					const ircRoster = ircEnabled
@@ -3473,6 +3518,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReference: options.planReference?.content ?? "",
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
+						directives: subagentDirectives,
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						// Read the live item set through the registry instead of capturing

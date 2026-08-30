@@ -23,6 +23,7 @@ import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with 
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
+import { SkillSearchTool } from "../tools/skill-search";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
@@ -257,6 +258,8 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	#skillSearchRequested: boolean;
+	#skillRefreshTail: Promise<void> = Promise.resolve();
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
@@ -278,6 +281,8 @@ export class SessionTools {
 			}
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
+		this.#skillSearchRequested =
+			this.#presentationPinnedToolNames === undefined || this.#presentationPinnedToolNames.has("skill_search");
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
 		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
@@ -549,7 +554,7 @@ export class SessionTools {
 		});
 	}
 
-	#wrapRuntimeTool(tool: AgentTool): AgentTool {
+	#wrapRuntimeTool(tool: AgentTool<any, any, any>): AgentTool {
 		const wrapped = wrapToolWithMetaNotice(tool);
 		const extensionRunner = this.#host.extensionRunner();
 		return extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped;
@@ -821,7 +826,12 @@ export class SessionTools {
 		);
 	}
 
-	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
+	async #applyActiveToolsByName(
+		toolNames: string[],
+		forcePromptRefresh = false,
+		signal?: AbortSignal,
+		rebuildPrompt = true,
+	): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
 		const codeMode = resolveCodeMode({
@@ -978,7 +988,7 @@ export class SessionTools {
 		try {
 			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(true);
-			if (this.#rebuildSystemPrompt) {
+			if (this.#rebuildSystemPrompt && rebuildPrompt) {
 				// The provider receives only `appliedNames`, but prompt capability and
 				// safety gates must see every enabled tool that remains callable via
 				// the Code Mode eval bridge. The rendered tool inventory is restricted
@@ -1262,9 +1272,63 @@ export class SessionTools {
 			timestamp: Date.now(),
 		};
 	}
+	async #reconcileSkillSearchTool(): Promise<void> {
+		const shouldRegister =
+			this.#host.settings.get("skills.enabled") !== false &&
+			this.#skillSearchRequested &&
+			this.#toolRegistry.has("read") &&
+			this.#presentationPinnedToolNames?.has("read") !== false;
+		const existing = this.#toolRegistry.get("skill_search");
+		const isBuiltIn = this.#builtInToolNames.has("skill_search");
+
+		if (shouldRegister && !existing) {
+			const sessionTools = this;
+			const tool = this.#wrapRuntimeTool(
+				new SkillSearchTool({
+					get skills() {
+						return sessionTools.#skills;
+					},
+				}),
+			);
+			this.#toolRegistry.set(tool.name, tool);
+			this.#builtInToolNames.add(tool.name);
+		} else if (!shouldRegister && isBuiltIn) {
+			this.#toolRegistry.delete("skill_search");
+			this.#builtInToolNames.delete("skill_search");
+		} else if (!isBuiltIn && existing) {
+			return;
+		}
+
+		const enabledNames = this.getEnabledToolNames();
+		const shouldRoute = shouldRegister && enabledNames.includes("read") && this.#toolRegistry.has("skill_search");
+		const nextNames = shouldRoute
+			? enabledNames.includes("skill_search")
+				? enabledNames
+				: [...enabledNames, "skill_search"]
+			: enabledNames.filter(name => name !== "skill_search");
+		if (nextNames.length === enabledNames.length && nextNames.every((name, index) => name === enabledNames[index])) {
+			return;
+		}
+		await this.#applyActiveToolsByName(nextNames, false, undefined, false);
+	}
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	async refreshSkills(): Promise<void> {
+	refreshSkills(): Promise<void> {
+		const refresh = this.#skillRefreshTail.then(() => this.#refreshSkills());
+		this.#skillRefreshTail = refresh.catch(() => {});
+		return refresh;
+	}
+
+	async #refreshSkills(): Promise<void> {
+		const previousSkills = this.#skills;
+		const previousSkillWarnings = this.#skillWarnings;
+		const previousSkillsSettings = this.#skillsSettings;
+		const restorePreviousSkillState = (): void => {
+			this.#skills = previousSkills;
+			this.#skillWarnings = previousSkillWarnings;
+			this.#skillsSettings = previousSkillsSettings;
+			if (this.#host.agentKind() === "main") setActiveSkills(this.#skills);
+		};
 		resetCapabilities();
 		if (this.#skillsReloadable) {
 			const skillsSettings = this.#host.settings.getGroup("skills");
@@ -1282,7 +1346,67 @@ export class SessionTools {
 				setActiveSkills(this.#skills);
 			}
 		}
-		await this.refreshBaseSystemPrompt();
+		await this.runToolRegistryMutation(async () => {
+			const previousRegistry = new Map(this.#toolRegistry);
+			const previousBuiltInToolNames = new Set(this.#builtInToolNames);
+			const previousActiveTools = [...this.#host.agent.state.tools];
+			const previousActiveToolNames = this.getActiveToolNames();
+			const previousEnabledToolNames = new Set(this.#enabledToolNames);
+			const previousToolPredicateNames = this.#toolPredicateNames;
+			const previousCodeModeDirectToolNames = this.#codeModeDirectToolNames;
+			const previousCodeModeDirectWireSignature = this.#codeModeDirectWireSignature;
+			const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
+			const previousPendingXdevMountDelta = this.#pendingXdevMountDelta
+				? {
+						added: new Set(this.#pendingXdevMountDelta.added),
+						removed: new Set(this.#pendingXdevMountDelta.removed),
+					}
+				: undefined;
+			const previousBaseSystemPrompt = this.#baseSystemPrompt;
+			const previousBasePromptXdevNames = this.#basePromptXdevNames;
+			const previousLastAppliedToolSignature = this.#lastAppliedToolSignature;
+			const previousPromptModelKey = this.#promptModelKey;
+			const previousAgentSystemPrompt = [...this.#host.agent.state.systemPrompt];
+			const restorePreviousState = (): void => {
+				for (const name of this.#toolRegistry.keys()) this.#toolRegistry.delete(name);
+				for (const [name, tool] of previousRegistry) this.#toolRegistry.set(name, tool);
+				this.#builtInToolNames.clear();
+				for (const name of previousBuiltInToolNames) this.#builtInToolNames.add(name);
+				this.#setMountedNames(previousMounted);
+				this.#pendingXdevMountDelta = previousPendingXdevMountDelta
+					? {
+							added: new Set(previousPendingXdevMountDelta.added),
+							removed: new Set(previousPendingXdevMountDelta.removed),
+						}
+					: undefined;
+				this.#enabledToolNames = previousEnabledToolNames;
+				this.#toolPredicateNames = previousToolPredicateNames;
+				this.#codeModeDirectToolNames = previousCodeModeDirectToolNames;
+				this.#codeModeDirectWireSignature = previousCodeModeDirectWireSignature;
+				this.#setActiveToolNames?.(previousActiveToolNames);
+				this.#host.agent.setTools(previousActiveTools);
+				const currentAgentSystemPrompt = this.#host.agent.state.systemPrompt;
+				if (
+					currentAgentSystemPrompt.length !== previousAgentSystemPrompt.length ||
+					currentAgentSystemPrompt.some((part, index) => part !== previousAgentSystemPrompt[index])
+				) {
+					this.#host.agent.setSystemPrompt(previousAgentSystemPrompt);
+				}
+				this.#baseSystemPrompt = previousBaseSystemPrompt;
+				this.#basePromptXdevNames = previousBasePromptXdevNames;
+				this.#lastAppliedToolSignature = previousLastAppliedToolSignature;
+				this.#promptModelKey = previousPromptModelKey;
+				restorePreviousSkillState();
+			};
+
+			try {
+				await this.#reconcileSkillSearchTool();
+				await this.#refreshBaseSystemPrompt();
+			} catch (error) {
+				restorePreviousState();
+				throw error;
+			}
+		});
 		this.#host.notifyCommandMetadataChanged();
 	}
 

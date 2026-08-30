@@ -16,6 +16,7 @@ import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
+import type { ExternalPeerProvider } from "../integrations/prime-bridge";
 import type { LocalProtocolOptions } from "../internal-urls";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
@@ -61,6 +62,7 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
+import { SkillSearchTool } from "./skill-search";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
@@ -103,6 +105,7 @@ export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
 export * from "./security-scan";
+export * from "./skill-search";
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
@@ -318,6 +321,8 @@ export interface ToolSession {
 	pendingFullWriteDescription?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
+	/** Optional provider for Prime peers outside the local AgentRegistry. */
+	externalPeerProvider?: ExternalPeerProvider;
 	/** Idle→parked→revive lifecycle owner; lets the hub kill a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
 	agentLifecycle?: () => AgentLifecycleManager;
 	/** Get artifacts directory for artifact:// URLs */
@@ -487,6 +492,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	skill_search: s => new SkillSearchTool(s),
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
@@ -660,6 +666,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
+		if (name === "skill_search")
+			return (
+				session.settings.get("skills.enabled") !== false &&
+				(requestedTools === undefined || requestedTools.includes("read"))
+			);
+
 		if (name === "manage_skill")
 			return (
 				session.settings.get("autolearn.enabled") &&

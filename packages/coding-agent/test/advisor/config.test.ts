@@ -57,6 +57,29 @@ describe("discoverAdvisorConfigs", () => {
 		expect(sharedInstructions).toBe("Shared baseline for all advisors.");
 	});
 
+	it("parses task and adversarial roles while preserving an omitted role", async () => {
+		const yaml = [
+			"advisors:",
+			"  - name: Task",
+			"    role: task",
+			"  - name: Adversarial",
+			"    role: adversarial",
+			"  - name: Legacy",
+		].join("\n");
+		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
+
+		const { advisors } = await discoverAdvisorConfigs(tmp, agentDir);
+		expect(advisors.map(advisor => advisor.role)).toEqual(["task", "adversarial", undefined]);
+	});
+
+	it("rejects an advisor with an invalid role through existing schema handling", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		await Bun.write(file, ["advisors:", "  - name: Invalid", "    role: observer"].join("\n"));
+
+		expect((await discoverAdvisorConfigs(tmp, agentDir)).advisors).toEqual([]);
+		expect(await loadWatchdogConfigFile(file)).toEqual({ advisors: [] });
+	});
+
 	it("distinguishes omitted tools, explicit no-tools, and invalid-only lists", async () => {
 		const yaml = [
 			"advisors:",
@@ -219,6 +242,19 @@ describe("WATCHDOG.yml file round-trip", () => {
 		await saveWatchdogConfigFile(file, doc);
 		const loaded = await loadWatchdogConfigFile(file);
 		expect(loaded).toEqual(doc);
+	});
+	it("round-trips task and adversarial roles while omitting absent roles", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		const roleDoc: WatchdogConfigDoc = {
+			advisors: [{ name: "Task", role: "task" }, { name: "Adversarial", role: "adversarial" }, { name: "Legacy" }],
+		};
+
+		await saveWatchdogConfigFile(file, roleDoc);
+		expect(await loadWatchdogConfigFile(file)).toEqual(roleDoc);
+		const text = await Bun.file(file).text();
+		expect(text).toContain("role: task");
+		expect(text).toContain("role: adversarial");
+		expect(text).not.toMatch(/name: Legacy\s+role:/);
 	});
 
 	it("serializes block-style YAML that the discovery path also parses", async () => {
