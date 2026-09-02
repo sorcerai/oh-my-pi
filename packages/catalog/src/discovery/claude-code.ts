@@ -41,15 +41,16 @@ export async function fetchClaudeCodeModels(timeoutMs = DEFAULT_TIMEOUT_MS): Pro
 }
 
 /** Union the SDK's rows over the static list, keyed by model id (static wins). */
-function mergeClaudeCodeModels(
+export function mergeClaudeCodeModels(
 	models: readonly { value: string; displayName: string; supportedEffortLevels?: readonly string[] }[],
 ): ModelSpec<"claude-agent-sdk">[] {
 	if (models.length === 0) return CLAUDE_CODE_STATIC_MODELS;
 	const byId = new Map(CLAUDE_CODE_STATIC_MODELS.map(model => [model.id, model]));
-	const fallbackContextWindow = CLAUDE_CODE_STATIC_MODELS[0]?.contextWindow ?? 200_000;
 	for (const info of models) {
 		if (!info.value || byId.has(info.value)) continue;
-		const model = buildClaudeCodeModel(info.value, info.displayName || info.value, fallbackContextWindow);
+		// The SDK's model list carries no context window, so a discovered id
+		// gets the conservative floor rather than any static entry's window.
+		const model = buildClaudeCodeModel(info.value, info.displayName || info.value, 200_000);
 		// SDK levels are exactly the `Effort` string values minus "minimal".
 		const efforts = info.supportedEffortLevels as readonly Effort[] | undefined;
 		byId.set(info.value, efforts?.length ? { ...model, thinking: { mode: "effort", efforts: [...efforts] } } : model);

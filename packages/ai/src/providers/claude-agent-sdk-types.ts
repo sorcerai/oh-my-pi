@@ -29,6 +29,8 @@ export interface ClaudeSdkHandlers {
 
 export interface ClaudeAgentSdkOptions extends StreamOptions {
 	cwd?: string;
+	/** Effort level chosen in the model picker; mapped to the SDK's `effort`. */
+	reasoning?: Effort;
 	claudeSdkHandlers?: ClaudeSdkHandlers;
 	/** Sink for provider-executed tool results (the agent's cursorOnToolResult buffer). */
 	onToolResult?: CursorToolResultHandler;

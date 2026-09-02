@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { setClaudeSdkQueryForTests } from "../src/providers/claude-agent-sdk";
 import { streamSimple } from "../src/stream";
-import type { Context, Model } from "../src/types";
+import { type Context, Effort, type Model } from "../src/types";
 
 afterEach(() => setClaudeSdkQueryForTests(undefined));
 
 describe("claude-agent-sdk dispatch", () => {
-	test("streamSimple routes claude-agent-sdk models to the SDK provider", async () => {
+	test("streamSimple routes claude-agent-sdk models to the SDK provider and carries the chosen effort", async () => {
 		let called = false;
-		setClaudeSdkQueryForTests((() => {
+		const capture: { params?: { options?: { effort?: string } } } = {};
+		setClaudeSdkQueryForTests(((params: { options?: { effort?: string } }) => {
 			called = true;
+			capture.params = params;
 			async function* gen() {
 				yield { type: "system", subtype: "init", session_id: "s" };
 				yield { type: "result", subtype: "success", is_error: false, result: "", usage: {} };
@@ -33,8 +35,10 @@ describe("claude-agent-sdk dispatch", () => {
 			tools: [],
 		} as unknown as Context;
 		const events: string[] = [];
-		for await (const e of streamSimple(model, context, { apiKey: "claude-code-login" })) events.push(e.type);
+		for await (const e of streamSimple(model, context, { apiKey: "claude-code-login", reasoning: Effort.High }))
+			events.push(e.type);
 		expect(called).toBe(true);
 		expect(events.at(-1)).toBe("done");
+		expect(capture.params?.options?.effort).toBe("high");
 	});
 });
