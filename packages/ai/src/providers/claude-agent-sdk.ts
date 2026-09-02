@@ -1,9 +1,10 @@
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import packageJson from "../../package.json" with { type: "json" };
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
 	Effort,
+	ImageContent,
 	Message,
 	Model,
 	StreamFunction,
@@ -72,6 +73,39 @@ function flattenHistory(context: Context): string {
 		.join("\n\n");
 }
 
+function imagesOf(content: Message["content"]): ImageContent[] {
+	if (!Array.isArray(content)) return [];
+	return (content as { type?: string }[]).filter((p): p is ImageContent => p.type === "image");
+}
+
+/**
+ * The SDK takes either a plain string or an async iterable of SDK user
+ * messages. Images only survive the second form, so text-only turns keep the
+ * cheaper string and only an image-bearing turn pays for the iterable.
+ */
+function buildPrompt(text: string, images: ImageContent[]): string | AsyncIterable<unknown> {
+	if (images.length === 0) return text;
+	const message = {
+		type: "user" as const,
+		parent_tool_use_id: null,
+		message: {
+			role: "user" as const,
+			content: [
+				...images.map(img => ({
+					type: "image" as const,
+					source: { type: "base64" as const, media_type: img.mimeType, data: img.data },
+				})),
+				{ type: "text" as const, text },
+			],
+		},
+	};
+	return {
+		async *[Symbol.asyncIterator]() {
+			yield message;
+		},
+	};
+}
+
 function isLoginError(message: string): boolean {
 	return /not logged in|\/login|authentication|invalid api key|please run .*login/i.test(message);
 }
@@ -107,22 +141,48 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 		options?.signal?.addEventListener("abort", onAbort, { once: true });
 		// SDK stream block index -> index in output.content.
 		const openBlocks = new Map<number, number>();
-		const endedStreamedIndexes = new Set<number>();
+		// SDK block indexes whose content_block_stop already arrived. Keyed by
+		// SDK index, not content index: a message where only block 0 streamed
+		// must still emit block 1's text from the full `assistant` message.
+		const endedSdkIndexes = new Set<number>();
 		// Per-stream, not module-level: two concurrent turns must not share
 		// tool-id -> name state, or a result pairs against the wrong call.
 		const toolNamesById = new Map<string, string>();
+		// tool_use ids emitted but not yet answered by a tool_result.
+		const pendingToolUseIds = new Set<string>();
 		let started = false;
 		const ensureStart = () => {
 			if (started) return;
 			started = true;
 			stream.push({ type: "start", partial: output });
 		};
+		// A toolCall marked kCursorExecResolved is skipped by the agent loop, so
+		// nothing else will ever produce a result for it. Left unpaired it is an
+		// unanswered call in the transcript, which rebuild reads as freshly
+		// runnable on resume. Answer every one before the turn ends.
+		const settlePendingToolCalls = async () => {
+			const onToolResult = options?.onToolResult;
+			if (!onToolResult) return;
+			for (const id of pendingToolUseIds) {
+				await onToolResult({
+					role: "toolResult",
+					toolCallId: id,
+					toolName: toolNamesById.get(id) ?? "tool",
+					content: [{ type: "text", text: "Claude Code turn ended before this tool returned a result" }],
+					isError: true,
+					timestamp: Date.now(),
+				});
+			}
+			pendingToolUseIds.clear();
+		};
 
 		try {
 			const query = await loadQuery();
 			const resumeId = handlers?.getSdkSessionId();
 			const last = lastUserMessage(context);
-			const prompt = resumeId ? textOf((last?.content ?? "") as Message["content"]) : flattenHistory(context);
+			const lastContent = (last?.content ?? "") as Message["content"];
+			const promptText = resumeId ? textOf(lastContent) : flattenHistory(context);
+			const prompt = buildPrompt(promptText, imagesOf(lastContent));
 			// `reasoning` rides on the runtime options object (SimpleStreamOptions)
 			// but is not declared on StreamOptions, which ClaudeAgentSdkOptions
 			// extends. Read it through a narrow structural cast, as cursor does
@@ -157,7 +217,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 					...(effort ? { effort } : {}),
 					...(canUseTool ? { canUseTool } : {}),
 					pathToClaudeCodeExecutable: resolveExecutable(),
-					env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "oh-my-pi" },
+					env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: `oh-my-pi/${packageJson.version}` },
 				},
 			});
 
@@ -177,13 +237,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 					case "stream_event": {
 						if (msg.parent_tool_use_id) break;
 						ensureStart();
-						handleStreamEvent(
-							msg.event as Record<string, unknown>,
-							output,
-							stream,
-							openBlocks,
-							endedStreamedIndexes,
-						);
+						handleStreamEvent(msg.event as Record<string, unknown>, output, stream, openBlocks, endedSdkIndexes);
 						break;
 					}
 					case "assistant": {
@@ -193,20 +247,27 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 							msg.message as { content: unknown[] },
 							output,
 							stream,
-							endedStreamedIndexes,
+							endedSdkIndexes,
 							toolNamesById,
+							pendingToolUseIds,
 						);
 						break;
 					}
 					case "user": {
 						if (msg.parent_tool_use_id) break;
-						await handleUserMessage(msg.message as { content: unknown }, options?.onToolResult, toolNamesById);
+						await handleUserMessage(
+							msg.message as { content: unknown },
+							options?.onToolResult,
+							toolNamesById,
+							pendingToolUseIds,
+						);
 						break;
 					}
 					case "result": {
 						ensureStart();
 						closeOpenBlocks(output, stream, openBlocks);
-						applyUsage(output, model, msg.usage as Record<string, number> | undefined);
+						await settlePendingToolCalls();
+						applyUsage(output, msg.usage as Record<string, number> | undefined);
 						if (msg.is_error) {
 							const errText = Array.isArray(msg.errors)
 								? msg.errors.join("; ")
@@ -227,6 +288,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 			// Generator ended without a result message.
 			ensureStart();
 			closeOpenBlocks(output, stream, openBlocks);
+			await settlePendingToolCalls();
 			if (abort.signal.aborted) {
 				output.stopReason = "aborted";
 				stream.push({ type: "error", reason: "aborted", error: output });
@@ -236,6 +298,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 		} catch (err) {
 			ensureStart();
 			closeOpenBlocks(output, stream, openBlocks);
+			await settlePendingToolCalls();
 			const message = err instanceof Error ? err.message : String(err);
 			if (abort.signal.aborted) {
 				output.stopReason = "aborted";
@@ -262,7 +325,7 @@ function handleStreamEvent(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	openBlocks: Map<number, number>,
-	ended: Set<number>,
+	endedSdkIndexes: Set<number>,
 ): void {
 	const index = Number(event.index ?? -1);
 	switch (event.type) {
@@ -298,7 +361,9 @@ function handleStreamEvent(
 			const ci = openBlocks.get(index);
 			if (ci === undefined) break;
 			openBlocks.delete(index);
-			ended.add(ci);
+			// The SDK block index, so the full `assistant` message can tell
+			// which of its blocks already streamed and which never did.
+			endedSdkIndexes.add(index);
 			endBlock(output, stream, ci);
 			break;
 		}
@@ -328,11 +393,11 @@ function handleAssistantMessage(
 	message: { content: unknown[] },
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
-	ended: Set<number>,
+	endedSdkIndexes: Set<number>,
 	toolNamesById: Map<string, string>,
+	pendingToolUseIds: Set<string>,
 ): void {
-	const streamedText = ended.size > 0;
-	for (const raw of message.content ?? []) {
+	for (const [sdkIndex, raw] of (message.content ?? []).entries()) {
 		const block = raw as {
 			type: string;
 			id?: string;
@@ -343,6 +408,7 @@ function handleAssistantMessage(
 		if (block.type === "tool_use" && block.id && block.name) {
 			const name = claudeCodeToolDisplayName(block.name);
 			toolNamesById.set(block.id, name);
+			pendingToolUseIds.add(block.id);
 			const toolCall: ToolCall & Record<symbol, unknown> = {
 				type: "toolCall",
 				id: block.id,
@@ -356,8 +422,9 @@ function handleAssistantMessage(
 			const ci = output.content.length - 1;
 			stream.push({ type: "toolcall_start", contentIndex: ci, partial: output });
 			stream.push({ type: "toolcall_end", contentIndex: ci, toolCall, partial: output });
-		} else if (block.type === "text" && !streamedText && block.text) {
-			// Non-streaming fallback: no stream_event arrived for this text.
+		} else if (block.type === "text" && !endedSdkIndexes.has(sdkIndex) && block.text) {
+			// Non-streaming fallback: no stream_event closed a block at THIS
+			// index, so its text never reached the stream.
 			output.content.push({ type: "text", text: block.text });
 			const ci = output.content.length - 1;
 			stream.push({ type: "text_start", contentIndex: ci, partial: output });
@@ -371,11 +438,15 @@ async function handleUserMessage(
 	message: { content: unknown },
 	onToolResult: ClaudeAgentSdkOptions["onToolResult"],
 	toolNamesById: Map<string, string>,
+	pendingToolUseIds: Set<string>,
 ): Promise<void> {
-	if (!Array.isArray(message.content) || !onToolResult) return;
+	if (!Array.isArray(message.content)) return;
 	for (const raw of message.content) {
 		const block = raw as { type: string; tool_use_id?: string; content?: unknown; is_error?: boolean };
 		if (block.type !== "tool_result" || !block.tool_use_id) continue;
+		// Answered, so the terminal paths must not synthesize a result for it.
+		pendingToolUseIds.delete(block.tool_use_id);
+		if (!onToolResult) continue;
 		const text =
 			typeof block.content === "string"
 				? block.content
@@ -394,11 +465,10 @@ async function handleUserMessage(
 	}
 }
 
-function applyUsage(
-	output: AssistantMessage,
-	model: Model<"claude-agent-sdk">,
-	usage: Record<string, number> | undefined,
-): void {
+// ponytail: token counts only, no calculateCost. Claude Code turns bill against
+// the user's subscription, not per-token, so any cost we computed would be
+// fiction. usage.cost stays zero.
+function applyUsage(output: AssistantMessage, usage: Record<string, number> | undefined): void {
 	if (!usage) return;
 	output.usage.input = usage.input_tokens ?? 0;
 	output.usage.output = usage.output_tokens ?? 0;
@@ -406,5 +476,4 @@ function applyUsage(
 	output.usage.cacheWrite = usage.cache_creation_input_tokens ?? 0;
 	output.usage.totalTokens =
 		output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-	calculateCost(model, output.usage);
 }
