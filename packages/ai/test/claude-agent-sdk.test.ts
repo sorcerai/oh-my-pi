@@ -345,6 +345,68 @@ describe("streamClaudeAgentSdk", () => {
 		expect(Object.values(done.message.usage.cost).every(v => v === 0)).toBe(true);
 	});
 
+	test("a stale resume id is cleared and the turn is retried once without it", async () => {
+		const h = handlers("sess-1");
+		let resets = 0;
+		const reset = h.resetSdkSession.bind(h);
+		h.resetSdkSession = () => {
+			resets++;
+			reset();
+		};
+		const calls: { options?: { resume?: string } }[] = [];
+		let attempt = 0;
+		setClaudeSdkQueryForTests(((params: { options?: { resume?: string } }) => {
+			calls.push(params);
+			attempt++;
+			if (attempt === 1) throw new Error("No conversation found with session ID: sess-1");
+			async function* gen() {
+				yield init;
+				yield success;
+			}
+			return gen();
+		}) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: h }));
+		expect(calls.length).toBe(2);
+		expect(calls[0].options?.resume).toBe("sess-1");
+		expect(calls[1].options?.resume).toBeUndefined();
+		expect(resets).toBe(1);
+		// resetSdkSession() cleared the id; attempt two's init re-set it.
+		expect(h.id).toBe("sess-1");
+		expect(events.map(e => e.type)).toEqual(["start", "done"]);
+	});
+
+	test("a non-session failure is not retried", async () => {
+		let attempt = 0;
+		setClaudeSdkQueryForTests((() => {
+			attempt++;
+			throw new Error("connection reset");
+		}) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers("sess-1") }));
+		expect(attempt).toBe(1);
+		expect(events.at(-1)?.type).toBe("error");
+	});
+
+	test("SDK block indexes reset between assistant messages", async () => {
+		// Message 1 streams block 0; message 2 delivers block 0 only as a full
+		// assistant text block, so it must still be emitted.
+		const assistantOne = {
+			type: "assistant",
+			session_id: "sess-1",
+			parent_tool_use_id: null,
+			message: { content: [{ type: "text", text: "hello" }] },
+		};
+		const assistantTwo = {
+			type: "assistant",
+			session_id: "sess-1",
+			parent_tool_use_id: null,
+			message: { content: [{ type: "text", text: "after tools" }] },
+		};
+		setClaudeSdkQueryForTests(fake([init, ...textEvents, assistantOne, assistantTwo, success]) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		const done = events.at(-1) as unknown as { message: { content: { type: string; text: string }[] } };
+		expect(done.message.content.filter(c => c.type === "text").map(c => c.text)).toEqual(["hello", "after tools"]);
+	});
+
 	test("client app env carries the pi-ai version", async () => {
 		const capture: { params?: { options?: { env?: Record<string, string> } } } = {};
 		setClaudeSdkQueryForTests(fake([init, success], capture) as never);
