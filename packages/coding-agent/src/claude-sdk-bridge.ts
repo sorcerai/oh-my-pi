@@ -47,6 +47,16 @@ export class ClaudeSdkBridge implements ClaudeSdkHandlers {
 		this.options.persistSessionId(undefined);
 	}
 
+	/**
+	 * Drop cached state so the next read re-loads from whatever branch is now
+	 * current. Unlike `resetSdkSession()` this persists nothing: the host is
+	 * moving to a transcript that owns its own id, not discarding one.
+	 */
+	forgetSdkSession(): void {
+		this.#sessionId = undefined;
+		this.#loaded = false;
+	}
+
 	async requestToolPermission(req: ClaudeSdkPermissionRequest): Promise<ClaudeSdkPermissionResult> {
 		const settings = this.options.getSettings();
 		const mode: ApprovalMode = this.options.isAutoApprove()
