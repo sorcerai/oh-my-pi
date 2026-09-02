@@ -40,6 +40,22 @@ describe("ClaudeSdkBridge", () => {
 		t.b.resetSdkSession();
 		expect(t.b.getSdkSessionId()).toBeUndefined();
 	});
+	test("reset before the first read tombstones an id persisted by an earlier process", () => {
+		let persisted: string | undefined = "abc";
+		const b = new ClaudeSdkBridge({
+			getSettings: () => undefined,
+			isAutoApprove: () => false,
+			hasUI: () => false,
+			select: async () => undefined,
+			loadPersistedSessionId: () => persisted,
+			persistSessionId: id => {
+				persisted = id;
+			},
+		});
+		b.resetSdkSession();
+		expect(persisted).toBeUndefined();
+		expect(b.getSdkSessionId()).toBeUndefined();
+	});
 	test("read tier auto-allows under write mode without prompting", async () => {
 		const t = bridge({}, { "tools.approvalMode": "write" });
 		const r = await t.b.requestToolPermission({
