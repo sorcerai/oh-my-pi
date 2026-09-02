@@ -82,6 +82,7 @@ Each provider has one or more environment variables that supply a key when no st
 | Provider ID      | Environment variable(s)                                                                                                                          |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `anthropic`      | `ANTHROPIC_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` (Foundry mode prefers `ANTHROPIC_FOUNDRY_API_KEY` when `CLAUDE_CODE_USE_FOUNDRY=true`)         |
+| `claude-code`    | none (uses Claude Code's own login; run `claude login`)                                                                                          |
 | `openai`         | `OPENAI_API_KEY`                                                                                                                                 |
 | `openai-codex`   | `OPENAI_CODEX_OAUTH_TOKEN`                                                                                                                       |
 | `google`         | `GEMINI_API_KEY`                                                                                                                                 |
@@ -156,7 +157,7 @@ Each provider has one or more environment variables that supply a key when no st
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
-OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable; `claude-code` is similar but detects Claude Code's login instead of running OAuth. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
 ### `.env` discovery and precedence
 
@@ -185,6 +186,10 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 - values may be wrapped in single or double quotes, which are stripped;
 - values containing a NUL byte are dropped;
 - an `OMP_`-prefixed key is also mirrored to the matching `PI_`-prefixed name.
+
+### Claude Code (subscription)
+
+`claude-code` runs turns through the Claude Agent SDK, which spawns your installed Claude Code binary. Your Pro/Max/Team subscription is billed the same way Claude Code bills it, and no token is stored in omp. Log in once with `claude login`, then `/login claude-code` to confirm and `--model claude-code/opus` (aliases `opus`, `sonnet`, `haiku` or explicit ids). Claude Code executes its own tools; omp shows them in the transcript and routes each permission request through `tools.approvalMode` and `tools.approval.claude-code.<Tool>`. Set `OMP_CLAUDE_CODE_EXECUTABLE` to pin a specific binary.
 
 ## Built-in local engines
 

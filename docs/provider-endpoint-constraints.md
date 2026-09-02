@@ -87,6 +87,22 @@ policy:
 Codex intentionally does not forward caller max-token caps because the backend
 rejects them.
 
+### Claude Agent SDK
+
+`claude-agent-sdk` is not an HTTP endpoint; it spawns the local Claude Code
+binary through `@anthropic-ai/claude-agent-sdk`. Keep these SDK-specific:
+
+- no HTTP retry policy — the SDK owns its own process/transport retries
+- no `toolChoice` — the SDK does not accept forced tool selection
+- no custom tools — omp's `context.tools` are never sent; Claude Code executes
+  only its own built-in tools
+- thinking effort is passed as the SDK's `effort` option, not a wire field
+- session continuity resumes by the SDK's own session id, not a provider chain
+  id
+- results carry real token counts but always cost `{ input: 0, output: 0,
+  cacheRead: 0, cacheWrite: 0 }` — the turn is billed against the user's
+  Claude Code subscription, not metered per token
+
 ### Anthropic/OpenAI dual-surface providers
 
 Kimi Code and Synthetic can be called as OpenAI-compatible or
