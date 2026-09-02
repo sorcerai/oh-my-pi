@@ -20,7 +20,8 @@ export type KnownApi =
 	| "ollama-chat"
 	| "cursor-agent"
 	| "gitlab-duo-agent"
-	| "devin-agent";
+	| "devin-agent"
+	| "claude-agent-sdk";
 export type Api = KnownApi | (string & {});
 
 /** Canonical thinking transport used by a model. */

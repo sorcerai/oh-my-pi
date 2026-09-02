@@ -24,6 +24,7 @@ import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
+import { CLAUDE_CODE_STATIC_MODELS } from "../src/provider-models/claude-code-static";
 import {
 	allowsUnauthenticatedCatalogDiscovery,
 	type CatalogDiscoveryConfig,
@@ -264,6 +265,7 @@ function applyGlobalModelsDevFallback(
 		if (
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
+			model.provider === "claude-code" ||
 			model.provider === "baseten" ||
 			// Meta's first-party rows come from the reviewed seed; a same-id
 			// gateway row would overwrite their display names.
@@ -669,6 +671,10 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("firepass")) {
 		allModels.push(...FIREPASS_STATIC_MODELS);
 	}
+	// Seed the Claude Code aliases + pinned ids so a fresh install resolves the
+	// descriptor's `defaultModel` ("opus") without spawning the Claude Code CLI.
+	// Live discovery is additive on top of these, never authoritative.
+	allModels.push(...CLAUDE_CODE_STATIC_MODELS);
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
 	// built-in catalog. The descriptor deliberately has NO `catalogDiscovery`, so it is
 	// excluded from the generator's discovery loop (`isCatalogDescriptor` filter above):

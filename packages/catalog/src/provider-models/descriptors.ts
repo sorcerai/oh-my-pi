@@ -65,6 +65,7 @@ import {
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
 import {
+	claudeCodeModelManagerOptions,
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
@@ -162,6 +163,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CURSOR_ACCESS_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cursorModelManagerOptions(config),
 		catalogDiscovery: { label: "Cursor", envVars: ["CURSOR_API_KEY"], oauthProvider: "cursor" },
+	},
+	{
+		id: "claude-code",
+		defaultModel: "opus",
+		envVars: [],
+		createModelManagerOptions: () => claudeCodeModelManagerOptions(),
+		allowUnauthenticated: true,
+		catalogDiscovery: { label: "Claude Code (subscription)", allowUnauthenticated: true },
 	},
 	{
 		id: "deepinfra",
