@@ -37,8 +37,9 @@ export class ClaudeSdkBridge implements ClaudeSdkHandlers {
 	}
 
 	resetSdkSession(): void {
-		this.#loaded = true;
-		if (this.#sessionId === undefined) return;
+		// Load first. A reset landing before the first read must still tombstone an
+		// id persisted by an earlier process, or the next resume revives it.
+		if (this.getSdkSessionId() === undefined) return;
 		this.#sessionId = undefined;
 		// Persisted as a tombstone entry: the loader takes the LAST
 		// claude_sdk_session entry on the branch, so an absent id reads back as
