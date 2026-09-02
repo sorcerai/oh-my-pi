@@ -6,6 +6,7 @@ import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
+import { CLAUDE_CODE_STATIC_MODELS } from "./claude-code-static";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -263,3 +264,21 @@ export interface ZaiModelManagerConfig {}
 export function zaiModelManagerOptions(_config: ZaiModelManagerConfig = {}): ModelManagerOptions<"anthropic-messages"> {
 	return { providerId: "zai" };
 }
+
+// ---------------------------------------------------------------------------
+// Claude Code (Claude Agent SDK, subscription-billed)
+// ---------------------------------------------------------------------------
+
+export function claudeCodeModelManagerOptions(): ModelManagerOptions<"claude-agent-sdk"> {
+	return {
+		providerId: "claude-code",
+		cacheProviderId: resolveModelCacheProviderId("claude-code"),
+		staticModels: CLAUDE_CODE_STATIC_MODELS,
+		fetchDynamicModels: async () => {
+			const { fetchClaudeCodeModels } = await claudeCodeDiscovery();
+			return fetchClaudeCodeModels();
+		},
+	};
+}
+
+const claudeCodeDiscovery = once(() => import("../discovery/claude-code"));
