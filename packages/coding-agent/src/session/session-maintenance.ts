@@ -512,6 +512,10 @@ export class SessionMaintenance {
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				cacheWarmSuffixTokens:
 					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+				// The warm guard above is narrower than the age window, so age
+				// victims are only ever reclaimed once the cache is cold (same
+				// idle rule as the supersede pass).
+				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
 			}),
 		);
 		if (result.prunedCount === 0) {
