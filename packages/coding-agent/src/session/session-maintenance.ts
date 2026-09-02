@@ -449,6 +449,10 @@ export class SessionMaintenance {
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
 				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+				// The warm guard above is narrower than the age window, so age
+				// victims are only ever reclaimed once the cache is cold (same
+				// idle rule as the supersede pass).
+				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
 			}),
 		);
 		if (result.prunedCount === 0) {
