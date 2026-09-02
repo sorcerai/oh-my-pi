@@ -4,6 +4,7 @@ import type { AuthProviderId, LoginProviderId } from "@oh-my-pi/pi-catalog/compa
 import { amazonBedrockTransport } from "./amazon-bedrock";
 import { bedrockMantleTransport } from "./bedrock-mantle";
 import { buildProviderDefinition, type ProviderTransport } from "./build";
+import { claudeCodeProvider } from "./claude-code";
 import { cloudflareAiGatewayTransport } from "./cloudflare-ai-gateway";
 import { museCodeTransport } from "./muse-code";
 import type { ProviderDefinition } from "./types";
@@ -28,9 +29,10 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
  * env map, login list, refresh/login dispatch, CLI callback maps) derives
  * from this registry.
  */
-export const PROVIDER_REGISTRY: readonly ProviderDefinition[] = authProviders().map(policy =>
-	buildProviderDefinition(policy, TRANSPORTS[policy.id]),
-);
+export const PROVIDER_REGISTRY: readonly ProviderDefinition[] = [
+	...authProviders().map(policy => buildProviderDefinition(policy, TRANSPORTS[policy.id])),
+	claudeCodeProvider,
+];
 
 const BY_ID: Record<string, ProviderDefinition> = Object.fromEntries(PROVIDER_REGISTRY.map(p => [p.id, p]));
 
@@ -46,4 +48,4 @@ type _CheckRegistryComplete = _MissingCatalogProviders extends never
 true satisfies _CheckRegistryComplete;
 
 /** Loginable providers (those whose auth policy declares a `login` flow). */
-export type OAuthProviderUnion = LoginProviderId;
+export type OAuthProviderUnion = LoginProviderId | typeof claudeCodeProvider.id;
