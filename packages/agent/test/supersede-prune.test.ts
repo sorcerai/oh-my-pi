@@ -667,3 +667,39 @@ describe("cache-stable boundary — warm prefix protection", () => {
 		expect(resultMessage(result2).prunedAt).toBeDefined(); // at/after boundary, in tail -> pruned
 	});
 });
+
+describe("age-based prune under the warm-cache guard", () => {
+	// Root cause of "pruning never fires": the per-turn cache guard (8k suffix)
+	// is narrower than the age protect window (40k newer tool tokens), so an
+	// age victim is always skipped as "warm". The guard must lift once the
+	// provider cache is cold (idle >= idleFlushMs), exactly like the supersede
+	// pass, so deep age victims are reclaimed for free after any long pause.
+	const build = (): { entries: SessionEntry[]; old: SessionMessageEntry } => {
+		const [call1, old] = readPair("src/old.ts", BIG_TEXT, T0);
+		const big = textEntry(BIG_TEXT, T0 + 500); // newer tokens > protectTokens, suffix > guard
+		const [call2, recent] = readPair("src/recent.ts", FILE_CONTENT, T0 + 1_000);
+		return { entries: [call1, old, big, call2, recent], old };
+	};
+	const base = {
+		protectTokens: 100, // `old` is well outside the age window
+		minimumSavings: 0,
+		protectedTools: [],
+		cacheWarmSuffixTokens: 200, // but deep inside the warm prefix
+		idleFlushMs: 90 * 60_000,
+	};
+
+	test("kept while the cache is warm", () => {
+		const { entries, old } = build();
+		const run = pruneToolOutputs(entries, tokenizer, { ...base, now: T0 + 2_000 });
+		expect(run.prunedCount).toBe(0);
+		expect(resultText(old)).toBe(BIG_TEXT);
+	});
+
+	test("pruned once idle exceeds idleFlushMs (cache cold)", () => {
+		const { entries, old } = build();
+		const run = pruneToolOutputs(entries, tokenizer, { ...base, now: T0 + 1_000 + 91 * 60_000 });
+		expect(run.prunedCount).toBe(1);
+		expect(resultText(old)).toMatch(/^\[Output truncated - \d+ tokens\]$/);
+		expect(run.tokensSaved).toBeGreaterThan(1_000);
+	});
+});
