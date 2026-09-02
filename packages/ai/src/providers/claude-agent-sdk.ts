@@ -3,7 +3,6 @@ import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
-	Effort,
 	ImageContent,
 	Message,
 	Model,
@@ -110,6 +109,19 @@ function isLoginError(message: string): boolean {
 	return /not logged in|\/login|authentication|invalid api key|please run .*login/i.test(message);
 }
 
+/**
+ * A `resume` id the CLI no longer knows about. Claude Code prunes its own
+ * session store, so a persisted id outlives the session it names. Actual
+ * strings from the CLI: "No conversation found with session ID: <id>",
+ * "No conversation found to continue", "Could not resume session <id> — its
+ * environment has expired", "Unable to load transcript from file".
+ */
+function isUnknownSessionError(message: string): boolean {
+	return /no conversation found|could not resume|unable to load transcript|session[^.]*\b(not found|does not exist|expired|unknown|invalid)|(not found|does not exist|expired|unknown|invalid)[^.]*\bsession/i.test(
+		message,
+	);
+}
+
 export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 	model: Model<"claude-agent-sdk">,
 	context: Context,
@@ -136,7 +148,9 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 	};
 
 	(async () => {
-		const abort = new AbortController();
+		// Reassigned per attempt: the retry below needs a controller that the
+		// failed attempt cannot have aborted from the inside.
+		let abort = new AbortController();
 		const onAbort = () => abort.abort();
 		options?.signal?.addEventListener("abort", onAbort, { once: true });
 		// SDK stream block index -> index in output.content.
@@ -178,16 +192,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 
 		try {
 			const query = await loadQuery();
-			const resumeId = handlers?.getSdkSessionId();
-			const last = lastUserMessage(context);
-			const lastContent = (last?.content ?? "") as Message["content"];
-			const promptText = resumeId ? textOf(lastContent) : flattenHistory(context);
-			const prompt = buildPrompt(promptText, imagesOf(lastContent));
-			// `reasoning` rides on the runtime options object (SimpleStreamOptions)
-			// but is not declared on StreamOptions, which ClaudeAgentSdkOptions
-			// extends. Read it through a narrow structural cast, as cursor does
-			// for its own dispatch-injected fields.
-			const effort = claudeCodeEffort((options as { reasoning?: Effort } | undefined)?.reasoning);
+			let resumeId = handlers?.getSdkSessionId();
 			// Fail closed: with no host bridge there is nothing to approve
 			// against, and registering a blanket-allow callback would be
 			// bypassPermissions by another name. With no callback the SDK
@@ -201,99 +206,155 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 					): Promise<ClaudeSdkPermissionResult> =>
 						handlers.requestToolPermission({ toolName, input, signal: opts.signal })
 				: undefined;
-			const q = query({
-				prompt,
-				options: {
-					model: model.id,
-					cwd: options?.cwd,
-					resume: resumeId,
-					includePartialMessages: true,
-					abortController: abort,
-					systemPrompt: {
-						type: "preset",
-						preset: "claude_code",
-						append: context.systemPrompt?.length ? context.systemPrompt.join("\n\n") : undefined,
-					},
-					...(effort ? { effort } : {}),
-					...(canUseTool ? { canUseTool } : {}),
-					pathToClaudeCodeExecutable: resolveExecutable(),
-					env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: `oh-my-pi/${packageJson.version}` },
-				},
-			});
+			// At most one recovery attempt. Claude Code prunes its session
+			// store, so a persisted `resume` id can name a session that no
+			// longer exists and fails the whole turn. Drop the id and replay
+			// the flattened history once.
+			//
+			// Retry only while nothing has reached the stream: a second
+			// `ensureStart()` is a no-op, so a retry after partial content
+			// would splice two turns into one message. If content was already
+			// emitted the error is surfaced as-is.
+			let retried = false;
+			const canRetryResume = (message: string) =>
+				!retried &&
+				resumeId !== undefined &&
+				!started &&
+				output.content.length === 0 &&
+				!abort.signal.aborted &&
+				!options?.signal?.aborted &&
+				isUnknownSessionError(message);
+			const beginRetry = () => {
+				retried = true;
+				resumeId = undefined;
+				handlers?.resetSdkSession();
+			};
 
-			for await (const raw of q) {
-				const msg = raw as Record<string, unknown>;
-				if (abort.signal.aborted) break;
-				switch (msg.type) {
-					case "system": {
-						if (msg.subtype === "init" && typeof msg.session_id === "string")
-							handlers?.setSdkSessionId(msg.session_id);
-						break;
-					}
-					case "rate_limit_event": {
-						handlers?.onRateLimit?.(msg.rate_limit_info);
-						break;
-					}
-					case "stream_event": {
-						if (msg.parent_tool_use_id) break;
-						ensureStart();
-						handleStreamEvent(msg.event as Record<string, unknown>, output, stream, openBlocks, endedSdkIndexes);
-						break;
-					}
-					case "assistant": {
-						if (msg.parent_tool_use_id) break;
-						ensureStart();
-						handleAssistantMessage(
-							msg.message as { content: unknown[] },
-							output,
-							stream,
-							endedSdkIndexes,
-							toolNamesById,
-							pendingToolUseIds,
-						);
-						break;
-					}
-					case "user": {
-						if (msg.parent_tool_use_id) break;
-						await handleUserMessage(
-							msg.message as { content: unknown },
-							options?.onToolResult,
-							toolNamesById,
-							pendingToolUseIds,
-						);
-						break;
-					}
-					case "result": {
-						ensureStart();
-						closeOpenBlocks(output, stream, openBlocks);
-						await settlePendingToolCalls();
-						applyUsage(output, msg.usage as Record<string, number> | undefined);
-						if (msg.is_error) {
-							const errText = Array.isArray(msg.errors)
-								? msg.errors.join("; ")
-								: String(msg.result ?? msg.subtype ?? "Claude Code failed");
-							output.stopReason = "error";
-							output.errorMessage = errText;
-							stream.push({ type: "error", reason: "error", error: output });
-							return;
+			attempts: for (;;) {
+				abort = new AbortController();
+				if (options?.signal?.aborted) abort.abort();
+				const last = lastUserMessage(context);
+				const lastContent = (last?.content ?? "") as Message["content"];
+				const promptText = resumeId ? textOf(lastContent) : flattenHistory(context);
+				const prompt = buildPrompt(promptText, imagesOf(lastContent));
+				const effort = claudeCodeEffort(options?.reasoning);
+
+				// `query()` is inside the try: it can reject the resume id
+				// synchronously, and that failure has to reach the retry too.
+				try {
+					const q = query({
+						prompt,
+						options: {
+							model: model.id,
+							cwd: options?.cwd,
+							resume: resumeId,
+							includePartialMessages: true,
+							abortController: abort,
+							systemPrompt: {
+								type: "preset",
+								preset: "claude_code",
+								append: context.systemPrompt?.length ? context.systemPrompt.join("\n\n") : undefined,
+							},
+							...(effort ? { effort } : {}),
+							...(canUseTool ? { canUseTool } : {}),
+							pathToClaudeCodeExecutable: resolveExecutable(),
+							env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: `oh-my-pi/${packageJson.version}` },
+						},
+					});
+					for await (const raw of q) {
+						const msg = raw as Record<string, unknown>;
+						if (abort.signal.aborted) break;
+						switch (msg.type) {
+							case "system": {
+								if (msg.subtype === "init" && typeof msg.session_id === "string")
+									handlers?.setSdkSessionId(msg.session_id);
+								break;
+							}
+							case "rate_limit_event": {
+								handlers?.onRateLimit?.(msg.rate_limit_info);
+								break;
+							}
+							case "stream_event": {
+								if (msg.parent_tool_use_id) break;
+								ensureStart();
+								handleStreamEvent(
+									msg.event as Record<string, unknown>,
+									output,
+									stream,
+									openBlocks,
+									endedSdkIndexes,
+								);
+								break;
+							}
+							case "assistant": {
+								if (msg.parent_tool_use_id) break;
+								ensureStart();
+								handleAssistantMessage(
+									msg.message as { content: unknown[] },
+									output,
+									stream,
+									endedSdkIndexes,
+									toolNamesById,
+									pendingToolUseIds,
+								);
+								break;
+							}
+							case "user": {
+								if (msg.parent_tool_use_id) break;
+								await handleUserMessage(
+									msg.message as { content: unknown },
+									options?.onToolResult,
+									toolNamesById,
+									pendingToolUseIds,
+								);
+								break;
+							}
+							case "result": {
+								const errText = msg.is_error
+									? Array.isArray(msg.errors)
+										? msg.errors.join("; ")
+										: String(msg.result ?? msg.subtype ?? "Claude Code failed")
+									: "";
+								// Tested before ensureStart(): that call flips `started`,
+								// which would make the retry guard unsatisfiable.
+								if (msg.is_error && canRetryResume(errText)) {
+									beginRetry();
+									continue attempts;
+								}
+								ensureStart();
+								closeOpenBlocks(output, stream, openBlocks);
+								await settlePendingToolCalls();
+								applyUsage(output, msg.usage as Record<string, number> | undefined);
+								if (msg.is_error) {
+									output.stopReason = "error";
+									output.errorMessage = errText;
+									stream.push({ type: "error", reason: "error", error: output });
+									return;
+								}
+								output.stopReason = "stop";
+								stream.push({ type: "done", reason: "stop", message: output });
+								return;
+							}
+							default:
+								break;
 						}
-						output.stopReason = "stop";
-						stream.push({ type: "done", reason: "stop", message: output });
-						return;
 					}
-					default:
-						break;
+					// Generator ended without a result message.
+					ensureStart();
+					closeOpenBlocks(output, stream, openBlocks);
+					await settlePendingToolCalls();
+					if (abort.signal.aborted) {
+						output.stopReason = "aborted";
+						stream.push({ type: "error", reason: "aborted", error: output });
+					} else {
+						stream.push({ type: "done", reason: "stop", message: output });
+					}
+					return;
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					if (!canRetryResume(message)) throw err;
+					beginRetry();
 				}
-			}
-			// Generator ended without a result message.
-			ensureStart();
-			closeOpenBlocks(output, stream, openBlocks);
-			await settlePendingToolCalls();
-			if (abort.signal.aborted) {
-				output.stopReason = "aborted";
-				stream.push({ type: "error", reason: "aborted", error: output });
-			} else {
-				stream.push({ type: "done", reason: "stop", message: output });
 			}
 		} catch (err) {
 			ensureStart();
@@ -432,6 +493,10 @@ function handleAssistantMessage(
 			stream.push({ type: "text_end", contentIndex: ci, content: block.text, partial: output });
 		}
 	}
+	// SDK block indexes restart at 0 for every assistant message. Cleared at
+	// the end, not the start: this message's own streamed blocks still have to
+	// be recognised as already-emitted by the loop above.
+	endedSdkIndexes.clear();
 }
 
 async function handleUserMessage(
