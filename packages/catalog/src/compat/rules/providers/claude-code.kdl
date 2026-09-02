@@ -1,0 +1,11 @@
+// Provider-wire compat for "claude-code": the Claude Code SDK advertises its
+// own effort vocabulary via `ModelInfo.supportedEffortLevels`, and the
+// `claude-agent-sdk` stream passes the selected level straight through as the
+// `effort` option. The ladder is a property of the local CLI, not of the
+// underlying model lineage, so it is declared provider-wide rather than
+// derived from the Anthropic class rules.
+
+provider "claude-code" {
+	thinking-mode "effort"
+	thinking-efforts "low" "medium" "high" "xhigh" "max"
+}

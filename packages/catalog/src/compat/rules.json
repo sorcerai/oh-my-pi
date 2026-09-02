@@ -113,6 +113,7 @@
 		"providers/baseten.kdl",
 		"providers/bedrock-mantle.kdl",
 		"providers/cerebras.kdl",
+		"providers/claude-code.kdl",
 		"providers/cline-pass.kdl",
 		"providers/cloudflare-ai-gateway.kdl",
 		"providers/coreweave.kdl",
@@ -7525,6 +7526,22 @@
 				"wire": {
 					"wireModelIdMode": "cline-pass",
 					"thinkingFormat": "openai"
+				}
+			},
+			{
+				"source": "providers/claude-code.kdl:8",
+				"providers": [
+					"claude-code"
+				],
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					]
 				}
 			},
 			{
