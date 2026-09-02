@@ -164,6 +164,13 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				},
 				{ label: "dirty" },
 			];
+		case "advisors":
+			return [
+				{ label: "two advisors running", session: { advisorStatus: "running" } },
+				{ label: "quota exhausted", session: { advisorStatus: "quota_exhausted", advisorPromptTokens: 5_800_000 } },
+				{ label: "error", session: { advisorStatus: "error" } },
+				{ label: "paused, no turns yet", session: { advisorStatus: "paused", advisorPromptTokens: 0 } },
+			];
 		case "cost":
 			return [
 				{ label: "metered + premium + advisor" },
