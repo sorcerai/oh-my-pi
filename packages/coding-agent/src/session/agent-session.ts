@@ -4949,6 +4949,9 @@ export class AgentSession {
 		// newSession()).
 		this.#clearCheckpointRuntimeState();
 		this.#clearSessionScopedToolState();
+		// `/clear` keeps the session file and wipes its transcript, so it reaches
+		// neither the history-rewrite seam nor a new branch: tombstone here.
+		this.agent.claudeSdkHandlers?.resetSdkSession();
 
 		// Rotate provider-side session state so a provider that keeps conversation
 		// history server-side starts a brand-new exchange rather than resuming the
@@ -5721,12 +5724,10 @@ export class AgentSession {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
-		// The Claude Agent SDK resumes server-side history by session id. Every
-		// caller of this method has just replaced the omp transcript (/clear,
-		// new session, session switch, branch, handoff), so resuming would
-		// continue a conversation omp no longer has. Fork resets separately —
-		// it keeps the transcript and does not come through here.
-		this.agent.claudeSdkHandlers?.resetSdkSession();
+		// This boundary switches to a different transcript after it is loaded:
+		// forget the old Claude SDK server-side session rather than tombstoning the
+		// target session. Transcript-discarding operations reset explicitly.
+		this.agent.claudeSdkHandlers?.forgetSdkSession?.();
 	}
 
 	/**
@@ -8569,6 +8570,11 @@ export class AgentSession {
 	}
 
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
+		// Not codex-specific and must run before the model guard below: every
+		// caller here rewrote the transcript (prune, shake, dropImages, rewind,
+		// branch, branchFromBtw, navigateTree, snapcompact rescue), so a resumed
+		// SDK session would still hold the tokens omp just reclaimed. Idempotent.
+		this.agent.claudeSdkHandlers?.resetSdkSession();
 		const currentModel = this.model;
 		if (currentModel?.api !== "openai-codex-responses") return;
 		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
