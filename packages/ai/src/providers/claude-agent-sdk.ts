@@ -420,7 +420,9 @@ function handleStreamEvent(
 		case "content_block_start": {
 			const block = event.content_block as { type?: string } | undefined;
 			if (block?.type === "text") {
-				output.content.push({ type: "text", text: "" });
+				const textBlock = { type: "text" as const, text: "" };
+				streamedTextBlocks.add(textBlock);
+				output.content.push(textBlock);
 				openBlocks.set(index, output.content.length - 1);
 				streamedSdkIndexes.add(index);
 				stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
@@ -476,6 +478,13 @@ function closeOpenBlocks(
 	openBlocks.clear();
 }
 
+/** Text blocks created by `content_block_start`, by identity; never blocks from an `assistant` echo. */
+const streamedTextBlocks = new WeakSet<object>();
+
+function wasStreamed(output: AssistantMessage, text: string): boolean {
+	return output.content.some(c => c.type === "text" && streamedTextBlocks.has(c) && c.text === text);
+}
+
 function handleAssistantMessage(
 	message: { content: unknown[] },
 	output: AssistantMessage,
@@ -509,9 +518,13 @@ function handleAssistantMessage(
 			const ci = output.content.length - 1;
 			stream.push({ type: "toolcall_start", contentIndex: ci, partial: output });
 			stream.push({ type: "toolcall_end", contentIndex: ci, toolCall, partial: output });
-		} else if (block.type === "text" && !streamedSdkIndexes.has(sdkIndex) && block.text) {
-			// Non-streaming fallback: no stream_event opened a block at THIS
-			// index, so its text never reached the stream.
+		} else if (block.type === "text" && block.text && !wasStreamed(output, block.text)) {
+			// Non-streaming fallback. The SDK echoes every block as its own
+			// `assistant` message with a single-element content array, so the
+			// echo's position never matches the stream index (a text block that
+			// streamed at index 1 after a thinking block echoes at position 0).
+			// Index keying therefore cannot work; a block is a duplicate iff a
+			// block the stream opened already carries the same text.
 			output.content.push({ type: "text", text: block.text });
 			const ci = output.content.length - 1;
 			stream.push({ type: "text_start", contentIndex: ci, partial: output });
