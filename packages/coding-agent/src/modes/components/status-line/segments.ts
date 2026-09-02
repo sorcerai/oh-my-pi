@@ -450,6 +450,41 @@ const subagentsSegment: StatusLineSegment = {
 	},
 };
 
+/**
+ * Advisor roster at a glance: count, model ids, and prompt tokens the advisors
+ * have consumed this session (input + cacheRead, i.e. what each advisor turn
+ * actually re-sends), colored by the worst runtime status. The badge on the
+ * `model` segment only says "advisors exist"; this segment says what they cost.
+ * `getAdvisorStats()` is an in-memory aggregate, so per-frame calls are cheap.
+ */
+const advisorsSegment: StatusLineSegment = {
+	id: "advisors",
+	render(ctx) {
+		const stats = ctx.session.getAdvisorStats?.();
+		if (!stats?.configured || stats.advisors.length === 0) {
+			return { content: "", visible: false };
+		}
+		const statuses = stats.advisors.map(a => a.status);
+		const color = statuses.includes("error")
+			? "error"
+			: statuses.includes("quota_exhausted")
+				? "warning"
+				: statuses.includes("running")
+					? "success"
+					: "dim";
+		const models = stats.advisors
+			.map(a => a.model?.id)
+			.filter((id): id is string => Boolean(id))
+			.map(id => (id.length > 14 ? `${id.slice(0, 13)}…` : id));
+		const promptTokens = stats.tokens.input + stats.tokens.cacheRead;
+		const parts = [`${stats.advisors.length}`];
+		if (models.length) parts.push(models.join("/"));
+		if (promptTokens) parts.push(formatNumber(promptTokens));
+		const label = theme.icon.advisor && theme.icon.advisor !== "(adv)" ? theme.icon.advisor : "adv";
+		return { content: theme.fg(color, withIcon(label, parts.join(theme.sep.dot))), visible: true };
+	},
+};
+
 const tokenInSegment: StatusLineSegment = {
 	id: "token_in",
 	render(ctx) {
@@ -797,6 +832,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	git: gitSegment,
 	pr: prSegment,
 	subagents: subagentsSegment,
+	advisors: advisorsSegment,
 	token_in: tokenInSegment,
 	token_out: tokenOutSegment,
 	token_total: tokenTotalSegment,
