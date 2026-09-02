@@ -224,4 +224,131 @@ describe("streamClaudeAgentSdk", () => {
 		expect(last.type).toBe("error");
 		expect(last.error.errorMessage).toContain("claude login");
 	});
+
+	test("streams thinking blocks", async () => {
+		const ev = (event: unknown) => ({ type: "stream_event", session_id: "sess-1", parent_tool_use_id: null, event });
+		setClaudeSdkQueryForTests(
+			fake([
+				init,
+				ev({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+				ev({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }),
+				ev({ type: "content_block_stop", index: 0 }),
+				success,
+			]) as never,
+		);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		expect(events.map(e => e.type)).toEqual(["start", "thinking_start", "thinking_delta", "thinking_end", "done"]);
+		const end = events.at(-2) as unknown as { content: string };
+		expect(end.content).toBe("hmm");
+	});
+
+	test("assistant text at an index that never streamed is not dropped", async () => {
+		// Block 0 streamed; block 1 arrived only on the full assistant message.
+		const assistantBoth = {
+			type: "assistant",
+			session_id: "sess-1",
+			parent_tool_use_id: null,
+			message: {
+				content: [
+					{ type: "text", text: "hello" },
+					{ type: "text", text: "second block" },
+				],
+			},
+		};
+		setClaudeSdkQueryForTests(fake([init, ...textEvents, assistantBoth, success]) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		const done = events.at(-1) as unknown as { message: { content: { type: string; text: string }[] } };
+		const texts = done.message.content.filter(c => c.type === "text").map(c => c.text);
+		expect(texts).toEqual(["hello", "second block"]);
+	});
+
+	test("an unpaired tool_use gets a synthetic error result when the turn ends", async () => {
+		const results: ToolResultMessage[] = [];
+		const assistantToolUse = {
+			type: "assistant",
+			session_id: "sess-1",
+			parent_tool_use_id: null,
+			message: { content: [{ type: "tool_use", id: "tu9", name: "Bash", input: { command: "sleep 1" } }] },
+		};
+		// No `user` tool_result ever arrives before the result message.
+		setClaudeSdkQueryForTests(fake([init, assistantToolUse, success]) as never);
+		await collect(
+			streamClaudeAgentSdk(model, ctx(), {
+				claudeSdkHandlers: handlers(),
+				onToolResult: r => {
+					results.push(r);
+					return undefined;
+				},
+			}),
+		);
+		expect(results).toHaveLength(1);
+		expect(results[0]).toMatchObject({ toolCallId: "tu9", toolName: "bash", isError: true });
+		expect(results[0].content[0]).toMatchObject({ text: expect.stringContaining("before this tool returned") });
+	});
+
+	test("aborting mid-stream ends with reason aborted", async () => {
+		const controller = new AbortController();
+		const released = Promise.withResolvers<void>();
+		setClaudeSdkQueryForTests((() => {
+			async function* gen() {
+				yield init;
+				controller.abort();
+				released.resolve();
+				await released.promise;
+				yield success;
+			}
+			return gen();
+		}) as never);
+		const events = await collect(
+			streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers(), signal: controller.signal }),
+		);
+		const last = events.at(-1) as { type: string; reason: string };
+		expect(last.type).toBe("error");
+		expect(last.reason).toBe("aborted");
+	});
+
+	test("images in the last user message are sent as SDK content blocks", async () => {
+		const capture: { params?: { prompt?: unknown } } = {};
+		setClaudeSdkQueryForTests(fake([init, success], capture) as never);
+		const c = ctx();
+		c.messages[0] = {
+			role: "user",
+			content: [
+				{ type: "image", data: "AAAA", mimeType: "image/png" },
+				{ type: "text", text: "what is this" },
+			],
+			timestamp: 1,
+		} as never;
+		await collect(streamClaudeAgentSdk(model, c, { claudeSdkHandlers: handlers() }));
+		const messages: { message: { content: { type: string; source?: { data: string; media_type: string } }[] } }[] =
+			[];
+		for await (const m of capture.params!.prompt as AsyncIterable<never>) messages.push(m);
+		expect(messages).toHaveLength(1);
+		const blocks = messages[0].message.content;
+		expect(blocks[0]).toMatchObject({
+			type: "image",
+			source: { type: "base64", media_type: "image/png", data: "AAAA" },
+		});
+		expect(blocks.at(-1)).toMatchObject({ type: "text" });
+	});
+
+	test("usage carries token counts but no cost", async () => {
+		// Priced model on purpose: with a zero-cost model this test would pass
+		// even if calculateCost were still called.
+		const priced = { ...model, cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 } } as typeof model;
+		setClaudeSdkQueryForTests(fake([init, success]) as never);
+		const events = await collect(streamClaudeAgentSdk(priced, ctx(), { claudeSdkHandlers: handlers() }));
+		const done = events.at(-1) as unknown as {
+			message: { usage: { totalTokens: number; cost: Record<string, number> } };
+		};
+		expect(done.message.usage.totalTokens).toBe(19);
+		expect(Object.values(done.message.usage.cost).every(v => v === 0)).toBe(true);
+	});
+
+	test("client app env carries the pi-ai version", async () => {
+		const capture: { params?: { options?: { env?: Record<string, string> } } } = {};
+		setClaudeSdkQueryForTests(fake([init, success], capture) as never);
+		await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		expect(capture.params?.options?.env?.CLAUDE_AGENT_SDK_CLIENT_APP).toMatch(/^oh-my-pi\/\d+\.\d+\.\d+/);
+	});
 });
