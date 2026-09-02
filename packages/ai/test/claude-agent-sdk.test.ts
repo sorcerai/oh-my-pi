@@ -136,6 +136,45 @@ describe("streamClaudeAgentSdk", () => {
 		expect(done.message.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	// Real haiku order (captured 2026-09-02): the SDK echoes EACH block as its own
+	// `assistant` message with a one-element content array, so the text block that
+	// streamed at index 1 echoes at position 0. Index keying double-emitted "OK".
+	test("per-block assistant echoes after a thinking block do not duplicate the streamed text", async () => {
+		const ev = (event: Record<string, unknown>) => ({
+			type: "stream_event",
+			session_id: "sess-1",
+			parent_tool_use_id: null,
+			event,
+		});
+		const sdkOrder = [
+			init,
+			ev({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+			ev({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }),
+			{
+				type: "assistant",
+				session_id: "sess-1",
+				parent_tool_use_id: null,
+				message: { content: [{ type: "thinking", thinking: "hmm" }] },
+			},
+			ev({ type: "content_block_stop", index: 0 }),
+			ev({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+			ev({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "OK" } }),
+			{
+				type: "assistant",
+				session_id: "sess-1",
+				parent_tool_use_id: null,
+				message: { content: [{ type: "text", text: "OK" }] },
+			},
+			ev({ type: "content_block_stop", index: 1 }),
+			success,
+		];
+		setClaudeSdkQueryForTests(fake(sdkOrder) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		const done = events.at(-1) as unknown as { message: { content: { type: string; text?: string }[] } };
+		expect(done.message.content.filter(c => c.type === "text")).toEqual([{ type: "text", text: "OK" }]);
+		expect(events.filter(e => e.type === "text_start")).toHaveLength(1);
+	});
+
 	// The other direction of the same guard: a block the stream never opened
 	// must still reach the transcript from the full `assistant` message.
 	test("emits an assistant text block at an index that never streamed", async () => {
