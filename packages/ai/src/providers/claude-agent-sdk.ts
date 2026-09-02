@@ -128,9 +128,11 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 			// extends. Read it through a narrow structural cast, as cursor does
 			// for its own dispatch-injected fields.
 			const effort = claudeCodeEffort((options as { reasoning?: Effort } | undefined)?.reasoning);
-			// Fail closed: with no host bridge there is nothing to approve against,
-			// and registering a blanket-allow callback would be bypassPermissions
-			// by another name. Omitting it lets the SDK deny.
+			// Fail closed: with no host bridge there is nothing to approve
+			// against, and registering a blanket-allow callback would be
+			// bypassPermissions by another name. With no callback the SDK
+			// makes every "ask" decision a terminal denial, so nothing is
+			// auto-approved beyond its own default allow rules.
 			const canUseTool = handlers
 				? async (
 						toolName: string,
