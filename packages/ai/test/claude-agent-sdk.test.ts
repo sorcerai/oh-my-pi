@@ -110,6 +110,69 @@ describe("streamClaudeAgentSdk", () => {
 		expect(done.message.usage).toMatchObject({ input: 10, output: 2, cacheRead: 3, cacheWrite: 4 });
 	});
 
+	// Regression: the real SDK emits the full `assistant` message BEFORE
+	// `content_block_stop` (verified against @anthropic-ai/claude-agent-sdk
+	// 0.3.251). A dedup guard keyed on stop-arrival is therefore always empty
+	// when the assistant fallback reads it, and every streamed block is emitted
+	// a second time — a "Reply with exactly: OK" turn came back as "OKOK".
+	test("does not re-emit a streamed block when `assistant` arrives before content_block_stop", async () => {
+		const sdkOrder = [
+			init,
+			textEvents[0],
+			textEvents[1],
+			textEvents[2],
+			{ type: "assistant", session_id: "sess-1", message: { content: [{ type: "text", text: "hello" }] } },
+			textEvents[3],
+			success,
+		];
+		setClaudeSdkQueryForTests(fake(sdkOrder) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		expect(events.map(e => e.type)).toEqual(["start", "text_start", "text_delta", "text_delta", "text_end", "done"]);
+		const done = events.at(-1) as unknown as { message: { content: { type: string; text?: string }[] } };
+		expect(done.message.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	// The other direction of the same guard: a block the stream never opened
+	// must still reach the transcript from the full `assistant` message.
+	test("emits an assistant text block at an index that never streamed", async () => {
+		const sdkOrder = [
+			init,
+			textEvents[0],
+			textEvents[1],
+			textEvents[2],
+			{
+				type: "assistant",
+				session_id: "sess-1",
+				message: {
+					content: [
+						{ type: "text", text: "hello" },
+						{ type: "text", text: " world" },
+					],
+				},
+			},
+			textEvents[3],
+			success,
+		];
+		setClaudeSdkQueryForTests(fake(sdkOrder) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		expect(events.map(e => e.type)).toEqual([
+			"start",
+			"text_start",
+			"text_delta",
+			"text_delta",
+			"text_start",
+			"text_delta",
+			"text_end",
+			"text_end",
+			"done",
+		]);
+		const done = events.at(-1) as unknown as { message: { content: { type: string; text?: string }[] } };
+		expect(done.message.content).toEqual([
+			{ type: "text", text: "hello" },
+			{ type: "text", text: " world" },
+		]);
+	});
+
 	test("captures session id from init and passes resume next time", async () => {
 		const h = handlers();
 		setClaudeSdkQueryForTests(fake([init, success]) as never);
