@@ -1887,7 +1887,14 @@ export class AgentSession {
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
-			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
+			rebaseAfterCompaction: () => {
+				this.#stats.rebaseAfterCompaction();
+				// Deliberately over-broad: this fires for every compaction path
+				// (manual, auto, recovery) plus image drops and failed-turn drops.
+				// All of them rewrite the transcript, and the only cost of an extra
+				// reset is one full replay instead of an SDK-side resume.
+				this.agent.claudeSdkHandlers?.resetSdkSession();
+			},
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -5714,6 +5721,12 @@ export class AgentSession {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
+		// The Claude Agent SDK resumes server-side history by session id. Every
+		// caller of this method has just replaced the omp transcript (/clear,
+		// new session, session switch, branch, handoff), so resuming would
+		// continue a conversation omp no longer has. Fork resets separately —
+		// it keeps the transcript and does not come through here.
+		this.agent.claudeSdkHandlers?.resetSdkSession();
 	}
 
 	/**
@@ -8045,6 +8058,10 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// Fork clones the transcript into a second session file. Both copies
+			// would otherwise resume the same server-side Claude Agent SDK session
+			// and interleave their turns into it.
+			this.agent.claudeSdkHandlers?.resetSdkSession();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
