@@ -10,6 +10,8 @@ export interface GallerySessionOptions {
 	cost?: number;
 	premiumRequests?: number;
 	advisorCost?: number;
+	/** Prompt tokens (input + cacheRead) the advisors have consumed; drives the `advisors` segment sample. */
+	advisorPromptTokens?: number;
 	goalStatus?: "active" | "paused" | "complete" | "budget-limited" | "dropped";
 }
 
@@ -71,6 +73,33 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 			options.advisorStatus
 				? { configured: true, advisors: [{ status: options.advisorStatus }] }
 				: { configured: false, advisors: [] },
+		getAdvisorStats: () => {
+			if (!options.advisorStatus) {
+				return {
+					configured: false,
+					active: false,
+					tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					advisors: [],
+				};
+			}
+			const promptTokens = options.advisorPromptTokens ?? 1_240_000;
+			return {
+				configured: true,
+				active: options.advisorStatus === "running",
+				tokens: {
+					input: 2_400,
+					output: 800,
+					reasoning: 0,
+					cacheRead: promptTokens - 2_400,
+					cacheWrite: 0,
+					total: 0,
+				},
+				advisors: [
+					{ name: "Task", status: options.advisorStatus, model: { id: "gpt-5.6-sol" } },
+					{ name: "Adversarial", status: options.advisorStatus, model: { id: "gemini-3.1-pro" } },
+				],
+			};
+		},
 		getAdvisorCost: () => options.advisorCost ?? 0.08,
 		isAdvisorUsingSubscription: () => false,
 		getPrewalkState: () => false,
