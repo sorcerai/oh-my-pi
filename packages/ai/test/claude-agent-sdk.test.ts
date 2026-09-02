@@ -1,6 +1,10 @@
 // packages/ai/test/claude-agent-sdk.test.ts
 import { afterEach, describe, expect, test } from "bun:test";
-import { setClaudeSdkQueryForTests, streamClaudeAgentSdk } from "../src/providers/claude-agent-sdk";
+import {
+	resolveSettingSources,
+	setClaudeSdkQueryForTests,
+	streamClaudeAgentSdk,
+} from "../src/providers/claude-agent-sdk";
 import type { ClaudeSdkHandlers } from "../src/providers/claude-agent-sdk-types";
 import type { Context, Model, ToolResultMessage } from "../src/types";
 import { kCursorExecResolved } from "../src/utils/block-symbols";
@@ -468,6 +472,21 @@ describe("streamClaudeAgentSdk", () => {
 		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
 		const done = events.at(-1) as unknown as { message: { content: { type: string; text: string }[] } };
 		expect(done.message.content.filter(c => c.type === "text").map(c => c.text)).toEqual(["hello", "after tools"]);
+	});
+
+	test("drops user-level Claude Code settings by default so global hooks never run inside an omp turn", async () => {
+		const capture: { params?: { options?: { settingSources?: string[] } } } = {};
+		setClaudeSdkQueryForTests(fake([init, success], capture) as never);
+		await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		expect(capture.params?.options?.settingSources).toEqual(["project", "local"]);
+	});
+
+	test("resolveSettingSources honors OMP_CLAUDE_CODE_SETTING_SOURCES", () => {
+		expect(resolveSettingSources({})).toEqual(["project", "local"]);
+		expect(resolveSettingSources({ OMP_CLAUDE_CODE_SETTING_SOURCES: "all" })).toBeUndefined();
+		expect(resolveSettingSources({ OMP_CLAUDE_CODE_SETTING_SOURCES: "none" })).toEqual([]);
+		expect(resolveSettingSources({ OMP_CLAUDE_CODE_SETTING_SOURCES: "user, project" })).toEqual(["user", "project"]);
+		expect(resolveSettingSources({ OMP_CLAUDE_CODE_SETTING_SOURCES: "bogus,local" })).toEqual(["local"]);
 	});
 
 	test("client app env carries the pi-ai version", async () => {
