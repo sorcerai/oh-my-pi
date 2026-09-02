@@ -16,6 +16,13 @@ export interface ClaudeSdkHandlers {
 	getSdkSessionId(): string | undefined;
 	setSdkSessionId(id: string): void;
 	resetSdkSession(): void;
+	/**
+	 * Drop the cached session id WITHOUT persisting a tombstone. Used when the
+	 * host swaps to a different transcript that owns its own id (session switch),
+	 * where `resetSdkSession()` would write into the transcript being switched
+	 * into and strand its session.
+	 */
+	forgetSdkSession?(): void;
 	requestToolPermission(req: ClaudeSdkPermissionRequest): Promise<ClaudeSdkPermissionResult>;
 	onRateLimit?(info: unknown): void;
 }
