@@ -41,6 +41,7 @@ import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { FallbackParam, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
+import type { ClaudeAgentSdkOptions, ClaudeSdkHandlers } from "./providers/claude-agent-sdk-types";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
 import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
@@ -85,6 +86,7 @@ export interface ApiOptionsMap {
 	"cursor-agent": CursorOptions;
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
+	"claude-agent-sdk": ClaudeAgentSdkOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
 type _CheckExhaustive =
@@ -624,6 +626,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	thinkingBudgets?: ThinkingBudgets;
 	/** Cursor exec handlers for local tool execution */
 	cursorExecHandlers?: CursorExecHandlers;
+	/** Host bridge for the claude-agent-sdk provider (session id + tool permission). */
+	claudeSdkHandlers?: ClaudeSdkHandlers;
 	/**
 	 * Optional rewrite of Cursor exec-channel tool results. May return a Promise.
 	 *
