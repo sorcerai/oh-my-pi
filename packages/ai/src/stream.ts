@@ -25,6 +25,8 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-lim
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
+import { streamClaudeAgentSdk } from "./providers/claude-agent-sdk";
+import type { ClaudeAgentSdkOptions } from "./providers/claude-agent-sdk-types";
 import { coworkFetch } from "./providers/cowork-fetch";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -1016,6 +1018,13 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "claude-agent-sdk":
+			return streamClaudeAgentSdk(
+				providerModel as Model<"claude-agent-sdk">,
+				context,
+				providerOptions as ClaudeAgentSdkOptions,
+			);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -2308,6 +2317,13 @@ function mapOptionsForApi<TApi extends Api>(
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
+		case "claude-agent-sdk":
+			return castApi<"claude-agent-sdk">({
+				...base,
+				cwd: options?.cwd,
+				claudeSdkHandlers: options?.claudeSdkHandlers,
+				onToolResult: options?.cursorOnToolResult,
+			});
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);
 	}
