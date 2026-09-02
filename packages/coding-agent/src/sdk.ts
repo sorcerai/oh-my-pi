@@ -43,6 +43,7 @@ import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
+import { CLAUDE_SDK_SESSION_CUSTOM_TYPE, ClaudeSdkBridge } from "./claude-sdk-bridge";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
@@ -2805,6 +2806,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			allowDirectFileMutation: cursorCanMutateFiles,
 		});
 
+		const claudeSdkBridge = new ClaudeSdkBridge({
+			getSettings: () => toolContextStore.getContext()?.settings ?? settings,
+			isAutoApprove: () => toolContextStore.getContext()?.autoApprove === true,
+			hasUI: () => extensionRunner.hasUI(),
+			select: (prompt, choices, opts) => extensionRunner.getUIContext().select(prompt, choices, opts),
+			// Branch, not entries: `getEntries()` spans sibling branches, so after a
+			// branch switch it would resurrect the other branch's SDK session. Last
+			// entry wins, including the `{}` tombstone `resetSdkSession()` writes.
+			loadPersistedSessionId: () => {
+				let id: string | undefined;
+				for (const entry of sessionManager.getBranch()) {
+					if (entry.type === "custom" && entry.customType === CLAUDE_SDK_SESSION_CUSTOM_TYPE) {
+						id = (entry.data as { sdkSessionId?: string } | undefined)?.sdkSessionId;
+					}
+				}
+				return id;
+			},
+			persistSessionId: id => {
+				sessionManager.appendCustomEntry(CLAUDE_SDK_SESSION_CUSTOM_TYPE, { sdkSessionId: id });
+			},
+		});
+
 		// Resolve the inline-descriptors setting against the session-start model.
 		// `auto` enforces the per-model policy (inline for Gemini, off otherwise);
 		// like the rest of the prune machinery this is fixed for the session, so a
@@ -3260,6 +3283,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 			},
 			cursorExecHandlers,
+			claudeSdkHandlers: claudeSdkBridge,
 			getCursorTools: () => (toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
 			transformToolCallArguments,
 			resolveFallbackTool: resolveDeviceTool,

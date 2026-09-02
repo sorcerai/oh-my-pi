@@ -6,6 +6,7 @@ import {
 	type ApiKey,
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type ClaudeSdkHandlers,
 	type Context,
 	type CursorExecHandlers,
 	type CursorToolResultHandler,
@@ -274,6 +275,8 @@ export interface AgentOptions {
 	 * Cursor exec handlers for local tool execution.
 	 */
 	cursorExecHandlers?: CursorExecHandlers;
+	/** Host bridge for the claude-agent-sdk provider (session id + tool permission). */
+	claudeSdkHandlers?: ClaudeSdkHandlers;
 	/** Additional tools Cursor executes through its MCP request-context bridge, resolved before each provider call. */
 	getCursorTools?: () => AgentTool[];
 
@@ -395,6 +398,7 @@ export class Agent {
 	#maxRetryDelayMs?: number;
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	#cursorExecHandlers?: CursorExecHandlers;
+	#claudeSdkHandlers?: ClaudeSdkHandlers;
 	#getCursorTools?: () => AgentTool[];
 	#cursorOnToolResult?: CursorToolResultHandler;
 	#cwd?: string;
@@ -486,6 +490,7 @@ export class Agent {
 		this.#onSseEvent = opts.onSseEvent;
 		this.#getToolContext = opts.getToolContext;
 		this.#cursorExecHandlers = opts.cursorExecHandlers;
+		this.#claudeSdkHandlers = opts.claudeSdkHandlers;
 		this.#getCursorTools = opts.getCursorTools;
 		this.#cursorOnToolResult = opts.cursorOnToolResult;
 		this.#cwd = opts.cwd;
@@ -723,6 +728,11 @@ export class Agent {
 
 	get state(): AgentState {
 		return this.#state;
+	}
+
+	/** Host bridge for the claude-agent-sdk provider, exposed so the session can reset it on history rewrites. */
+	get claudeSdkHandlers(): ClaudeSdkHandlers | undefined {
+		return this.#claudeSdkHandlers;
 	}
 
 	get appendOnlyContext(): AppendOnlyContextManager | undefined {
@@ -1426,6 +1436,7 @@ export class Agent {
 						}
 					: undefined,
 			cursorExecHandlers: this.#cursorExecHandlers,
+			claudeSdkHandlers: this.#claudeSdkHandlers,
 			cursorOnToolResult,
 			cwd: this.#cwd,
 			getCwd: this.#cwdResolver,
