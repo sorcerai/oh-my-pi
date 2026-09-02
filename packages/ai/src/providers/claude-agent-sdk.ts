@@ -45,6 +45,27 @@ function resolveExecutable(): string | undefined {
 	return Bun.which("claude") ?? undefined;
 }
 
+type SettingSource = "user" | "project" | "local";
+const SETTING_SOURCES: readonly SettingSource[] = ["user", "project", "local"];
+/**
+ * Which Claude Code settings files the subprocess loads. Default drops `user`
+ * so the operator's global `~/.claude/settings.json` hooks (e.g. a Stop hook
+ * that starts extra turns) never run inside an omp turn; `project` stays so
+ * CLAUDE.md and project settings still apply. `OMP_CLAUDE_CODE_SETTING_SOURCES`
+ * overrides with a comma list, `all` to match the CLI default, `none` to
+ * isolate completely.
+ */
+export function resolveSettingSources(env: NodeJS.ProcessEnv = process.env): SettingSource[] | undefined {
+	const raw = env.OMP_CLAUDE_CODE_SETTING_SOURCES?.trim().toLowerCase();
+	if (!raw) return ["project", "local"];
+	if (raw === "all") return undefined;
+	if (raw === "none") return [];
+	return raw
+		.split(",")
+		.map(s => s.trim())
+		.filter((s): s is SettingSource => (SETTING_SOURCES as readonly string[]).includes(s));
+}
+
 function textOf(content: Message["content"]): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -242,6 +263,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 				const promptText = resumeId ? textOf(lastContent) : flattenHistory(context);
 				const prompt = buildPrompt(promptText, imagesOf(lastContent));
 				const effort = claudeCodeEffort(options?.reasoning);
+				const settingSources = resolveSettingSources();
 
 				// `query()` is inside the try: it can reject the resume id
 				// synchronously, and that failure has to reach the retry too.
@@ -262,6 +284,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 							...(effort ? { effort } : {}),
 							...(canUseTool ? { canUseTool } : {}),
 							pathToClaudeCodeExecutable: resolveExecutable(),
+							...(settingSources ? { settingSources } : {}),
 							env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: `oh-my-pi/${packageJson.version}` },
 						},
 					});
