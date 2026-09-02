@@ -34,6 +34,7 @@
     "gen:cursor-proto": "protoc --plugin=protoc-gen-es=../../node_modules/.bin/protoc-gen-es --es_out=src/discovery/cursor-gen --es_opt=target=ts -I ../ai/src/providers/cursor/proto ../ai/src/providers/cursor/proto/agent.proto"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.224",
     "@bufbuild/protobuf": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:"
