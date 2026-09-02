@@ -493,7 +493,7 @@ function handleAssistantMessage(
 	toolNamesById: Map<string, string>,
 	pendingToolUseIds: Set<string>,
 ): void {
-	for (const [sdkIndex, raw] of (message.content ?? []).entries()) {
+	for (const raw of message.content ?? []) {
 		const block = raw as {
 			type: string;
 			id?: string;
