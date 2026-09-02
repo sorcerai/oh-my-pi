@@ -1,0 +1,408 @@
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import type {
+	AssistantMessage,
+	AssistantMessageEventStream,
+	Context,
+	Effort,
+	Message,
+	Model,
+	StreamFunction,
+	ThinkingContent,
+	ToolCall,
+	ToolResultMessage,
+} from "../types";
+import { kCursorExecResolved, kStreamingBlockIndex, kStreamingBlockKind } from "../utils/block-symbols";
+import { createAssistantMessageEventStream } from "../utils/event-stream";
+import {
+	type ClaudeAgentSdkOptions,
+	type ClaudeSdkPermissionResult,
+	claudeCodeEffort,
+	claudeCodeToolDisplayName,
+} from "./claude-agent-sdk-types";
+
+type QueryFn = (params: { prompt: unknown; options?: Record<string, unknown> }) => AsyncIterable<unknown>;
+
+let queryOverride: QueryFn | undefined;
+
+/** Test seam: inject a fake `query`. */
+export function setClaudeSdkQueryForTests(fn: QueryFn | undefined): void {
+	queryOverride = fn;
+}
+
+/**
+ * The SDK is loaded lazily so importing this module never pulls in the
+ * Claude Code binary bridge for users who never select the provider.
+ */
+async function loadQuery(): Promise<QueryFn> {
+	if (queryOverride) return queryOverride;
+	const sdk = await import("@anthropic-ai/claude-agent-sdk");
+	return sdk.query as unknown as QueryFn;
+}
+
+function resolveExecutable(): string | undefined {
+	const fromEnv = process.env.OMP_CLAUDE_CODE_EXECUTABLE?.trim();
+	if (fromEnv) return fromEnv;
+	return Bun.which("claude") ?? undefined;
+}
+
+function textOf(content: Message["content"]): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	// `Message["content"]` is a union of array types, so a `p is TextContent`
+	// filter predicate does not narrow through it. Walk it structurally instead.
+	const parts: string[] = [];
+	for (const p of content as { type?: string; text?: string }[]) {
+		if (p.type === "text" && typeof p.text === "string") parts.push(p.text);
+	}
+	return parts.join("\n");
+}
+
+function lastUserMessage(context: Context): Message | undefined {
+	for (let i = context.messages.length - 1; i >= 0; i--) {
+		if (context.messages[i].role === "user") return context.messages[i];
+	}
+	return undefined;
+}
+
+function flattenHistory(context: Context): string {
+	return context.messages
+		.filter(m => m.role === "user" || m.role === "assistant")
+		.map(m => `${m.role}: ${textOf(m.content as Message["content"])}`.trim())
+		.filter(Boolean)
+		.join("\n\n");
+}
+
+function isLoginError(message: string): boolean {
+	return /not logged in|\/login|authentication|invalid api key|please run .*login/i.test(message);
+}
+
+export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
+	model: Model<"claude-agent-sdk">,
+	context: Context,
+	options?: ClaudeAgentSdkOptions,
+): AssistantMessageEventStream => {
+	const stream = createAssistantMessageEventStream();
+	const handlers = options?.claudeSdkHandlers;
+	const output: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: "claude-agent-sdk",
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+
+	(async () => {
+		const abort = new AbortController();
+		const onAbort = () => abort.abort();
+		options?.signal?.addEventListener("abort", onAbort, { once: true });
+		// SDK stream block index -> index in output.content.
+		const openBlocks = new Map<number, number>();
+		const endedStreamedIndexes = new Set<number>();
+		// Per-stream, not module-level: two concurrent turns must not share
+		// tool-id -> name state, or a result pairs against the wrong call.
+		const toolNamesById = new Map<string, string>();
+		let started = false;
+		const ensureStart = () => {
+			if (started) return;
+			started = true;
+			stream.push({ type: "start", partial: output });
+		};
+
+		try {
+			const query = await loadQuery();
+			const resumeId = handlers?.getSdkSessionId();
+			const last = lastUserMessage(context);
+			const prompt = resumeId ? textOf((last?.content ?? "") as Message["content"]) : flattenHistory(context);
+			// `reasoning` rides on the runtime options object (SimpleStreamOptions)
+			// but is not declared on StreamOptions, which ClaudeAgentSdkOptions
+			// extends. Read it through a narrow structural cast, as cursor does
+			// for its own dispatch-injected fields.
+			const effort = claudeCodeEffort((options as { reasoning?: Effort } | undefined)?.reasoning);
+			// Fail closed: with no host bridge there is nothing to approve against,
+			// and registering a blanket-allow callback would be bypassPermissions
+			// by another name. Omitting it lets the SDK deny.
+			const canUseTool = handlers
+				? async (
+						toolName: string,
+						input: Record<string, unknown>,
+						opts: { signal: AbortSignal },
+					): Promise<ClaudeSdkPermissionResult> =>
+						handlers.requestToolPermission({ toolName, input, signal: opts.signal })
+				: undefined;
+			const q = query({
+				prompt,
+				options: {
+					model: model.id,
+					cwd: options?.cwd,
+					resume: resumeId,
+					includePartialMessages: true,
+					abortController: abort,
+					systemPrompt: {
+						type: "preset",
+						preset: "claude_code",
+						append: context.systemPrompt?.length ? context.systemPrompt.join("\n\n") : undefined,
+					},
+					...(effort ? { effort } : {}),
+					...(canUseTool ? { canUseTool } : {}),
+					pathToClaudeCodeExecutable: resolveExecutable(),
+					env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "oh-my-pi" },
+				},
+			});
+
+			for await (const raw of q) {
+				const msg = raw as Record<string, unknown>;
+				if (abort.signal.aborted) break;
+				switch (msg.type) {
+					case "system": {
+						if (msg.subtype === "init" && typeof msg.session_id === "string")
+							handlers?.setSdkSessionId(msg.session_id);
+						break;
+					}
+					case "rate_limit_event": {
+						handlers?.onRateLimit?.(msg.rate_limit_info);
+						break;
+					}
+					case "stream_event": {
+						if (msg.parent_tool_use_id) break;
+						ensureStart();
+						handleStreamEvent(
+							msg.event as Record<string, unknown>,
+							output,
+							stream,
+							openBlocks,
+							endedStreamedIndexes,
+						);
+						break;
+					}
+					case "assistant": {
+						if (msg.parent_tool_use_id) break;
+						ensureStart();
+						handleAssistantMessage(
+							msg.message as { content: unknown[] },
+							output,
+							stream,
+							endedStreamedIndexes,
+							toolNamesById,
+						);
+						break;
+					}
+					case "user": {
+						if (msg.parent_tool_use_id) break;
+						await handleUserMessage(msg.message as { content: unknown }, options?.onToolResult, toolNamesById);
+						break;
+					}
+					case "result": {
+						ensureStart();
+						closeOpenBlocks(output, stream, openBlocks);
+						applyUsage(output, model, msg.usage as Record<string, number> | undefined);
+						if (msg.is_error) {
+							const errText = Array.isArray(msg.errors)
+								? msg.errors.join("; ")
+								: String(msg.result ?? msg.subtype ?? "Claude Code failed");
+							output.stopReason = "error";
+							output.errorMessage = errText;
+							stream.push({ type: "error", reason: "error", error: output });
+							return;
+						}
+						output.stopReason = "stop";
+						stream.push({ type: "done", reason: "stop", message: output });
+						return;
+					}
+					default:
+						break;
+				}
+			}
+			// Generator ended without a result message.
+			ensureStart();
+			closeOpenBlocks(output, stream, openBlocks);
+			if (abort.signal.aborted) {
+				output.stopReason = "aborted";
+				stream.push({ type: "error", reason: "aborted", error: output });
+			} else {
+				stream.push({ type: "done", reason: "stop", message: output });
+			}
+		} catch (err) {
+			ensureStart();
+			closeOpenBlocks(output, stream, openBlocks);
+			const message = err instanceof Error ? err.message : String(err);
+			if (abort.signal.aborted) {
+				output.stopReason = "aborted";
+				output.errorMessage = message;
+				stream.push({ type: "error", reason: "aborted", error: output });
+				return;
+			}
+			output.stopReason = "error";
+			output.errorMessage = isLoginError(message)
+				? `Claude Code is not logged in. Run 'claude login' in a terminal, then retry. (${message})`
+				: message;
+			stream.push({ type: "error", reason: "error", error: output });
+		} finally {
+			options?.signal?.removeEventListener("abort", onAbort);
+			stream.end();
+		}
+	})();
+
+	return stream;
+};
+
+function handleStreamEvent(
+	event: Record<string, unknown>,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	openBlocks: Map<number, number>,
+	ended: Set<number>,
+): void {
+	const index = Number(event.index ?? -1);
+	switch (event.type) {
+		case "content_block_start": {
+			const block = event.content_block as { type?: string } | undefined;
+			if (block?.type === "text") {
+				output.content.push({ type: "text", text: "" });
+				openBlocks.set(index, output.content.length - 1);
+				stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+			} else if (block?.type === "thinking") {
+				output.content.push({ type: "thinking", thinking: "" } satisfies ThinkingContent);
+				openBlocks.set(index, output.content.length - 1);
+				stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+			}
+			// tool_use blocks are taken from the full `assistant` message instead.
+			break;
+		}
+		case "content_block_delta": {
+			const ci = openBlocks.get(index);
+			if (ci === undefined) break;
+			const delta = event.delta as { type?: string; text?: string; thinking?: string };
+			const target = output.content[ci];
+			if (delta.type === "text_delta" && target.type === "text") {
+				target.text += delta.text ?? "";
+				stream.push({ type: "text_delta", contentIndex: ci, delta: delta.text ?? "", partial: output });
+			} else if (delta.type === "thinking_delta" && target.type === "thinking") {
+				target.thinking += delta.thinking ?? "";
+				stream.push({ type: "thinking_delta", contentIndex: ci, delta: delta.thinking ?? "", partial: output });
+			}
+			break;
+		}
+		case "content_block_stop": {
+			const ci = openBlocks.get(index);
+			if (ci === undefined) break;
+			openBlocks.delete(index);
+			ended.add(ci);
+			endBlock(output, stream, ci);
+			break;
+		}
+		default:
+			break;
+	}
+}
+
+function endBlock(output: AssistantMessage, stream: AssistantMessageEventStream, ci: number): void {
+	const target = output.content[ci];
+	if (target.type === "text")
+		stream.push({ type: "text_end", contentIndex: ci, content: target.text, partial: output });
+	else if (target.type === "thinking")
+		stream.push({ type: "thinking_end", contentIndex: ci, content: target.thinking, partial: output });
+}
+
+function closeOpenBlocks(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	openBlocks: Map<number, number>,
+): void {
+	for (const ci of openBlocks.values()) endBlock(output, stream, ci);
+	openBlocks.clear();
+}
+
+function handleAssistantMessage(
+	message: { content: unknown[] },
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	ended: Set<number>,
+	toolNamesById: Map<string, string>,
+): void {
+	const streamedText = ended.size > 0;
+	for (const raw of message.content ?? []) {
+		const block = raw as {
+			type: string;
+			id?: string;
+			name?: string;
+			input?: Record<string, unknown>;
+			text?: string;
+		};
+		if (block.type === "tool_use" && block.id && block.name) {
+			const name = claudeCodeToolDisplayName(block.name);
+			toolNamesById.set(block.id, name);
+			const toolCall: ToolCall & Record<symbol, unknown> = {
+				type: "toolCall",
+				id: block.id,
+				name,
+				arguments: block.input ?? {},
+				[kStreamingBlockIndex]: output.content.length,
+				[kStreamingBlockKind]: "claude-sdk",
+				[kCursorExecResolved]: true,
+			};
+			output.content.push(toolCall);
+			const ci = output.content.length - 1;
+			stream.push({ type: "toolcall_start", contentIndex: ci, partial: output });
+			stream.push({ type: "toolcall_end", contentIndex: ci, toolCall, partial: output });
+		} else if (block.type === "text" && !streamedText && block.text) {
+			// Non-streaming fallback: no stream_event arrived for this text.
+			output.content.push({ type: "text", text: block.text });
+			const ci = output.content.length - 1;
+			stream.push({ type: "text_start", contentIndex: ci, partial: output });
+			stream.push({ type: "text_delta", contentIndex: ci, delta: block.text, partial: output });
+			stream.push({ type: "text_end", contentIndex: ci, content: block.text, partial: output });
+		}
+	}
+}
+
+async function handleUserMessage(
+	message: { content: unknown },
+	onToolResult: ClaudeAgentSdkOptions["onToolResult"],
+	toolNamesById: Map<string, string>,
+): Promise<void> {
+	if (!Array.isArray(message.content) || !onToolResult) return;
+	for (const raw of message.content) {
+		const block = raw as { type: string; tool_use_id?: string; content?: unknown; is_error?: boolean };
+		if (block.type !== "tool_result" || !block.tool_use_id) continue;
+		const text =
+			typeof block.content === "string"
+				? block.content
+				: Array.isArray(block.content)
+					? block.content.map(c => (c as { text?: string }).text ?? "").join("\n")
+					: "";
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: block.tool_use_id,
+			toolName: toolNamesById.get(block.tool_use_id) ?? "tool",
+			content: [{ type: "text", text }],
+			isError: Boolean(block.is_error),
+			timestamp: Date.now(),
+		};
+		await onToolResult(result);
+	}
+}
+
+function applyUsage(
+	output: AssistantMessage,
+	model: Model<"claude-agent-sdk">,
+	usage: Record<string, number> | undefined,
+): void {
+	if (!usage) return;
+	output.usage.input = usage.input_tokens ?? 0;
+	output.usage.output = usage.output_tokens ?? 0;
+	output.usage.cacheRead = usage.cache_read_input_tokens ?? 0;
+	output.usage.cacheWrite = usage.cache_creation_input_tokens ?? 0;
+	output.usage.totalTokens =
+		output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+	calculateCost(model, output.usage);
+}
