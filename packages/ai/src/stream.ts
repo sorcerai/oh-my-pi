@@ -2321,6 +2321,7 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"claude-agent-sdk">({
 				...base,
 				cwd: options?.cwd,
+				reasoning: options?.reasoning,
 				claudeSdkHandlers: options?.claudeSdkHandlers,
 				onToolResult: options?.cursorOnToolResult,
 			});

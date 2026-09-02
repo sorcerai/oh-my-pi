@@ -182,7 +182,7 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 ### Claude Code (subscription)
 
-`claude-code` runs turns through the Claude Agent SDK, which spawns your installed Claude Code binary. Your Pro/Max/Team subscription is billed the same way Claude Code bills it, and no token is stored in omp. Log in once with `claude login`, then `/login claude-code` to confirm and `--model claude-code/opus` (aliases `opus`, `sonnet`, `haiku` or explicit ids). Claude Code executes its own tools; omp shows them in the transcript and routes each permission request through `tools.approvalMode` and `tools.approval.claude-code.<Tool>`. Set `OMP_CLAUDE_CODE_EXECUTABLE` to pin a specific binary.
+`claude-code` runs turns through the Claude Agent SDK, which spawns your installed Claude Code binary. Your Pro/Max/Team subscription is billed the same way Claude Code bills it, and no token is stored in omp. Log in once with `claude login`, then `/login claude-code` to confirm and `--model claude-code/opus` (aliases `opus`, `sonnet`, `haiku` or explicit ids). Claude Code executes its own tools; omp shows them in the transcript and routes each permission request through `tools.approvalMode` and `tools.approval.claude-code.<Tool>`. Set `OMP_CLAUDE_CODE_EXECUTABLE` to pin a specific binary. The subprocess loads your own Claude Code configuration — `~/.claude` settings, `CLAUDE.md`, and hooks — so a global Stop hook, for example, runs inside an omp turn; this is by design in v1.
 
 ## Built-in local engines
 
