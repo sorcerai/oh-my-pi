@@ -175,6 +175,45 @@ describe("streamClaudeAgentSdk", () => {
 		expect(events.filter(e => e.type === "text_start")).toHaveLength(1);
 	});
 
+	// Regression: two distinct streamed blocks with identical text must both
+	// survive. A content-equality dedup guard (checking `some()` over all
+	// streamed blocks) matches the second "Done." against the first streamed
+	// block's identity and silently drops it.
+	test("does not drop the second of two identically-texted streamed blocks", async () => {
+		const ev = (event: Record<string, unknown>) => ({
+			type: "stream_event",
+			session_id: "sess-1",
+			parent_tool_use_id: null,
+			event,
+		});
+		const echo = (text: string) => ({
+			type: "assistant",
+			session_id: "sess-1",
+			parent_tool_use_id: null,
+			message: { content: [{ type: "text", text }] },
+		});
+		const sdkOrder = [
+			init,
+			ev({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+			ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Done." } }),
+			echo("Done."),
+			ev({ type: "content_block_stop", index: 0 }),
+			ev({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }),
+			ev({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Done." } }),
+			echo("Done."),
+			ev({ type: "content_block_stop", index: 1 }),
+			success,
+		];
+		setClaudeSdkQueryForTests(fake(sdkOrder) as never);
+		const events = await collect(streamClaudeAgentSdk(model, ctx(), { claudeSdkHandlers: handlers() }));
+		const done = events.at(-1) as unknown as { message: { content: { type: string; text?: string }[] } };
+		expect(done.message.content).toEqual([
+			{ type: "text", text: "Done." },
+			{ type: "text", text: "Done." },
+		]);
+		expect(events.filter(e => e.type === "text_start")).toHaveLength(2);
+	});
+
 	// The other direction of the same guard: a block the stream never opened
 	// must still reach the transcript from the full `assistant` message.
 	test("emits an assistant text block at an index that never streamed", async () => {
