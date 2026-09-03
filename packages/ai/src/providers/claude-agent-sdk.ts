@@ -176,14 +176,17 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 		options?.signal?.addEventListener("abort", onAbort, { once: true });
 		// SDK stream block index -> index in output.content.
 		const openBlocks = new Map<number, number>();
-		// SDK block indexes that opened a streaming block. Recorded at
-		// content_block_start, NOT at content_block_stop: the SDK emits the full
-		// `assistant` message BEFORE content_block_stop, so a stop-keyed set is
-		// always empty when the assistant fallback reads it and every streamed
-		// block gets emitted twice. Keyed by SDK index, not content index: a
-		// message where only block 0 streamed must still emit block 1's text
-		// from the full `assistant` message.
-		const streamedSdkIndexes = new Set<number>();
+		// Text blocks opened by `content_block_start`, in stream order, not yet
+		// claimed by an `assistant` echo. The SDK emits the full `assistant`
+		// message BEFORE content_block_stop, so a stop-keyed guard is always
+		// empty when the assistant fallback reads it and every streamed block
+		// gets emitted twice. Content-only equality isn't enough either: two
+		// distinct streamed blocks with identical text (e.g. two separate
+		// "Done." blocks) would both match the first entry. The echo visits
+		// blocks in the same relative order they streamed in, so matching
+		// against the front of this queue claims each streamed block at most
+		// once.
+		const streamedTextQueue: { type: "text"; text: string }[] = [];
 		// Per-stream, not module-level: two concurrent turns must not share
 		// tool-id -> name state, or a result pairs against the wrong call.
 		const toolNamesById = new Map<string, string>();
@@ -309,7 +312,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 									output,
 									stream,
 									openBlocks,
-									streamedSdkIndexes,
+									streamedTextQueue,
 								);
 								break;
 							}
@@ -320,7 +323,7 @@ export const streamClaudeAgentSdk: StreamFunction<"claude-agent-sdk"> = (
 									msg.message as { content: unknown[] },
 									output,
 									stream,
-									streamedSdkIndexes,
+									streamedTextQueue,
 									toolNamesById,
 									pendingToolUseIds,
 								);
@@ -413,7 +416,7 @@ function handleStreamEvent(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	openBlocks: Map<number, number>,
-	streamedSdkIndexes: Set<number>,
+	streamedTextQueue: { type: "text"; text: string }[],
 ): void {
 	const index = Number(event.index ?? -1);
 	switch (event.type) {
@@ -421,15 +424,13 @@ function handleStreamEvent(
 			const block = event.content_block as { type?: string } | undefined;
 			if (block?.type === "text") {
 				const textBlock = { type: "text" as const, text: "" };
-				streamedTextBlocks.add(textBlock);
+				streamedTextQueue.push(textBlock);
 				output.content.push(textBlock);
 				openBlocks.set(index, output.content.length - 1);
-				streamedSdkIndexes.add(index);
 				stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 			} else if (block?.type === "thinking") {
 				output.content.push({ type: "thinking", thinking: "" } satisfies ThinkingContent);
 				openBlocks.set(index, output.content.length - 1);
-				streamedSdkIndexes.add(index);
 				stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 			}
 			// tool_use blocks are taken from the full `assistant` message instead.
@@ -478,18 +479,27 @@ function closeOpenBlocks(
 	openBlocks.clear();
 }
 
-/** Text blocks created by `content_block_start`, by identity; never blocks from an `assistant` echo. */
-const streamedTextBlocks = new WeakSet<object>();
-
-function wasStreamed(output: AssistantMessage, text: string): boolean {
-	return output.content.some(c => c.type === "text" && streamedTextBlocks.has(c) && c.text === text);
+/**
+ * Claims the oldest unclaimed streamed text block if its text matches — the
+ * `assistant` echo visits blocks in the same relative order they streamed in,
+ * so the front of the queue is always the next streamed block due to appear.
+ * Checking only the front (not any queue entry) means two blocks with
+ * identical text each claim their own queue slot instead of both matching
+ * the first one.
+ */
+function wasStreamed(streamedTextQueue: { type: "text"; text: string }[], text: string): boolean {
+	if (streamedTextQueue.length > 0 && streamedTextQueue[0].text === text) {
+		streamedTextQueue.shift();
+		return true;
+	}
+	return false;
 }
 
 function handleAssistantMessage(
 	message: { content: unknown[] },
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
-	streamedSdkIndexes: Set<number>,
+	streamedTextQueue: { type: "text"; text: string }[],
 	toolNamesById: Map<string, string>,
 	pendingToolUseIds: Set<string>,
 ): void {
@@ -518,13 +528,13 @@ function handleAssistantMessage(
 			const ci = output.content.length - 1;
 			stream.push({ type: "toolcall_start", contentIndex: ci, partial: output });
 			stream.push({ type: "toolcall_end", contentIndex: ci, toolCall, partial: output });
-		} else if (block.type === "text" && block.text && !wasStreamed(output, block.text)) {
+		} else if (block.type === "text" && block.text && !wasStreamed(streamedTextQueue, block.text)) {
 			// Non-streaming fallback. The SDK echoes every block as its own
 			// `assistant` message with a single-element content array, so the
 			// echo's position never matches the stream index (a text block that
 			// streamed at index 1 after a thinking block echoes at position 0).
-			// Index keying therefore cannot work; a block is a duplicate iff a
-			// block the stream opened already carries the same text.
+			// Index keying therefore cannot work; a block is a duplicate iff the
+			// front of the streamed-text queue already carries the same text.
 			output.content.push({ type: "text", text: block.text });
 			const ci = output.content.length - 1;
 			stream.push({ type: "text_start", contentIndex: ci, partial: output });
@@ -532,10 +542,6 @@ function handleAssistantMessage(
 			stream.push({ type: "text_end", contentIndex: ci, content: block.text, partial: output });
 		}
 	}
-	// SDK block indexes restart at 0 for every assistant message. Cleared at
-	// the end, not the start: this message's own streamed blocks still have to
-	// be recognised as already-emitted by the loop above.
-	streamedSdkIndexes.clear();
 }
 
 async function handleUserMessage(
