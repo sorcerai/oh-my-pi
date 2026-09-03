@@ -38,8 +38,17 @@ describe("detectClaudeCodeLogin", () => {
 		writeFileSync(join(home, ".claude.json"), JSON.stringify({ userID: "u1" }));
 		expect(await detectClaudeCodeLogin(home)).toMatchObject({ found: true, source: "claudeConfig" });
 	});
-	test("env fallback", async () => {
+	// Regression: a bare ANTHROPIC_API_KEY must NOT count as "logged in". The
+	// subprocess spawn spreads the parent env, so accepting it here would
+	// silently switch the CLI to metered per-token billing while every
+	// claude-code model spec reports zero cost — a silent cost-tracking
+	// blindspot. Metered API-key use belongs to the `anthropic` provider.
+	test("bare ANTHROPIC_API_KEY alone is not a login signal", async () => {
 		process.env.ANTHROPIC_API_KEY = "sk-test";
-		expect(await detectClaudeCodeLogin(home)).toMatchObject({ found: true, source: "env" });
+		expect(await detectClaudeCodeLogin(home)).toEqual({ found: false, source: null, account: null });
+	});
+	test("bare ANTHROPIC_AUTH_TOKEN alone is not a login signal", async () => {
+		process.env.ANTHROPIC_AUTH_TOKEN = "tok-test";
+		expect(await detectClaudeCodeLogin(home)).toEqual({ found: false, source: null, account: null });
 	});
 });

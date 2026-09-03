@@ -12,7 +12,7 @@ export const CLAUDE_CODE_LOGIN_PLACEHOLDER = "claude-code-login";
 
 export interface ClaudeCodeLoginState {
 	found: boolean;
-	source: "keychain" | "credentialsFile" | "claudeConfig" | "env" | null;
+	source: "keychain" | "credentialsFile" | "claudeConfig" | null;
 	account: string | null;
 }
 
@@ -49,15 +49,24 @@ async function keychainHasCredentials(): Promise<boolean> {
 	}
 }
 
-/** Detect Claude Code's own login state. Never throws. */
+/**
+ * Detect Claude Code's own subscription login state. Never throws.
+ *
+ * Deliberately does NOT treat a bare `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`
+ * as "logged in": this provider spawns the Claude CLI with the parent env
+ * (see claude-agent-sdk.ts), and the CLI prefers an API key over subscription
+ * auth when both could apply — so accepting a bare key here would silently
+ * switch the subprocess to metered per-token billing while every model in
+ * claude-code-static.ts reports zero cost. Callers who want metered API-key
+ * billing should use the `anthropic` provider instead, which computes real
+ * cost from usage.
+ */
 export async function detectClaudeCodeLogin(home: string = homedir()): Promise<ClaudeCodeLoginState> {
 	const { marker, label } = readAccountLabel(home);
 	if (await keychainHasCredentials()) return { found: true, source: "keychain", account: label };
 	if (fileHasContent(join(home, ".claude", ".credentials.json")))
 		return { found: true, source: "credentialsFile", account: label };
 	if (marker) return { found: true, source: "claudeConfig", account: label };
-	if (process.env.ANTHROPIC_API_KEY?.trim() || process.env.ANTHROPIC_AUTH_TOKEN?.trim())
-		return { found: true, source: "env", account: null };
 	return { found: false, source: null, account: null };
 }
 
