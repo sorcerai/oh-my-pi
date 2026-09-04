@@ -1,0 +1,46 @@
+{
+  "schema_version": "omp-product-systems.v1",
+  "pack_name": "omp-product-systems-skill-pack",
+  "version": "1.0.0-candidate",
+  "created_at": "2026-09-03T22:00:00-05:00",
+  "promotion_status": "candidate",
+  "target": {
+    "runtime": "oh-my-pi",
+    "skills_path": ".omp/skills",
+    "root_prompt_changes": false,
+    "command_changes": false,
+    "tool_changes": false
+  },
+  "skills": [
+    "routing-product-work",
+    "grounding-product-context",
+    "shaping-product-bets",
+    "authoring-prds",
+    "red-teaming-prds",
+    "decomposing-product-work",
+    "handing-off-product-work",
+    "authoring-agent-skills",
+    "evaluating-agent-skills"
+  ],
+  "authority": {
+    "github": "canonical versioned skills, code, schemas, tests, and ADRs",
+    "pagespace": "curated source-rich research, governance, and review surface",
+    "reverie": "approved atomic durable learnings only",
+    "omp_execution": "candidate work, retained proposals, and verification",
+    "apply_controller": "accepted-state mutation, commit, and merge authority"
+  },
+  "validation": {
+    "static_contracts": "required",
+    "clean_install": "required",
+    "archive_integrity": "required",
+    "live_trigger_evals": "required before promotion",
+    "live_behavior_evals": "required before promotion",
+    "independent_review": "required before promotion"
+  },
+  "research_boundary": "public product behavior and first-party documentation only; no private prompt/code reverse engineering",
+  "repository_layout": {
+    "docs": "docs/product-systems",
+    "scripts": "scripts/product-systems",
+    "tests": "tests/product-systems"
+  }
+}
