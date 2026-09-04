@@ -1,0 +1,41 @@
+{
+  "schema_version": "omp-skill-live-run.v1",
+  "run_id": "",
+  "started_at": "",
+  "ended_at": "",
+  "repository_ref": "",
+  "skill_pack_hash": "",
+  "runtime": {
+    "name": "oh-my-pi",
+    "version": "",
+    "provider": "",
+    "model": "",
+    "model_version": "",
+    "tool_set": [],
+    "context_policy": "fresh per case"
+  },
+  "results": [
+    {
+      "case_id": "",
+      "repetition": 1,
+      "expected_skill": "",
+      "observed_skills": [],
+      "trigger_result": "pass | fail | not-applicable",
+      "behavior_result": "pass | fail | not-applicable",
+      "authority_result": "pass | fail | not-applicable",
+      "output_path": "",
+      "required_marker_failures": [],
+      "forbidden_marker_failures": [],
+      "human_label": "pass | fail | uncertain",
+      "notes": ""
+    }
+  ],
+  "summary": {
+    "false_positive_triggers": 0,
+    "false_negative_triggers": 0,
+    "behavior_failures": 0,
+    "critical_authority_failures": 0,
+    "unavailable_cases": 0,
+    "verdict": "REJECT | REWORK | PILOT | PROMOTE"
+  }
+}

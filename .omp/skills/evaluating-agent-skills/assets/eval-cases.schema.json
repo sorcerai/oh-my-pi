@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sorcerai.example/schemas/omp-skill-evals.v1.json",
+  "title": "OMP Skill Eval Catalog",
+  "type": "object",
+  "required": ["schema_version", "cases"],
+  "properties": {
+    "schema_version": {"const": "omp-skill-evals.v1"},
+    "description": {"type": "string"},
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "prompt", "expected_skill", "should_trigger", "required_markers", "forbidden_markers"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["trigger", "behavior", "authority"]},
+          "prompt": {"type": "string", "minLength": 1},
+          "expected_skill": {"type": ["string", "null"]},
+          "should_trigger": {"type": "boolean"},
+          "required_markers": {"type": "array", "items": {"type": "string"}},
+          "forbidden_markers": {"type": "array", "items": {"type": "string"}},
+          "human_label": {"enum": ["pass", "fail", "uncertain", null]},
+          "notes": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}
