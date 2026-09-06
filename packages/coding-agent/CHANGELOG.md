@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed Prime destination apply failing wholesale under Bun 1.4.x: the skill-tree digest walker's explicit `Dir.close()` now tolerates Bun auto-closing directory handles when async iteration ends, instead of surfacing every skill and credential import as `destination-apply-failed`
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
