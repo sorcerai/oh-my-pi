@@ -20,6 +20,10 @@
 - Devin auth, model assignment, and chat requests now send the native Devin CLI identity (`ideName: devin-cli`, `ideType: chisel`, `extensionName: chisel`, mapped `os`) instead of the Windsurf IDE identity; `ideType: chisel` is what the backend requires for router assignment ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 
+### Fixed
+
+- Fixed the credential database leaving its SQLite `-wal`/`-shm` companions world-readable. SQLite stamps a new companion with the database file's mode, and a first run creates the database under the process umask before chmod'ing it to 0600, so the companions kept mode 0644 — and `-shm` persisted that way across later opens. `open()` now restricts the database and its companions together, healing installs created that way.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

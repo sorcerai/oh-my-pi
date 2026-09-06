@@ -386,6 +386,26 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
  * `getApiKey`, `listProviders`, `deleteProvider`) that callers can use directly
  * without going through `AuthStorage`.
  */
+/**
+ * Restrict the credential database and its SQLite companions to 0600.
+ *
+ * SQLite stamps a newly created `-wal`/`-shm` with the database file's mode at
+ * creation time. On a first run the database is created under the process umask
+ * (0644 with the common 022) and only chmod'd afterwards, so the companions keep
+ * the looser mode — and `-shm` survives later opens, staying world-readable
+ * indefinitely. Normalize the whole set on every open so an install created that
+ * way heals itself.
+ */
+async function chmodCredentialDatabase(dbPath: string): Promise<void> {
+	for (const target of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
+		try {
+			await fs.chmod(target, 0o600);
+		} catch {
+			// Companion absent, or a platform without POSIX modes (Windows).
+		}
+	}
+}
+
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
 	#listActiveStmt: Statement;
@@ -577,11 +597,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				// non-zero `busy_timeout` they fail immediately with SQLITE_BUSY.
 				// See issue #2421.
 				SqliteAuthCredentialStore.#installBusyTimeout(db);
-				try {
-					await fs.chmod(dbPath, 0o600);
-				} catch {
-					// Ignore chmod failures (e.g., Windows)
-				}
+				await chmodCredentialDatabase(dbPath);
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
 				return new SqliteAuthCredentialStore(db);
 			} catch (err) {
