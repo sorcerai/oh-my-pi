@@ -454,6 +454,7 @@ function collectSettings(
 			key === "websockets" ||
 			key === "skills" ||
 			key === "transport" ||
+			key === "markdown" ||
 			key === "telemetry"
 		)
 			continue;
@@ -494,6 +495,7 @@ function collectSettings(
 			(isRecord(parsed.telemetry) && Object.values(parsed.telemetry).every(value => typeof value === "boolean")))
 	)
 		losses.push(loss("config-unsupported-field", "settings", file.sourceRef, "telemetry"));
+	if (isRecord(parsed.markdown)) losses.push(loss("config-unsupported-field", "settings", file.sourceRef, "markdown"));
 	if (isRecord(parsed.skills) && Array.isArray(parsed.skills.customDirectories))
 		losses.push(loss("config-unsupported-field", "settings", file.sourceRef, "skills.customDirectories"));
 	else if (Array.isArray(parsed.skills))

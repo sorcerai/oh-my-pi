@@ -298,6 +298,48 @@ describe("parsePrimeSessions", () => {
 		);
 		expect(JSON.stringify(result)).not.toContain("must not appear");
 	});
+	it("re-links children past mid-chain state entries and adopts session_info names as titles", () => {
+		const lines = [
+			JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "root",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: "/project",
+				git: { repoUrl: "https://example.com/repo.git", commit: "abc123", branch: "main" },
+			}),
+			entry({ ...base("u", null, "message"), message: { role: "user", content: "hello", timestamp: 1 } }),
+			entry({ ...base("state1", "u", "git_state"), git: { branch: "main" } }),
+			entry({ ...base("state2", "state1", "session_state"), state: {} }),
+			entry({ ...base("rename", "state2", "session_info"), name: "renamed session" }),
+			entry({
+				...base("a", "rename", "message"),
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "answer" }],
+					api: "x",
+					provider: "x",
+					model: "x",
+					usage: {
+						input: 1,
+						output: 2,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 3,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 2,
+				},
+			}),
+		];
+		const result = parse([sessionFile("sessions/stated.jsonl", lines)]);
+		const session = result.sessions[0];
+		expect(session?.entries.map(entry => entry.id)).toEqual(["u", "a"]);
+		expect(session?.entries[1]?.parentId).toBe("u");
+		expect(session?.header.title).toBe("renamed session");
+		expect(result.losses.map(loss => loss.code)).toEqual(["sessions-excluded-state", "sessions-excluded-state"]);
+	});
 	it("pairs distinct calls, disambiguates reused branch ids, and rejects duplicate results", () => {
 		const assistant = (id: string, parentId: string | null, calls: readonly Record<string, unknown>[]) =>
 			entry({

@@ -458,7 +458,7 @@ function normalizeMessage(raw: PrimeSessionJsonObject): PrimeSessionMessage | un
 type MigratedEntry = {
 	raw: RawEntry;
 	id: string;
-	readonly parentId: string | null;
+	parentId: string | null;
 	readonly row: ParsedRow;
 	readonly physicalIndex: number;
 	readonly valid: boolean;
@@ -802,6 +802,7 @@ function parseSessionFile(
 		"title",
 		"parentSession",
 		"rlmDepth",
+		"git",
 	]);
 	for (const key of Object.keys(headerValue)) {
 		if (!allowedHeaderFields.has(key)) losses.push(loss("sessions-header-extra", file.sourceRef, headerRow));
@@ -809,7 +810,7 @@ function parseSessionFile(
 	const rlmDepth = headerValue.rlmDepth;
 	const validRlmDepth =
 		typeof rlmDepth === "number" && Number.isSafeInteger(rlmDepth) && rlmDepth >= 0 ? rlmDepth : undefined;
-	const header: PrimeNormalizedSessionHeader = {
+	let header: PrimeNormalizedSessionHeader = {
 		type: "session",
 		version: 3,
 		id: headerValue.id,
@@ -861,6 +862,37 @@ function parseSessionFile(
 			else losses.push(loss("sessions-invalid-entry", file.sourceRef, entry.row));
 		}
 	}
+	// Prime chains daemon bookkeeping entries (session_info, session_state,
+	// agent_status, git_state, child_usage_attributed) into the parent lineage
+	// like any other entry. OMP does not project them, so children are re-linked
+	// to the nearest projected ancestor instead of being dropped as broken.
+	const parentRedirect = new Map<string, string | null>();
+	const resolveParent = (id: string | null): string | null => {
+		const trail: string[] = [];
+		let cursor = id;
+		while (cursor !== null && parentRedirect.has(cursor)) {
+			trail.push(cursor);
+			cursor = parentRedirect.get(cursor) ?? null;
+		}
+		for (const stepped of trail) parentRedirect.set(stepped, cursor);
+		return cursor;
+	};
+	for (const entry of migrated) {
+		if (
+			entry.raw.type !== "session_info" &&
+			entry.raw.type !== "session_state" &&
+			entry.raw.type !== "agent_status" &&
+			entry.raw.type !== "git_state" &&
+			entry.raw.type !== "child_usage_attributed"
+		)
+			continue;
+		parentRedirect.set(entry.id, resolveParent(entry.parentId));
+	}
+	for (const entry of migrated) {
+		const resolved = resolveParent(entry.parentId);
+		if (resolved !== entry.parentId) entry.parentId = resolved;
+	}
+	let sessionInfoName: string | undefined;
 	const ambiguousIds = new Set(migrated.filter(entry => entry.duplicate).map(entry => entry.id));
 	const rejectedIds = new Set(ambiguousIds);
 	for (const entry of migrated) {
@@ -874,6 +906,10 @@ function parseSessionFile(
 	const ancestorBudget = { steps: 0, max: Math.max(1, maxRows), exhausted: parsedRows.rowBudgetExceeded };
 	const families = new Map<string, "openai" | "anthropic" | "google" | undefined>();
 	for (const entry of migrated) {
+		if (entry.raw.type === "session_info") {
+			if (requiredString(entry.raw.name)) sessionInfoName = entry.raw.name;
+			continue;
+		}
 		if (!entry.valid || rejectedIds.has(entry.id) || seen.has(entry.id)) continue;
 		const normalized = normalizeEntry(
 			entry,
@@ -886,6 +922,9 @@ function parseSessionFile(
 		if (!normalized) continue;
 		entries.push(normalized);
 		seen.add(entry.id);
+	}
+	if (sessionInfoName !== undefined && header.title === undefined) {
+		header = { ...header, title: sessionInfoName };
 	}
 	if (ancestorBudget.exhausted && !parsedRows.rowBudgetExceeded) {
 		losses.push(loss("source-budget-exceeded", file.sourceRef));
