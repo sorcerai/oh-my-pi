@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { parseBridgeGrants, primaryBridgeToken } from "./grants";
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {
 	await fs.mkdir(directory, { recursive: true, mode: 0o700 });
@@ -24,8 +25,11 @@ export async function ensureBridgeToken(tokenFile: string): Promise<string> {
 	try {
 		const existing = (await fs.readFile(resolvedPath, "utf8")).trim();
 		if (existing.length === 0) throw new Error(`bridge token file is empty: ${resolvedPath}`);
+		// A bare token parses as one full-authority supervisor grant, so both the
+		// legacy and grant formats resolve to a working supervisor token here.
+		const token = primaryBridgeToken(parseBridgeGrants(existing));
 		await fs.chmod(resolvedPath, 0o600);
-		return existing;
+		return token;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
