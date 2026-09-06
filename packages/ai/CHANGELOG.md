@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- Fixed the SQLite credential store identity assertion failing under Bun 1.4.x, whose `fileControl` rejects typed-array arguments smaller than 8 bytes; `SQLITE_FCNTL_HAS_MOVED` now passes an 8-byte buffer and still reads the moved flag at index 0.
 - Fixed automatic session retries for Anthropic-compatible streams that end prematurely without a completion signal.
 - Fixed Gemini 3.x tool-call continuations through OpenAI-compatible endpoints.
 - Fixed credential fallback for HTTP 402 payment-required and deactivated-workspace responses, preventing them from being misclassified as quota exhaustion.
