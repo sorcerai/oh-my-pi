@@ -2059,7 +2059,9 @@ async function skillTreeDigest(target: string): Promise<string> {
 				entries.push(entry);
 			}
 		} finally {
-			await directory.close();
+			// Bun auto-closes the Dir handle when async iteration ends (including
+			// early break/throw); Node keeps it open until close(). Tolerate both.
+			await directory.close().catch(() => undefined);
 		}
 		entryCount += entries.length;
 		if (entryCount > MAX_SKILL_TREE_ENTRIES)

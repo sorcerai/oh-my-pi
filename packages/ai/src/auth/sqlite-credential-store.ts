@@ -679,7 +679,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	static #assertExistingIdentity(db: Database, expected: ExistingSqliteIdentity): void {
-		const moved = new Int32Array(1);
+		const moved = new Int32Array(2); // Bun requires >=8-byte fileControl buffers; HAS_MOVED writes int [0]
 		const result = db.fileControl(constants.SQLITE_FCNTL_HAS_MOVED, moved);
 		let current: fsSync.Stats;
 		try {
