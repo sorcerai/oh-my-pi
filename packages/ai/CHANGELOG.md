@@ -163,6 +163,10 @@
 - Fixed OpenAI Codex/Responses tool results being lost when composite call identifiers could not be paired with the corresponding assistant call.
 - Fixed native OpenAI Responses history replay becoming stuck on malformed or truncated function-call arguments; invalid history items are now discarded so the session can recover.
 
+### Fixed
+
+- Fixed the credential database leaving its SQLite `-wal`/`-shm` companions world-readable. SQLite stamps a new companion with the database file's mode, and a first run creates the database under the process umask before chmod'ing it to 0600, so the companions kept mode 0644 — and `-shm` persisted that way across later opens. `open()` now restricts the database and its companions together, healing installs created that way.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
