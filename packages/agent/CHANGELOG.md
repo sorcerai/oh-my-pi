@@ -24,6 +24,9 @@
 ### Fixed
 
 - Fixed preservation of Claude thinking/reasoning context when conversations are compacted or tool results are pruned.
+### Added
+
+- Added the `x-codex-routing-hint` header to Codex remote-compaction requests, matching current server-side requirements.
 
 ## [18.0.11] - 2026-08-29
 
