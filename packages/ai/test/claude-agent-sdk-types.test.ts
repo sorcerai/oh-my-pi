@@ -15,6 +15,12 @@ describe("claude-agent-sdk maps", () => {
 		expect(claudeCodeToolTier("Bash")).toBe("exec");
 		expect(claudeCodeToolTier("SomethingNew")).toBe("exec");
 	});
+	test("subagent spawns are gated like exec, not auto-approved as reads", () => {
+		// Task and Skill spawn a Claude Code subagent that can run Bash, so they
+		// must not be quieter than a direct Bash call in always-ask mode.
+		expect(claudeCodeToolTier("Task")).toBe("exec");
+		expect(claudeCodeToolTier("Skill")).toBe("exec");
+	});
 	test("display names", () => {
 		expect(claudeCodeToolDisplayName("Read")).toBe("read");
 		expect(claudeCodeToolDisplayName("Glob")).toBe("find");

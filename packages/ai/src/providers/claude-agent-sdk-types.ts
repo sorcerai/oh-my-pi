@@ -38,18 +38,11 @@ export interface ClaudeAgentSdkOptions extends StreamOptions {
 
 export type ClaudeCodeToolTier = "read" | "write" | "exec";
 
-const READ_TOOLS = new Set([
-	"Read",
-	"Glob",
-	"Grep",
-	"LS",
-	"WebFetch",
-	"WebSearch",
-	"TodoRead",
-	"TodoWrite",
-	"Task",
-	"Skill",
-]);
+const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "TodoRead", "TodoWrite"]);
+// `Task` and `Skill` are deliberately absent: both spawn a Claude Code subagent
+// that can itself run Bash, so tiering them as reads would auto-approve in
+// always-ask mode what a direct Bash call still prompts for. They fall through
+// to `exec` and are gated like any other command.
 const WRITE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
 export function claudeCodeToolTier(toolName: string): ClaudeCodeToolTier {

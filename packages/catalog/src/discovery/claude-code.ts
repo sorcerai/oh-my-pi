@@ -1,6 +1,19 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Effort } from "../effort";
 import { buildClaudeCodeModel, CLAUDE_CODE_STATIC_MODELS } from "../provider-models/claude-code-static";
 import type { ModelSpec } from "../types";
+
+/**
+ * Cheap presence check for Claude Code state, used to avoid spawning the CLI for
+ * users who never selected the provider. Filesystem-only: no subprocess, and no
+ * dependency on the richer login detection in `packages/ai` (catalog cannot
+ * import from ai).
+ */
+function hasClaudeCodeState(home: string = homedir()): boolean {
+	return existsSync(join(home, ".claude")) || existsSync(join(home, ".claude.json"));
+}
 
 /** Bound the CLI subprocess spawn + control-request round trip. */
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -14,6 +27,12 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  * `defaultModel` resolves even when the account exposes a narrower list.
  */
 export async function fetchClaudeCodeModels(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<ModelSpec<"claude-agent-sdk">[]> {
+	// The descriptor is `allowUnauthenticated`, so the model manager reaches this
+	// for every user, including those who never chose the provider. Spawning the
+	// CLI to ask them is wasted work, so require some Claude Code state on disk
+	// first. Both login paths leave it: a keychain login still has the CLI's
+	// `~/.claude` directory, and a credentials-file login has one or both.
+	if (!hasClaudeCodeState()) return CLAUDE_CODE_STATIC_MODELS;
 	try {
 		const sdk = await import("@anthropic-ai/claude-agent-sdk");
 		const abortController = new AbortController();
