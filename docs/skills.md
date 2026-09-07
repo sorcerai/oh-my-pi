@@ -130,10 +130,29 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 
 System prompt construction (`src/system-prompt.ts`) uses discovered skills as follows:
 
-- if `read` tool is available:
-  - include discovered skills list in prompt, excluding skills with `hide: true`
-- otherwise:
-  - omit discovered list
+- if `read` is not available, omit the discovered skills list
+- otherwise apply `skills.promptMode`:
+  - `all` (default): include every non-hidden discovered skill
+  - `core`: include skills from OMP-native providers (`native`, `agents`, and `omp-managed`)
+  - `allowlist`: include only names matching `skills.promptSkills` glob patterns
+- exclude skills with `hide: true` from every prompt mode
+
+Prompt filtering changes only system-prompt summaries. Discovery remains complete, so
+explicit `skill://` reads, `/skill:<name>` commands, and local `skill_search` can still
+use non-hidden skills that are not listed in the prompt.
+
+`skill_search` searches local discovered skill metadata, returns ranked `skill://` URLs,
+and does not fetch network content. Use `read` on a returned URL to load full instructions.
+
+#### Prompt budget boundary
+
+In large libraries with hundreds of skills, exposing every skill description in the
+system prompt consumes significant prompt budget (e.g., ~159 KB for 270+ skills).
+Restricting prompt exposure via `skills.promptMode` reduces prompt size:
+
+- `core`: cuts prompt overhead by ~46% while retaining canonical OMP-native skills in the system prompt.
+- `allowlist`: cuts prompt overhead by ~73% (down to ~43 KB) while allowing targeted glob patterns.
+- All non-prompt skills remain searchable via `skill_search` and loadable on demand via `skill://` URLs, separating skill discovery from system-prompt token consumption.
 
 `hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
 
