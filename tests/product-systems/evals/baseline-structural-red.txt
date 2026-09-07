@@ -1,0 +1,112 @@
+test_contract_grader_rejects_baseline_and_accepts_gold (tests.test_pack.PackContractTests.test_contract_grader_rejects_baseline_and_accepts_gold) ... ERROR
+test_eval_catalog_has_trigger_and_behavior_coverage (tests.test_pack.PackContractTests.test_eval_catalog_has_trigger_and_behavior_coverage) ... ok
+test_expected_skills_exist (tests.test_pack.PackContractTests.test_expected_skills_exist) ... FAIL
+test_installer_copies_only_pack_skills (tests.test_pack.PackContractTests.test_installer_copies_only_pack_skills) ... FAIL
+test_installer_dry_run_does_not_mutate_target (tests.test_pack.PackContractTests.test_installer_dry_run_does_not_mutate_target) ... FAIL
+test_manifest_matches_skills (tests.test_pack.PackContractTests.test_manifest_matches_skills) ... ERROR
+test_skill_frontmatter_and_required_sections (tests.test_pack.PackContractTests.test_skill_frontmatter_and_required_sections) ... ERROR
+test_validator_passes (tests.test_pack.PackContractTests.test_validator_passes) ... ERROR
+
+======================================================================
+ERROR: test_contract_grader_rejects_baseline_and_accepts_gold (tests.test_pack.PackContractTests.test_contract_grader_rejects_baseline_and_accepts_gold)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 87, in test_contract_grader_rejects_baseline_and_accepts_gold
+    grader = load_module("scripts/run_eval_contracts.py", "run_eval_contracts")
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 39, in load_module
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1022, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1159, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1217, in get_data
+FileNotFoundError: [Errno 2] No such file or directory: '/mnt/data/omp-product-systems-skill-pack-v1/scripts/run_eval_contracts.py'
+
+======================================================================
+ERROR: test_manifest_matches_skills (tests.test_pack.PackContractTests.test_manifest_matches_skills)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 63, in test_manifest_matches_skills
+    manifest = json.loads((ROOT / "MANIFEST.json").read_text(encoding="utf-8"))
+                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/pathlib/_local.py", line 548, in read_text
+    return PathBase.read_text(self, encoding, errors, newline)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/pathlib/_abc.py", line 632, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/pathlib/_local.py", line 539, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/mnt/data/omp-product-systems-skill-pack-v1/MANIFEST.json'
+
+======================================================================
+ERROR: test_skill_frontmatter_and_required_sections (tests.test_pack.PackContractTests.test_skill_frontmatter_and_required_sections)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 54, in test_skill_frontmatter_and_required_sections
+    text = path.read_text(encoding="utf-8")
+  File "/usr/lib/python3.13/pathlib/_local.py", line 548, in read_text
+    return PathBase.read_text(self, encoding, errors, newline)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/pathlib/_abc.py", line 632, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/pathlib/_local.py", line 539, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/mnt/data/omp-product-systems-skill-pack-v1/.omp/skills/authoring-prds/SKILL.md'
+
+======================================================================
+ERROR: test_validator_passes (tests.test_pack.PackContractTests.test_validator_passes)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 69, in test_validator_passes
+    validator = load_module("scripts/validate_pack.py", "validate_pack")
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 39, in load_module
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1022, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1159, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1217, in get_data
+FileNotFoundError: [Errno 2] No such file or directory: '/mnt/data/omp-product-systems-skill-pack-v1/scripts/validate_pack.py'
+
+======================================================================
+FAIL: test_expected_skills_exist (tests.test_pack.PackContractTests.test_expected_skills_exist)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 49, in test_expected_skills_exist
+    self.assertEqual(EXPECTED_SKILLS, found)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Items in the first set but not the second:
+'authoring-prds'
+'evaluating-agent-skills'
+'routing-product-work'
+'shaping-product-bets'
+'authoring-agent-skills'
+'red-teaming-prds'
+'grounding-product-context'
+'decomposing-product-work'
+'handing-off-product-work'
+
+======================================================================
+FAIL: test_installer_copies_only_pack_skills (tests.test_pack.PackContractTests.test_installer_copies_only_pack_skills)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 129, in test_installer_copies_only_pack_skills
+    self.assertEqual(0, result.returncode, result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 2 : /opt/pyvenv/bin/python3: can't open file '/mnt/data/omp-product-systems-skill-pack-v1/scripts/install.py': [Errno 2] No such file or directory
+
+======================================================================
+FAIL: test_installer_dry_run_does_not_mutate_target (tests.test_pack.PackContractTests.test_installer_dry_run_does_not_mutate_target)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/omp-product-systems-skill-pack-v1/tests/test_pack.py", line 113, in test_installer_dry_run_does_not_mutate_target
+    self.assertEqual(0, result.returncode, result.stderr)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 != 2 : /opt/pyvenv/bin/python3: can't open file '/mnt/data/omp-product-systems-skill-pack-v1/scripts/install.py': [Errno 2] No such file or directory
+
+----------------------------------------------------------------------
+Ran 8 tests in 2.022s
+
+FAILED (failures=3, errors=4)
