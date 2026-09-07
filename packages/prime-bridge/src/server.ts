@@ -7,8 +7,9 @@ import {
 	provisionPrimeBridgeConfig,
 	resolveBridgeConfig,
 } from "./config";
+import { grantAllowsSession } from "./grants";
 import { CommandResultUncertainError, PrimeDaemonClient } from "./prime/client";
-import { authenticate } from "./server-auth";
+import { authenticate, forbidden } from "./server-auth";
 import { BridgeStore, type ClaimedInboxMessage, type ClaimedPendingMessage } from "./store";
 import { ensureBridgeToken } from "./token";
 
@@ -499,9 +500,36 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 				return new Response("Bad Request", { status: 400 });
 			if (url.pathname === "/health") return jsonResponse({ ok: true });
 
+			if (url.pathname.startsWith("/mcp/")) {
+				const auth = await authenticate(request, config);
+				if (!auth.ok) return auth.response;
+				const prefix = "/mcp/v1/sessions/";
+				if (!url.pathname.startsWith(prefix)) return new Response("Not Found", { status: 404 });
+				let sessionId: string;
+				try {
+					sessionId = decodeURIComponent(url.pathname.slice(prefix.length));
+				} catch {
+					return new Response("Not Found", { status: 404 });
+				}
+				// Scope comes from the grant, never from the path. A caller naming a
+				// session it was not granted is refused before any host sees it.
+				if (!grantAllowsSession(auth.principal, sessionId)) return forbidden();
+				const custom = await options.handleV1?.(request);
+				if (custom !== null && custom !== undefined) return custom;
+				return new Response("Not Found", { status: 404 });
+			}
+
 			if (url.pathname.startsWith("/v1/")) {
-				const authenticationResponse = await authenticate(request, config);
-				if (authenticationResponse !== null) return authenticationResponse;
+				const auth = await authenticate(request, config);
+				if (!auth.ok) return auth.response;
+				// Administrative surfaces. The messaging routes below (/v1/messages,
+				// /v1/inbox, /v1/wait*) carry their own session-scope gates.
+				if (
+					(url.pathname === "/v1/peers" && request.method === "POST") ||
+					(url.pathname === "/v1/audit" && request.method === "GET")
+				) {
+					if (auth.principal.role !== "supervisor") return forbidden();
+				}
 				try {
 					const custom = await options.handleV1?.(request);
 					if (custom !== null && custom !== undefined) return custom;
@@ -512,9 +540,14 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 						} catch (error) {
 							return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
 						}
-						if (targetHarness === "omp") return jsonResponse(store.listOmpPeers());
+						// Discovery is scoped like every other surface: an unscoped caller
+						// would otherwise enumerate every session id on the machine. Peer
+						// ids share the namespace grants name, so the same gate applies.
+						const visible = <TPeer extends { id: string }>(entries: readonly TPeer[]): TPeer[] =>
+							entries.filter(entry => grantAllowsSession(auth.principal, entry.id));
+						if (targetHarness === "omp") return jsonResponse(visible(store.listOmpPeers()));
 						const peers = options.peers ? await options.peers() : await primeClient.listSessions();
-						return jsonResponse(mapPrimePeers(peers));
+						return jsonResponse(visible(mapPrimePeers(peers)));
 					}
 					if (url.pathname === "/v1/peers" && request.method === "POST") {
 						try {
@@ -538,6 +571,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 								error instanceof PayloadTooLargeError ? 413 : 400,
 							);
 						}
+						// originSessionId arrives in the request body, so without this gate a
+						// caller could forge the apparent sender of any mesh message.
+						if (!grantAllowsSession(auth.principal, message.originSessionId)) return forbidden();
 						const existingMessage = store.findMessageByIdempotencyKey(message.idempotencyKey);
 						if (existingMessage !== null) {
 							if (!sameMessage(existingMessage, message))
@@ -623,6 +659,9 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 								error instanceof PayloadTooLargeError ? 413 : 400,
 							);
 						}
+						// peek=false claims messages, so an ungated targetId lets a caller
+						// drain another target's inbox and deny delivery, not merely read it.
+						if (!grantAllowsSession(auth.principal, targetId)) return forbidden();
 						return jsonResponse(
 							store.listInbox({
 								targetId,
@@ -663,6 +702,8 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 								error instanceof PayloadTooLargeError ? 413 : 400,
 							);
 						}
+						// Same claim semantics as /v1/inbox?peek=false, so the same gate.
+						if (!grantAllowsSession(auth.principal, waitRequest.targetId)) return forbidden();
 						const existing = store.claimInboxForTarget(waitRequest.targetId, waitRequest.from);
 						if (existing !== null) return jsonResponse(existing);
 						if (waiters.length >= MAX_ACTIVE_WAITERS)

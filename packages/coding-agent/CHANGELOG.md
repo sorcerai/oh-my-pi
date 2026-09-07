@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- Fixed the Prime importer silently dropping every entry after Prime daemon bookkeeping entries (`session_state`, `agent_status`, `git_state`, `child_usage_attributed`, `session_info`) chained mid-conversation; children are now re-linked to their nearest projected ancestor
+- Fixed the Prime importer discarding user-renamed Prime sessions' names; the latest `session_info` name now imports as the session title
+- Fixed the Prime importer flagging the session header `git` field and the `markdown` settings block (`mermaid`, `codeBlockIndent`) as unknown-field losses on ordinary Prime v0.9.3 data
 - Fixed a fresh agent database leaving its SQLite `-wal`/`-shm` companions world-readable: `AgentStorage.open()` creates `agent.db` (which holds `auth_credentials`) on the first run, and SQLite stamps new companions with the database's mode before anything chmods it. Both openers now restrict the database and its companions together, which also unblocks `omp import prime --apply` against a freshly installed omp.
 
 - Fixed Prime destination apply failing wholesale under Bun 1.4.x: the skill-tree digest walker's explicit `Dir.close()` now tolerates Bun auto-closing directory handles when async iteration ends, instead of surfacing every skill and credential import as `destination-apply-failed`
