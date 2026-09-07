@@ -839,6 +839,26 @@ export function getAgentDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "agent.db", "data");
 }
 
+/**
+ * Restrict agent.db and its SQLite companions to 0600.
+ *
+ * agent.db holds `auth_credentials`, and SQLite stamps a newly created
+ * `-wal`/`-shm` with the database file's mode at creation time. A first run
+ * creates the database under the process umask (0644 with the common 022), so
+ * without this the companions keep that mode — and `-shm` survives later opens,
+ * staying world-readable indefinitely. Every opener calls this after opening so
+ * an install created that way heals itself.
+ */
+export function restrictAgentDbPermissions(dbPath: string): void {
+	for (const target of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) {
+		try {
+			fs.chmodSync(target, 0o600);
+		} catch {
+			// Companion absent, or a platform without POSIX modes (Windows).
+		}
+	}
+}
+
 /** Get the last-seen-changelog-version marker file (~/.omp/agent/last-changelog-version). */
 export function getLastChangelogVersionPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "last-changelog-version", "state");
