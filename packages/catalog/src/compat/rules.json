@@ -10067,6 +10067,35 @@
 				}
 			},
 			{
+				"source": "providers/openai-codex.kdl:122",
+				"providers": [
+					"openai-codex"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra-wm"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cache-read": 1,
+						"cache-write": 0
+					},
+					"serviceTierCost": {
+						"flex": 0.5,
+						"priority": 2.5
+					},
+					"contextWindowFloor": 1050000
+				}
+			},
+			{
 				"source": "providers/openai.kdl:6",
 				"class": "unknown",
 				"providers": [
