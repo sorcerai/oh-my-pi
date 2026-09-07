@@ -2277,7 +2277,10 @@ describe("prime destination planning and apply", () => {
 				"providers:\n  split-read-provider:\n    baseUrl: http://parser-b\n    auth: none\n    models: []\n",
 			),
 			realReadFileSync = fsSync.readFileSync.bind(fsSync),
-			readFileSyncSpy = vi.spyOn(fsSync, "readFileSync").mockImplementation(((file, options) => {
+			readFileSyncSpy = vi.spyOn(fsSync, "readFileSync").mockImplementation(((
+				file: Parameters<typeof fsSync.readFileSync>[0],
+				options: Parameters<typeof fsSync.readFileSync>[1],
+			) => {
 				if (String(file) === modelsPath) return bytesB.toString("utf8") as never;
 				return realReadFileSync(file as never, options as never) as never;
 			}) as typeof fsSync.readFileSync);

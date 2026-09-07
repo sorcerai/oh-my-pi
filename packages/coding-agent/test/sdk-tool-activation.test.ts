@@ -145,11 +145,18 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			// Discoverable extension tools mount as xd:// devices, not top-level active tools.
 			const deviceNames = session.getXdevToolEntries().map(entry => entry.name);
 			expect(deviceNames).toContain("default_active_tool");
+			expect(session.getToolByName("xd://default_active_tool")?.name).toBe("default_active_tool");
 			expect(session.getActiveToolNames()).not.toContain("default_active_tool");
 			expect(deviceNames).not.toContain("default_inactive_tool");
 			expect(session.getActiveToolNames()).not.toContain("default_inactive_tool");
 			expect(session.systemPrompt.join("\n")).toContain("default_active_tool");
 			expect(session.systemPrompt.join("\n")).not.toContain("default_inactive_tool");
+
+			// Presentation lookup must survive Code Mode clearing the live mount set
+			// so historical prefixed calls retain their canonical renderer.
+			await session.setActiveToolPresentation(session.getActiveToolNames(), []);
+			expect(session.getMountedXdevToolNames()).not.toContain("default_active_tool");
+			expect(session.getToolByName("xd://default_active_tool")?.name).toBe("default_active_tool");
 		} finally {
 			await session.dispose();
 		}
@@ -2613,8 +2620,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					Reflect.get(primaryRead, "tool") ?? primaryRead,
 					"session",
 				) as ToolSession;
-				const primarySnapshotStore = {} as NonNullable<ToolSession["fileSnapshotStore"]>;
-				primarySession.fileSnapshotStore = primarySnapshotStore;
+				const primaryEditStore = {} as NonNullable<ToolSession["editStore"]>;
+				primarySession.editStore = primaryEditStore;
 
 				await session.applyAdvisorConfigs(
 					[
@@ -2637,8 +2644,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(taskSession).not.toBe(primarySession);
 				expect(adversarialSession).not.toBe(primarySession);
 				expect(taskSession).not.toBe(adversarialSession);
-				expect(taskSession.fileSnapshotStore).not.toBe(primarySnapshotStore);
-				expect(adversarialSession.fileSnapshotStore).not.toBe(primarySnapshotStore);
+				expect(taskSession.editStore).not.toBe(primaryEditStore);
+				expect(adversarialSession.editStore).not.toBe(primaryEditStore);
 			} finally {
 				await session.dispose();
 			}

@@ -8,6 +8,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { BridgeMessage, BridgeReceipt, ExternalPeer } from "@oh-my-pi/prime-bridge-protocol";
 import type { AsyncJobType } from "../../async";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
+import type { StructuredSubagentOutput } from "../../task/types";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
 /**
@@ -67,6 +68,13 @@ export interface JobSnapshot {
 	resolvedModel?: string;
 	resultText?: string;
 	errorText?: string;
+	structured?: StructuredSubagentOutput;
+	/**
+	 * `agent://<id>` handle backing this job's artifacts — the job-row's
+	 * registry `agentId` when the manager disambiguated a requested job id
+	 * on collision, else the job id itself. See {@link AsyncJob.agentId}.
+	 */
+	agentUrlId?: string;
 }
 
 export type CancelStatus = "cancelled" | "not_found" | "already_completed";

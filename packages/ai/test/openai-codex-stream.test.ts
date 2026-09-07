@@ -2064,9 +2064,9 @@ describe("openai-codex streaming", () => {
 			maxTokens: 128000,
 		};
 
-		// gpt-5.5: the `service-tier-cost` rule bakes { priority: 2.5 }.
+		// gpt-5.5: the exact `service-tier-cost` rule bakes { flex: 0.5, priority: 2.5 }.
 		const tiered = buildModel({ ...spec, id: "gpt-5.5" });
-		expect(tiered.serviceTierCost).toEqual({ priority: 2.5 });
+		expect(tiered.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
 		const tieredResult = await streamOpenAICodexResponses(tiered, context, {
 			fetch: fetchMock,
 			apiKey: token,
@@ -2076,9 +2076,9 @@ describe("openai-codex streaming", () => {
 		expect(tieredResult.usage.cost.input).toBeCloseTo(0.0000125);
 		expect(tieredResult.usage.cost.output).toBeCloseTo(0.000015);
 
-		// A model without the axis falls back to the generic 2x priority tier.
+		// Other Codex models inherit the provider-root { flex: 0.5, priority: 2 } rule.
 		const generic = buildModel({ ...spec, id: "gpt-5.1-codex" });
-		expect(generic.serviceTierCost).toBeUndefined();
+		expect(generic.serviceTierCost).toEqual({ flex: 0.5, priority: 2 });
 		const genericResult = await streamOpenAICodexResponses(generic, context, {
 			fetch: fetchMock,
 			apiKey: token,
@@ -5290,7 +5290,6 @@ describe("openai-codex streaming", () => {
 
 		const sentTypesByConnection: string[][] = [];
 		let constructorCount = 0;
-		let abortSecondRequest: (() => void) | undefined;
 
 		class AbortResetWebSocket extends MockWebSocket {
 			#connectionIndex: number;
@@ -5378,7 +5377,7 @@ describe("openai-codex streaming", () => {
 		expect(firstResult.role).toBe("assistant");
 
 		const secondAbortController = new AbortController();
-		abortSecondRequest = () => {
+		const abortSecondRequest = () => {
 			secondAbortController.abort();
 		};
 		const secondResult = await streamOpenAICodexResponses(model, secondContext, {
