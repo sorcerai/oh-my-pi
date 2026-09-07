@@ -30,6 +30,7 @@
 		"providers/baseten.kdl",
 		"providers/bedrock-mantle.kdl",
 		"providers/cerebras.kdl",
+		"providers/claude-code.kdl",
 		"providers/cloudflare-ai-gateway.kdl",
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
@@ -6973,6 +6974,22 @@
 				}
 			},
 			{
+				"source": "providers/claude-code.kdl:8",
+				"providers": [
+					"claude-code"
+				],
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					]
+				}
+			},
+			{
 				"source": "providers/cloudflare-ai-gateway.kdl:6",
 				"providers": [
 					"cloudflare-ai-gateway"
@@ -10064,6 +10081,35 @@
 				],
 				"catalog": {
 					"contextWindowFloor": 1000000
+				}
+			},
+			{
+				"source": "providers/openai-codex.kdl:122",
+				"providers": [
+					"openai-codex"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra-wm"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 10,
+						"output": 50,
+						"cache-read": 1,
+						"cache-write": 0
+					},
+					"serviceTierCost": {
+						"flex": 0.5,
+						"priority": 2.5
+					},
+					"contextWindowFloor": 1050000
 				}
 			},
 			{

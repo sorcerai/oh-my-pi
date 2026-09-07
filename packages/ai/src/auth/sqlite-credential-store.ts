@@ -16,6 +16,7 @@ import {
 	isSqliteBusyError,
 	isSqliteCorruptionError,
 	logger,
+	restrictAgentDbPermissions,
 } from "@oh-my-pi/pi-utils";
 import type {
 	AuthCredential,
@@ -577,11 +578,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				// non-zero `busy_timeout` they fail immediately with SQLITE_BUSY.
 				// See issue #2421.
 				SqliteAuthCredentialStore.#installBusyTimeout(db);
-				try {
-					await fs.chmod(dbPath, 0o600);
-				} catch {
-					// Ignore chmod failures (e.g., Windows)
-				}
+				restrictAgentDbPermissions(dbPath);
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
 				return new SqliteAuthCredentialStore(db);
 			} catch (err) {
@@ -679,7 +676,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	static #assertExistingIdentity(db: Database, expected: ExistingSqliteIdentity): void {
-		const moved = new Int32Array(1);
+		const moved = new Int32Array(2); // Bun requires >=8-byte fileControl buffers; HAS_MOVED writes int [0]
 		const result = db.fileControl(constants.SQLITE_FCNTL_HAS_MOVED, moved);
 		let current: fsSync.Stats;
 		try {

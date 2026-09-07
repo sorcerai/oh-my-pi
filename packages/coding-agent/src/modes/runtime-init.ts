@@ -8,6 +8,7 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import { createNoninteractiveExtensionRuntimeActions } from "../extensibility/extensions/runtime-actions";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -86,6 +87,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);
 			},
+			...createNoninteractiveExtensionRuntimeActions(session, runner),
 			getActiveTools: () => session.getEnabledToolNames(),
 			getAllTools: () => session.getAllToolInfos(),
 			setActiveTools: (toolNames: string[]) => session.setActiveToolsByName(toolNames),

@@ -17,6 +17,7 @@ import {
 	isRecord,
 	logger,
 	postmortem,
+	restrictAgentDbPermissions,
 } from "@oh-my-pi/pi-utils";
 import type { RawSettings as Settings } from "../config/settings";
 
@@ -395,6 +396,9 @@ FROM model_usage_legacy
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
 			try {
 				const storage = new AgentStorage(dbPath);
+				// agent.db holds auth_credentials; SQLite stamps new -wal/-shm with the
+				// database's mode, so restrict the whole set right after opening.
+				restrictAgentDbPermissions(dbPath);
 				// Exit-only: a keep-alive cleanup leaves the open handle valid for the
 				// continuing process (Settings, MCP cache, callers hold it); the real
 				// exit closes. Register before publishing so a real-exit-in-progress

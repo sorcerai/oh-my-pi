@@ -32,6 +32,7 @@ import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import { createTaskExtensionRuntimeActions } from "../extensibility/extensions/runtime-actions";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -3448,6 +3449,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						setLabel: (targetId, label) => {
 							session.sessionManager.appendLabelChange(targetId, label);
 						},
+						...createTaskExtensionRuntimeActions(session, extensionRunner, isParentOwnedTool),
 						getActiveTools: () => session.getEnabledToolNames(),
 						getAllTools: () => session.getAllToolInfos(),
 						setActiveTools: (toolNames: string[]) =>
