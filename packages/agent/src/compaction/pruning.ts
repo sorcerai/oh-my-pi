@@ -49,6 +49,15 @@ export interface PruneConfig {
 	 * no cache guard (legacy: superseded/useless prune at any depth).
 	 */
 	cacheWarmSuffixTokens?: number;
+	/**
+	 * Lift {@link cacheWarmSuffixTokens} when the last message is at least this
+	 * old: the provider cache is cold, so re-writing the sent region is free and
+	 * age victims deep in the history can finally be reclaimed. Same contract as
+	 * {@link SupersedePruneConfig.idleFlushMs}. Undefined = guard never lifts.
+	 */
+	idleFlushMs?: number;
+	/** Clock override for tests. */
+	now?: number;
 }
 
 export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
@@ -107,6 +116,17 @@ export interface SupersedePruneConfig {
 
 const DEFAULT_SUFFIX_TOKEN_LIMIT = 8_000;
 const DEFAULT_IDLE_FLUSH_MS = 30 * 60_000;
+
+/** True when the newest message is at least `idleMs` older than `now` (provider cache assumed cold). */
+function isIdleBeyond(entries: SessionEntry[], idleMs: number, now: number): boolean {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		const timestamp = (entry.message as AgentMessage).timestamp;
+		return typeof timestamp === "number" && now - timestamp >= idleMs;
+	}
+	return false;
+}
 
 function createPrunedNotice(tokens: number): string {
 	return `[Output truncated - ${tokens} tokens]`;
@@ -264,17 +284,7 @@ export function pruneSupersededToolResults(
 	}
 	if (candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
-	const now = config.now ?? Date.now();
-	let lastMessageTimestamp: number | undefined;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (entry.type !== "message") continue;
-		const timestamp = (entry.message as AgentMessage).timestamp;
-		if (typeof timestamp === "number") lastMessageTimestamp = timestamp;
-		break;
-	}
-	const idle =
-		lastMessageTimestamp !== undefined && now - lastMessageTimestamp >= (config.idleFlushMs ?? DEFAULT_IDLE_FLUSH_MS);
+	const idle = isIdleBeyond(entries, config.idleFlushMs ?? DEFAULT_IDLE_FLUSH_MS, config.now ?? Date.now());
 
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
 
@@ -340,7 +350,14 @@ export function pruneToolOutputs(
 			: undefined;
 
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
-	const cacheWarmSuffixTokens = config.cacheWarmSuffixTokens;
+	// The warm guard (default 8k suffix) is narrower than the age window
+	// (protectTokens, 40k newer tool tokens), so with the guard armed an age
+	// victim can never be selected. Lift it once the cache is cold: after
+	// idleFlushMs of silence a re-write costs nothing, so deep victims are
+	// reclaimed then instead of never.
+	const cacheCold =
+		config.idleFlushMs !== undefined && isIdleBeyond(entries, config.idleFlushMs, config.now ?? Date.now());
+	const cacheWarmSuffixTokens = cacheCold ? undefined : config.cacheWarmSuffixTokens;
 	// All-message suffix per index, only when the cache guard is armed.
 	const messageSuffix =
 		cacheWarmSuffixTokens === undefined ? undefined : computeMessageSuffixTokens(entries, tokenizer);

@@ -164,6 +164,7 @@ Default prune policy:
 - Require at least `20_000` total estimated savings.
 - Never blank a result below `50` tokens (`MIN_PRUNE_TOKENS`): the `[Output truncated - N tokens]` placeholder costs ~8 tokens, so pruning a sub-floor result would grow the context and churn the prompt cache for nothing. (Superseded and useless results keep their own rules — the useless collector already drops no-savings candidates; superseded reads prune for correctness regardless of size.)
 - Never prune `skill` tool results, `read` results of `skill://` paths, or reads of the active plan reference file (added via `AgentSession`'s plan protection).
+- Prompt-cache guard: while the cache is warm, only results whose all-message suffix is at most `8_000` tokens are touched (`PRUNE_CACHE_WARM_SUFFIX_TOKENS`), so a still-cached prefix is never re-written. That window is narrower than the `40_000` age window, so age victims are reclaimed only once the cache is cold: after `PRUNE_IDLE_FLUSH_MS` (90 min) of silence the guard lifts and the whole sent region is eligible, same rule as the supersede pass. During continuous work, deep victims wait for compaction.
 
 Pruned tool results are replaced with:
 
