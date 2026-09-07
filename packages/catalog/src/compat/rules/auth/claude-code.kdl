@@ -1,0 +1,8 @@
+auth "claude-code" {
+	name "Claude Code (subscription)"
+	// Login only verifies the Claude CLI's own subscription session exists;
+	// the Claude Agent SDK subprocess authenticates itself, so no key is stored.
+	login "custom" hook="claude-code"
+	allows-missing-api-key #true
+	refresh "none"
+}

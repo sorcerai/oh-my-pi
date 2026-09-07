@@ -14,9 +14,10 @@ import { collectConfigCandidates } from "./watchdog";
  * adversarial system prompt and omitted `role` uses the task baseline; `tools`
  * is a subset of `BUILTIN_TOOL_NAMES` — any built-in name, including mutating
  * tools such as `edit`/`write`/`bash` (the advisor is a full agent). Omitted
- * falls back to the default `read`/`grep`/`glob` subset; an explicit empty
- * list grants no tools. `instructions` is the advisor's specialization,
- * appended to the shared baseline.
+ * falls back to the default `read`/`grep`/`glob` subset (plus `recall` when
+ * the active memory backend provides it); an explicit empty list grants no
+ * tools. `instructions` is the advisor's specialization, appended to the
+ * shared baseline.
  */
 export type AdvisorRole = "task" | "adversarial";
 

@@ -3,8 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { OAuthLoginCallbacks } from "./oauth/types";
-import type { ProviderDefinition } from "./types";
+import type { LoginHook } from "./hooks/types";
 
 const execFileAsync = promisify(execFile);
 
@@ -70,19 +69,13 @@ export async function detectClaudeCodeLogin(home: string = homedir()): Promise<C
 	return { found: false, source: null, account: null };
 }
 
-export const claudeCodeProvider = {
-	id: "claude-code",
-	name: "Claude Code (subscription)",
-	allowsMissingApiKey: true,
-	login: async (cb: OAuthLoginCallbacks) => {
-		cb.onProgress?.("Checking Claude Code login state...");
-		const state = await detectClaudeCodeLogin();
-		if (!state.found) {
-			throw new Error(
-				"Claude Code is not logged in. Run 'claude login' in a terminal, then retry /login claude-code.",
-			);
-		}
-		cb.onProgress?.(`Claude Code login found (${state.source}${state.account ? `, ${state.account}` : ""}).`);
-		return CLAUDE_CODE_LOGIN_PLACEHOLDER;
-	},
-} as const satisfies ProviderDefinition;
+/** `login "custom" hook="claude-code"` (`rules/auth/claude-code.kdl`). */
+export const loginClaudeCodeHook: LoginHook = async cb => {
+	cb.onProgress?.("Checking Claude Code login state...");
+	const state = await detectClaudeCodeLogin();
+	if (!state.found) {
+		throw new Error("Claude Code is not logged in. Run 'claude login' in a terminal, then retry /login claude-code.");
+	}
+	cb.onProgress?.(`Claude Code login found (${state.source}${state.account ? `, ${state.account}` : ""}).`);
+	return CLAUDE_CODE_LOGIN_PLACEHOLDER;
+};

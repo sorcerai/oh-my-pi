@@ -90,6 +90,7 @@ export interface NonMessageTokenSource {
 	};
 	readonly skills?: readonly Skill[];
 	readonly skillsSettings?: Pick<SkillsSettings, "promptMode" | "promptSkills">;
+	readonly settings?: { get(key: "skillful"): boolean };
 }
 
 const EMPTY_STRING_PARTS: string[] = [];
@@ -255,10 +256,10 @@ export function computeNonMessageBreakdown(
 } {
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
-	const skillsTokens = estimateSkillsTokens(
-		renderedSkills(entry.skillsRef, entry.toolsRef, entry.skillsSettingsRef),
-		tokenizer,
-	);
+	const skillsTokens =
+		session.settings?.get("skillful") === false
+			? 0
+			: estimateSkillsTokens(renderedSkills(entry.skillsRef, entry.toolsRef, entry.skillsSettingsRef), tokenizer);
 	const toolsTokens = estimateToolSchemaTokens(entry.toolsRef, tokenizer);
 	const systemPromptParts = entry.systemPromptRef;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
