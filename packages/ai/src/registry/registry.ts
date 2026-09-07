@@ -9,6 +9,7 @@ import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
 import { cerebrasProvider } from "./cerebras";
+import { claudeCodeProvider } from "./claude-code";
 import { clinePassProvider } from "./cline-pass";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
@@ -96,6 +97,7 @@ const ALL = [
 	openrouterProvider,
 	githubCopilotProvider,
 	cursorProvider,
+	claudeCodeProvider,
 	devinProvider,
 	googleAntigravityProvider,
 	googleGeminiCliProvider,

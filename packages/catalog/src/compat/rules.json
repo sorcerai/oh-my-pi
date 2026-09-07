@@ -30,6 +30,7 @@
 		"providers/baseten.kdl",
 		"providers/bedrock-mantle.kdl",
 		"providers/cerebras.kdl",
+		"providers/claude-code.kdl",
 		"providers/cloudflare-ai-gateway.kdl",
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
@@ -6970,6 +6971,22 @@
 				],
 				"thinking": {
 					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/claude-code.kdl:8",
+				"providers": [
+					"claude-code"
+				],
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					]
 				}
 			},
 			{

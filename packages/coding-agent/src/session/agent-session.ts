@@ -1677,7 +1677,14 @@ export class AgentSession {
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
-			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
+			rebaseAfterCompaction: () => {
+				this.#stats.rebaseAfterCompaction();
+				// Deliberately over-broad: this fires for every compaction path
+				// (manual, auto, recovery) plus image drops and failed-turn drops.
+				// All of them rewrite the transcript, and the only cost of an extra
+				// reset is one full replay instead of an SDK-side resume.
+				this.agent.claudeSdkHandlers?.resetSdkSession();
+			},
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -4559,6 +4566,9 @@ export class AgentSession {
 		// newSession()).
 		this.#clearCheckpointRuntimeState();
 		this.#clearSessionScopedToolState();
+		// `/clear` keeps the session file and wipes its transcript, so it reaches
+		// neither the history-rewrite seam nor a new branch: tombstone here.
+		this.agent.claudeSdkHandlers?.resetSdkSession();
 
 		// Rotate provider-side session state so a provider that keeps conversation
 		// history server-side starts a brand-new exchange rather than resuming the
@@ -5337,6 +5347,12 @@ export class AgentSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		// The Claude Agent SDK resumes server-side history by session id, so the
+		// cached id must not survive into a different transcript. Forget, don't
+		// tombstone: switchSession() reaches here AFTER the target is loaded, and
+		// a tombstone would land on the target's own branch and strand its
+		// session. Transcripts that are genuinely discarded reset explicitly.
+		this.agent.claudeSdkHandlers?.forgetSdkSession?.();
 	}
 
 	/**
@@ -7383,6 +7399,10 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// Fork clones the transcript into a second session file. Both copies
+			// would otherwise resume the same server-side Claude Agent SDK session
+			// and interleave their turns into it.
+			this.agent.claudeSdkHandlers?.resetSdkSession();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -7857,6 +7877,11 @@ export class AgentSession {
 	}
 
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
+		// Not codex-specific and must run before the model guard below: every
+		// caller here rewrote the transcript (prune, shake, dropImages, rewind,
+		// branch, branchFromBtw, navigateTree, snapcompact rescue), so a resumed
+		// SDK session would still hold the tokens omp just reclaimed. Idempotent.
+		this.agent.claudeSdkHandlers?.resetSdkSession();
 		const currentModel = this.model;
 		if (currentModel?.api !== "openai-codex-responses") return;
 		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
