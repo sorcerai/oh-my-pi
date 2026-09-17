@@ -810,9 +810,16 @@ export class SessionAdvisors {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
 		const budget = this.#advisorMaxNotesPerUpdate(config);
-		return [config.name, slug, config.role ?? "", formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
-			"\u001f",
-		);
+		return [
+			config.name,
+			slug,
+			config.role ?? "",
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+			budget,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -862,7 +869,7 @@ export class SessionAdvisors {
 			} = descriptor;
 
 			const budgetPerUpdate = this.#advisorMaxNotesPerUpdate(config);
-			const emissionGuard = new AdvisorEmissionGuard(this.#advisorEmissionHistory, { budgetPerUpdate });
+			const emissionGuard = new AdvisorEmissionGuard(this.#advisorEmissionHistory, budgetPerUpdate);
 			const adviseTool = new AdviseTool(
 				(note, severity) => this.#routeAdvice(advisorRef, note, severity),
 				(note, severity) => this.#acceptAdvice(advisorRef, note, severity),

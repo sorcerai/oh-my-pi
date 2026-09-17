@@ -366,7 +366,6 @@ describe("SessionTools.refreshSkills", () => {
 		const loads = [firstLoad, secondLoad];
 		let loadCalls = 0;
 		let promptCalls = 0;
-		let sessionTools!: SessionTools;
 		const promptStates: string[] = [];
 		const notifications: string[] = [];
 		const appliedPrompts: string[] = [];
@@ -379,7 +378,7 @@ describe("SessionTools.refreshSkills", () => {
 			return result.promise;
 		});
 
-		sessionTools = makeSessionTools({
+		const sessionTools = makeSessionTools({
 			rebuildSystemPrompt: async () => {
 				const isFirstPrompt = promptCalls++ === 0;
 				const prompt = isFirstPrompt ? firstPrompt : secondPrompt;

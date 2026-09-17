@@ -8525,7 +8525,6 @@ export class AgentSession {
 			!currentModel ||
 			!modelsAreEqual(currentModel, model) ||
 			formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(model);
-		const codeModeChanged = this.#tools.codeModeChangesBetween(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {
@@ -8551,6 +8550,10 @@ export class AgentSession {
 			this.#advisors.onPrimaryModelChanged();
 		}
 
+		await this.#reconcileModelDependentState(currentModel, model);
+	}
+
+	async #reconcileModelDependentState(previousModel: Model | undefined, model: Model): Promise<void> {
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);
 

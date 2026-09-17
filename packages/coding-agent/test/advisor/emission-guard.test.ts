@@ -102,16 +102,6 @@ describe("AdvisorEmissionGuard", () => {
 		}
 		expect(guard.accept("Note 33", "concern")).toBe("rate_limited");
 	});
-		const guard = new AdvisorEmissionGuard();
-		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe("accepted");
-		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");
-		expect(guard.accept("Third concern: unhandled rejection.")).toBe("accepted");
-		expect(guard.accept("Fourth concern: missing validation.")).toBe("accepted");
-		expect(guard.accept("Fifth concern: unhandled error.")).toBe("rate_limited");
-		guard.beginUpdate();
-		// New cycle: budget reset.
-		expect(guard.accept("Fifth concern: unhandled error.")).toBe("accepted");
-	});
 
 	it("supports strict 1-note rate-limiting when budgetPerUpdate is set to 1", () => {
 		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });

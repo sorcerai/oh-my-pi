@@ -10,6 +10,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
@@ -2620,8 +2621,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					Reflect.get(primaryRead, "tool") ?? primaryRead,
 					"session",
 				) as ToolSession;
-				const primarySnapshotStore = {} as NonNullable<ToolSession["fileSnapshotStore"]>;
-				primarySession.fileSnapshotStore = primarySnapshotStore;
+				const primarySnapshotStore = getEditStore(primarySession);
 
 				await session.applyAdvisorConfigs(
 					[
@@ -2641,11 +2641,14 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					"session",
 				) as ToolSession;
 
+				const taskSnapshotStore = getEditStore(taskSession);
+				const adversarialSnapshotStore = getEditStore(adversarialSession);
 				expect(taskSession).not.toBe(primarySession);
 				expect(adversarialSession).not.toBe(primarySession);
 				expect(taskSession).not.toBe(adversarialSession);
-				expect(taskSession.fileSnapshotStore).not.toBe(primarySnapshotStore);
-				expect(adversarialSession.fileSnapshotStore).not.toBe(primarySnapshotStore);
+				expect(taskSnapshotStore).not.toBe(primarySnapshotStore);
+				expect(adversarialSnapshotStore).not.toBe(primarySnapshotStore);
+				expect(taskSnapshotStore).not.toBe(adversarialSnapshotStore);
 			} finally {
 				await session.dispose();
 			}

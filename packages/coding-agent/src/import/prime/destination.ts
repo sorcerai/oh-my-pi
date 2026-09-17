@@ -2116,9 +2116,9 @@ export async function applyPrimeDestination(
 	plan: PrimeDestinationPlan,
 	input: PrimeDestinationInput,
 ): Promise<PrimeDestinationApplyResult> {
-	let items = [...plan.items],
-		losses = [...plan.losses],
-		committed = false,
+	let items = [...plan.items];
+	const losses = [...plan.losses];
+	let committed = false,
 		partialApply = false,
 		publicationUncertain = false,
 		credentialDestinationInvalid = false,

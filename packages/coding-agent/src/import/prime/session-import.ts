@@ -1262,7 +1262,7 @@ export async function applyPrimeSessions(
 						blobRefs.set(image.hash, `blob:sha256:${image.hash}`);
 					} catch (error) {
 						if (!operational(error) && !(error instanceof PrimeOperationalError)) throw error;
-						for (const entry of [...manifestEntries]) {
+						for (const entry of manifestEntries.slice()) {
 							if (entry.itemId !== `blob:${image.hash}` && entry.itemId !== `blob:${image.hash}:display`)
 								continue;
 							if (!(await nodeDigest(entry.destinationRef)).exists) forgetRunEntry(manifestKey(entry));

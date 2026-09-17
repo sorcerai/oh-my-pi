@@ -894,14 +894,13 @@ describe("PrimeDaemonClient", () => {
 		const { socketPath, databasePath } = await paths();
 		const store = BridgeStore.open(databasePath);
 		const originalPersist = store.persistCommand.bind(store);
-		let client!: PrimeDaemonClient;
+		const client = new PrimeDaemonClient({ store, socketPath });
 		store.persistCommand = (...args) => {
 			const result = originalPersist(...args);
 			client.close();
 			return result;
 		};
 		const initial = fakeDaemon(socketPath, (server, command) => server.send(response(command)));
-		client = new PrimeDaemonClient({ store, socketPath });
 		await client.connect();
 		await expect(client.detach("s")).rejects.toBeInstanceOf(CommandResultUncertainError);
 		const pending = store.listPendingCommands();
