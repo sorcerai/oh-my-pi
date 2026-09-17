@@ -1,0 +1,6 @@
+auth "claude-code" {
+	name "Claude Code (subscription)"
+	login "custom" hook="claude-code"
+	allows-missing-api-key #true
+	refresh "none"
+}

@@ -13,6 +13,7 @@
 		"auth/baseten.kdl",
 		"auth/bedrock-mantle.kdl",
 		"auth/cerebras.kdl",
+		"auth/claude-code.kdl",
 		"auth/cline-pass.kdl",
 		"auth/cloudflare-ai-gateway.kdl",
 		"auth/coreweave.kdl",
@@ -7519,16 +7520,6 @@
 				}
 			},
 			{
-				"source": "providers/cline-pass.kdl:3",
-				"providers": [
-					"cline-pass"
-				],
-				"wire": {
-					"wireModelIdMode": "cline-pass",
-					"thinkingFormat": "openai"
-				}
-			},
-			{
 				"source": "providers/claude-code.kdl:8",
 				"providers": [
 					"claude-code"
@@ -7542,6 +7533,16 @@
 						"xhigh",
 						"max"
 					]
+				}
+			},
+			{
+				"source": "providers/cline-pass.kdl:3",
+				"providers": [
+					"cline-pass"
+				],
+				"wire": {
+					"wireModelIdMode": "cline-pass",
+					"thinkingFormat": "openai"
 				}
 			},
 			{
@@ -10947,35 +10948,6 @@
 						"priority": 2
 					},
 					"clampContextOverride": true
-				}
-			},
-			{
-				"source": "providers/openai-codex.kdl:122",
-				"providers": [
-					"openai-codex"
-				],
-				"models": [
-					{
-						"kind": "exact",
-						"value": "gpt-6-astra"
-					},
-					{
-						"kind": "exact",
-						"value": "gpt-6-astra-wm"
-					}
-				],
-				"catalog": {
-					"costPatch": {
-						"input": 10,
-						"output": 50,
-						"cache-read": 1,
-						"cache-write": 0
-					},
-					"serviceTierCost": {
-						"flex": 0.5,
-						"priority": 2.5
-					},
-					"contextWindowFloor": 1050000
 				}
 			},
 			{
@@ -15326,6 +15298,19 @@
 				},
 				"callbackPort": 54545,
 				"pasteCode": true
+			},
+			{
+				"id": "claude-code",
+				"apiKeyFormat": "bearer",
+				"name": "Claude Code (subscription)",
+				"login": {
+					"kind": "custom",
+					"hook": "claude-code"
+				},
+				"allowsMissingApiKey": true,
+				"refresh": {
+					"kind": "none"
+				}
 			},
 			{
 				"id": "zai",
