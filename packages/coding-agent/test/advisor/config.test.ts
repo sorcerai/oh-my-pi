@@ -11,8 +11,8 @@ import {
 	saveWatchdogConfigFile,
 	serializeWatchdogConfig,
 	slugifyAdvisorName,
-	type WatchdogConfigDoc,
 } from "../../src/advisor/config";
+import type { WatchdogConfigDoc } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 
 describe("discoverAdvisorConfigs", () => {
 	let tmp: string;
@@ -52,7 +52,7 @@ describe("discoverAdvisorConfigs", () => {
 		expect(arch.instructions).toBe("Watch module boundaries.");
 		expect(sec.name).toBe("Security Reviewer");
 		expect(sec.model).toBeUndefined();
-		// The unknown/non-read-only tool is dropped; only `read` survives.
+		// The unknown tool is dropped; only `read` survives.
 		expect(sec.tools).toEqual(["read"]);
 		expect(sharedInstructions).toBe("Shared baseline for all advisors.");
 	});
@@ -72,12 +72,13 @@ describe("discoverAdvisorConfigs", () => {
 		expect(advisors.map(advisor => advisor.role)).toEqual(["task", "adversarial", undefined]);
 	});
 
-	it("rejects an advisor with an invalid role through existing schema handling", async () => {
+	it("rejects an invalid advisor role and surfaces the offending field", async () => {
 		const file = path.join(tmp, "WATCHDOG.yml");
 		await Bun.write(file, ["advisors:", "  - name: Invalid", "    role: observer"].join("\n"));
 
-		expect((await discoverAdvisorConfigs(tmp, agentDir)).advisors).toEqual([]);
-		expect(await loadWatchdogConfigFile(file)).toEqual({ advisors: [] });
+		const discovered = await discoverAdvisorConfigs(tmp, agentDir);
+		expect(discovered.advisors).toEqual([]);
+		expect(discovered.warnings).toEqual([expect.stringContaining("role")]);
 	});
 
 	it("distinguishes omitted tools, explicit no-tools, and invalid-only lists", async () => {
@@ -88,6 +89,8 @@ describe("discoverAdvisorConfigs", () => {
 			"  - name: Default Tools",
 			"  - name: Invalid Only",
 			"    tools: [reed]",
+			"  - name: Alias Tools",
+			"    tools: [search, search, find]",
 		].join("\n");
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
 
@@ -95,10 +98,12 @@ describe("discoverAdvisorConfigs", () => {
 		const noTools = advisors.find(a => a.name === "No Tools");
 		const defaultTools = advisors.find(a => a.name === "Default Tools");
 		const invalidOnly = advisors.find(a => a.name === "Invalid Only");
+		const aliasTools = advisors.find(a => a.name === "Alias Tools");
 
 		expect(noTools?.tools).toEqual([]);
 		expect(defaultTools?.tools).toBeUndefined();
-		expect(invalidOnly?.tools).toBeUndefined();
+		expect(invalidOnly?.tools).toEqual([]);
+		expect(aliasTools?.tools).toEqual(["grep", "glob"]);
 	});
 
 	it("ignores a malformed YAML file without throwing", async () => {
@@ -106,12 +111,68 @@ describe("discoverAdvisorConfigs", () => {
 		const result = await discoverAdvisorConfigs(tmp, agentDir);
 		expect(result.advisors).toEqual([]);
 		expect(result.sharedInstructions).toBeUndefined();
+		expect(result.warnings).toHaveLength(1);
+		expect(result.warnings[0]).toContain("failed to parse YAML");
+		// Editor reports the same problem class instead of blanking silently.
+		const doc = await loadWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"));
+		expect(doc.advisors).toEqual([]);
+		expect(doc.warnings).toHaveLength(1);
+		expect(doc.warnings?.[0]).toContain("failed to parse YAML");
 	});
 
 	it("skips a file whose shape fails the schema (advisors must be a list)", async () => {
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), "advisors: not-an-array");
 		const result = await discoverAdvisorConfigs(tmp, agentDir);
 		expect(result.advisors).toEqual([]);
+		expect(result.warnings).toHaveLength(1);
+		expect(result.warnings[0]).toContain("advisors must be a list");
+		const doc = await loadWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"));
+		expect(doc.advisors).toEqual([]);
+		expect(doc.warnings).toHaveLength(1);
+		expect(doc.warnings?.[0]).toContain("advisors must be a list");
+	});
+
+	it("reports a non-mapping document in the editor just like discovery does", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		await Bun.write(file, "- just\n- a\n- list\n");
+
+		const discovered = await discoverAdvisorConfigs(tmp, tmp);
+		expect(discovered.advisors).toEqual([]);
+		expect(discovered.warnings).toHaveLength(1);
+		expect(discovered.warnings[0]).toContain("expected a YAML mapping");
+
+		const doc = await loadWatchdogConfigFile(file);
+		expect(doc.advisors).toEqual([]);
+		expect(doc.warnings).toHaveLength(1);
+		expect(doc.warnings?.[0]).toContain("expected a YAML mapping");
+	});
+
+	it("drops only the malformed entry and reports one warning per problem", async () => {
+		await Bun.write(
+			path.join(tmp, "WATCHDOG.yml"),
+			[
+				"advisors:",
+				"  - name: Good",
+				"  - name: Bad",
+				"    enabled: not-a-boolean",
+				"  - name: Also Bad",
+				"    maxNotesPerUpdate: not-a-number",
+			].join("\n"),
+		);
+		const result = await discoverAdvisorConfigs(tmp, agentDir);
+		expect(result.advisors.map(a => a.name)).toEqual(["Good"]);
+		expect(result.warnings).toHaveLength(2);
+		expect(result.warnings[0]).toContain('"Bad"');
+		expect(result.warnings[1]).toContain('"Also Bad"');
+	});
+
+	it("editor load drops only the malformed entry, like discovery", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		await Bun.write(file, "advisors:\n  - name: Good\n  - name: Bad\n    enabled: bogus\n");
+		const doc = await loadWatchdogConfigFile(file);
+		expect(doc.advisors.map(a => a.name)).toEqual(["Good"]);
+		expect(doc.warnings).toHaveLength(1);
+		expect(doc.warnings?.[0]).toContain('"Bad"');
 	});
 
 	it("returns an empty roster when no config file exists", async () => {

@@ -17,7 +17,7 @@ import {
 	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	renderContextUsage,
-} from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+} from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { applyToolProxy } from "../../src/extensibility/tool-proxy";
 
 const tokenizer = new Tokenizer();
@@ -71,8 +71,6 @@ describe("estimateToolSchemaTokens", () => {
 	});
 
 	it("runs the full non-message breakdown on a proxied extension tool", () => {
-		// The crash frame was computeNonMessageBreakdown → estimateToolSchemaTokens
-		// inside pre-prompt compaction; exercise that whole path, memo included.
 		const schema = bindCapableSchema();
 		const wrapper: Record<string, unknown> = {};
 		applyToolProxy({ name: "ext", description: "ext tool", parameters: schema }, wrapper);
@@ -211,10 +209,12 @@ describe("computeNonMessageTokens / computeNonMessageBreakdown memoization", () 
 
 /**
  * Contract: the Skills category counts only skills actually rendered into the
- * system prompt (mirroring `buildSystemPrompt`'s filter) — hidden/explicit-only
- * skills, and every skill when the `read` tool is absent, contribute zero. The
- * System-prompt subtraction must not be inflated by unrendered skill metadata
- * and clamped to 0 (issue #6498).
+ * system prompt. Host sessions project the prompt-selected set via
+ * `projectPromptSkills` (prompt-mode selection + skill-reader tool gate);
+ * sessions without a projection fall back to the hide-filter mirror — hidden
+ * skills, and every skill when no skill-reading tool exists, contribute zero.
+ * The System-prompt subtraction must not be inflated by unrendered skill
+ * metadata and clamped to 0 (issue #6498).
  */
 describe("computeNonMessageBreakdown skills filtering", () => {
 	const readTool = { name: "read", description: "read files", parameters: {} };
@@ -225,6 +225,34 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 
 	function session(tools: unknown[], skills: unknown[], skillsSettings?: unknown) {
 		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills, skillsSettings } as never;
+	}
+
+	/**
+	 * Host-shaped fixture: the projection composes the exact pieces the
+	 * production host uses — `selectSkillsForPrompt` with the skill-reader
+	 * tool gate and the session's live prompt settings — so accounting tracks
+	 * what `buildSystemPrompt` renders.
+	 */
+	function sessionWithProjection(tools: unknown[], skills: unknown[], skillsSettings?: unknown) {
+		const source: {
+			systemPrompt: string[];
+			agent: { state: { tools: unknown[] } };
+			skills: unknown[];
+			skillsSettings?: unknown;
+			projectPromptSkills: () => never;
+		} = {
+			systemPrompt: [renderedPrompt],
+			agent: { state: { tools } },
+			skills,
+			skillsSettings,
+			projectPromptSkills: () =>
+				selectSkillsForPrompt(
+					source.skills as never,
+					tools.some(tool => (tool as { name: string }).name === "read"),
+					source.skillsSettings as never,
+				) as never,
+		};
+		return source;
 	}
 
 	it("excludes hidden skills and does not clamp System prompt to 0", () => {
@@ -256,16 +284,16 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 			source: "test",
 		};
 		const coreSettings = { promptMode: "core" as const };
-		const coreSession = session([readTool], [native, local], coreSettings);
-		const coreSelected = selectSkillsForPrompt([native, local], true, coreSettings);
-		expect(computeNonMessageBreakdown(coreSession, tokenizer).skillsTokens).toBe(
+		const coreSession = sessionWithProjection([readTool], [native, local], coreSettings);
+		const coreSelected = selectSkillsForPrompt([native, local] as never, true, coreSettings);
+		expect(computeNonMessageBreakdown(coreSession as never, tokenizer).skillsTokens).toBe(
 			estimateSkillsTokens(coreSelected, tokenizer),
 		);
 
 		const allowlistSettings = { promptMode: "allowlist" as const, promptSkills: ["local-*"] };
-		const allowlistSession = session([readTool], [native, local], allowlistSettings);
-		const allowlistSelected = selectSkillsForPrompt([native, local], true, allowlistSettings);
-		expect(computeNonMessageBreakdown(allowlistSession, tokenizer).skillsTokens).toBe(
+		const allowlistSession = sessionWithProjection([readTool], [native, local], allowlistSettings);
+		const allowlistSelected = selectSkillsForPrompt([native, local] as never, true, allowlistSettings);
+		expect(computeNonMessageBreakdown(allowlistSession as never, tokenizer).skillsTokens).toBe(
 			estimateSkillsTokens(allowlistSelected, tokenizer),
 		);
 	});
@@ -285,9 +313,7 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 			baseDir: "/s",
 			source: "test",
 		};
-		const source = session([readTool], [native, local], { promptMode: "core" as const }) as {
-			skillsSettings?: unknown;
-		};
+		const source = sessionWithProjection([readTool], [native, local], { promptMode: "core" as const });
 		const coreTokens = computeNonMessageBreakdown(source as never, tokenizer).skillsTokens;
 		source.skillsSettings = { promptMode: "allowlist" as const, promptSkills: ["local-*"] };
 		const allowlistTokens = computeNonMessageBreakdown(source as never, tokenizer).skillsTokens;

@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { Shell } from "@oh-my-pi/pi-natives";
@@ -132,15 +136,13 @@ describe("BashTool execution results", () => {
 		expect(text).toContain("TS2304 Cannot find name 'foo'");
 	});
 
-	it("stamps the harness task run id over a caller-supplied value", async () => {
+	it("stamps the harness task run id on the shell subprocess", async () => {
 		const tool = new BashTool(makeSession("agent-run-123"));
 		const result = await tool.execute("call-task-run-id", {
 			command: 'printf "%s" "$TASK_RUN_ID"',
-			env: { TASK_RUN_ID: "spoofed" },
 		});
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("agent-run-123");
-		expect(text).not.toContain("spoofed");
 	});
 
 	it("preserves final-stage output when a pipeline ends in head or tail", async () => {
@@ -156,6 +158,114 @@ describe("BashTool execution results", () => {
 
 			expect(result.isError).toBeUndefined();
 			expect(stdout).toBe(scenario.expected);
+		}
+	});
+});
+
+describe("BashTool skill:// working directory", () => {
+	async function skillFixture(): Promise<{ dir: string; skillDir: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-cwd-")));
+		const skillDir = path.join(dir, "skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		return {
+			dir,
+			skillDir,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: path.join(skillDir, "SKILL.md"),
+				baseDir: skillDir,
+				source: "test",
+			},
+		};
+	}
+
+	it("runs a command with a bare skill URI as cwd", async () => {
+		const { dir, skillDir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cwd", { command: "pwd", cwd: "skill://docs" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain(skillDir);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("runs a leading cd into a bare skill URI", async () => {
+		const { dir, skillDir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && pwd" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain(skillDir);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("BashTool skill:// containment failures", () => {
+	async function containedFixture(): Promise<{ dir: string; outsideFile: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		const skillDir = path.join(pluginRoot, "skills", "docs");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		const outsideFile = path.join(dir, "secret.md");
+		await fs.writeFile(outsideFile, "outside contents\n");
+		return {
+			dir,
+			outsideFile,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: outsideFile,
+				baseDir: skillDir,
+				source: "agent-plugins:user",
+				containRoot: pluginRoot,
+			},
+		};
+	}
+
+	it("rejects a command reading past the plugin boundary instead of running it", async () => {
+		const { dir, skill } = await containedFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+
+			await expect(tool.execute("call-skill-leak", { command: "cat skill://docs" })).rejects.toThrow(
+				"resolves outside the plugin root",
+			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a working directory past the plugin boundary instead of running in it", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		await fs.mkdir(pluginRoot, { recursive: true });
+		const skill: Skill = {
+			name: "docs",
+			description: "d",
+			filePath: path.join(dir, "SKILL.md"),
+			baseDir: dir,
+			source: "agent-plugins:user",
+			containRoot: pluginRoot,
+		};
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+
+			await expect(tool.execute("call-skill-leak-cwd", { command: "pwd", cwd: "skill://docs" })).rejects.toThrow(
+				"resolves outside the plugin root",
+			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 });

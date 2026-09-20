@@ -1,5 +1,5 @@
 import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForGlobal } from "../../launch/client";
-import type { DaemonSpec } from "../../launch/protocol";
+import type { DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
 
 const PRIME_BRIDGE_BROKER_SCOPE = "prime-bridge";
 const PRIME_BRIDGE_DAEMON_NAME = "prime-bridge";

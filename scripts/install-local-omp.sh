@@ -179,6 +179,10 @@ esac
 
 agent_dir=${OMP_LOCAL_AGENT_DIR:-${PI_CODING_AGENT_DIR:-"$HOME/.omp/agent"}}
 smoke_model=${OMP_LOCAL_SMOKE_MODEL:-@advisor}
+smoke_agent=${OMP_LOCAL_SMOKE_AGENT:-flash-worker}
+case "$smoke_agent" in
+	''|*[!a-zA-Z0-9_-]*) fail "OMP_LOCAL_SMOKE_AGENT must be an agent name containing only letters, digits, underscores or hyphens" ;;
+esac
 smoke_timeout=${OMP_LOCAL_SMOKE_TIMEOUT:-120}
 case "$smoke_timeout" in
 	''|*[!0-9]*) fail "OMP_LOCAL_SMOKE_TIMEOUT must be a positive integer in seconds" ;;
@@ -299,16 +303,18 @@ fi
 printf '%s: version smoke passed: %s\n' "$name" "$version_output"
 
 marker=OMP_LOCAL_INSTALL_FLASH_WORKER_OK
-prompt="Run one nested agent task with the configured agent named flash-worker. Give it this instruction: Reply with exactly $marker and no other text. You must call the task tool and wait for its result. If the nested result carries $marker, reply with exactly $marker and no other text. Otherwise, fail without printing the marker."
+prompt="Run one nested agent task with the configured agent named $smoke_agent. Give it this instruction: Reply with exactly $marker and no other text. You must call the task tool and wait for its result. If the nested result carries $marker, reply with exactly $marker and no other text. Otherwise, fail without printing the marker."
+printf '%s: running live smoke with parent %s and worker %s\n' "$name" "$smoke_model" "$smoke_agent"
 smoke_log=$(mktemp "$global_bin/.omp.smoke.XXXXXX") || fail "cannot create smoke log"
 smoke_json=$(mktemp "$global_bin/.omp.smoke-json.XXXXXX") || fail "cannot create smoke event log"
 if ! PI_CODING_AGENT_DIR="$agent_dir" PI_NO_TITLE=1 NO_COLOR=1 "$target" --mode json --no-session --no-title --model "$smoke_model" --max-time "$smoke_timeout" -- "$prompt" >"$smoke_json" 2>"$smoke_log"; then
 	[ ! -s "$smoke_log" ] || cat "$smoke_log" >&2
-	fail "flash-worker smoke command failed"
+	fail "$smoke_agent smoke command failed"
 fi
-if ! OMP_LOCAL_SMOKE_JSON="$smoke_json" OMP_LOCAL_SMOKE_MARKER="$marker" bun -e '
+if ! OMP_LOCAL_SMOKE_JSON="$smoke_json" OMP_LOCAL_SMOKE_MARKER="$marker" OMP_LOCAL_SMOKE_AGENT="$smoke_agent" bun -e '
 const source = await Bun.file(process.env.OMP_LOCAL_SMOKE_JSON).text();
 const marker = process.env.OMP_LOCAL_SMOKE_MARKER;
+const smokeAgent = process.env.OMP_LOCAL_SMOKE_AGENT;
 const events = source
 	.split(/\r?\n/)
 	.filter(line => line.trim().length > 0)
@@ -319,18 +325,18 @@ const events = source
 			throw new Error(`invalid JSON event on line ${index + 1}`);
 		}
 	});
-const selectsFlashWorker = args =>
-	args?.agent === "flash-worker" ||
-	(Array.isArray(args?.tasks) && args.tasks.some(item => item?.agent === "flash-worker"));
+const selectsWorker = args =>
+	args?.agent === smokeAgent ||
+	(Array.isArray(args?.tasks) && args.tasks.some(item => item?.agent === smokeAgent));
 const starts = events.filter(
-	event => event?.type === "tool_execution_start" && event.toolName === "task" && selectsFlashWorker(event.args),
+	event => event?.type === "tool_execution_start" && event.toolName === "task" && selectsWorker(event.args),
 );
 const directResultCarriesMarker = taskEnd => {
 	const results = taskEnd.result?.details?.results;
 	if (!Array.isArray(results) || results.length !== 1) return false;
 	const result = results[0];
 	return (
-		result?.agent === "flash-worker" &&
+		result?.agent === smokeAgent &&
 		result.exitCode === 0 &&
 		result.aborted !== true &&
 		!result.error &&
@@ -376,7 +382,7 @@ const asyncResultCarriesMarker = taskEnd => {
 	const outputMatches = [...job.resultText.matchAll(/<output>\r?\n([\s\S]*?)\r?\n<\/output>/g)];
 	return (
 		taskResultTags.length === 1 &&
-		/\bagent="flash-worker"/.test(taskResultTags[0]) &&
+		/\bagent="([^"]+)"/.exec(taskResultTags[0])?.[1] === smokeAgent &&
 		/\bstatus="completed"/.test(taskResultTags[0]) &&
 		outputMatches.length === 1 &&
 		outputMatches[0][1] === marker
@@ -395,7 +401,7 @@ const taskEnds =
 const provedNestedRun =
 	taskEnds.length === 1 && (directResultCarriesMarker(taskEnds[0]) || asyncResultCarriesMarker(taskEnds[0]));
 if (!provedNestedRun) {
-	throw new Error("no successful flash-worker task event carried the marker");
+	throw new Error(`no successful ${smokeAgent} task event carried the marker`);
 }
 const finalMessage = events
 	.filter(event => event?.type === "message_end" && event.message?.role === "assistant")
@@ -411,7 +417,7 @@ if (finalText !== marker) {
 }
 ' 2>>"$smoke_log"; then
 	[ ! -s "$smoke_log" ] || cat "$smoke_log" >&2
-	fail "flash-worker smoke JSON proof failed"
+	fail "$smoke_agent smoke JSON proof failed"
 fi
 
 if ! cleanup_worktree; then

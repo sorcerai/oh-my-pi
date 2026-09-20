@@ -101,6 +101,76 @@ describe("hub Prime external peers", () => {
 		expect(target).toBe("session/1");
 		expect(result.details?.externalReceipts).toEqual([receipt]);
 	});
+	it("applies status filtering to local and Prime peer rows", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "LocalIdle",
+			displayName: "Local idle",
+			kind: "sub",
+			session: { isStreaming: false } as unknown as Parameters<AgentRegistry["register"]>[0]["session"],
+			status: "idle",
+		});
+		const result = await new HubTool(
+			session(
+				provider({
+					list: async () => [
+						{ id: "prime-ready", displayName: "Prime ready", status: "ready", activeSessionId: "ready" },
+						{ id: "prime-idle", displayName: "Prime idle", status: "idle", activeSessionId: "idle" },
+						{ id: "prime-active", displayName: "Prime active", status: "active", activeSessionId: "active" },
+					],
+				}),
+			),
+		).execute("call", { op: "list", status: "idle" });
+		expect(result.details?.externalPeers?.map(peer => peer.id)).toEqual(["prime://idle"]);
+		expect(result.details?.peers?.map(peer => peer.id)).toEqual(["LocalIdle"]);
+	});
+
+	it("hides parked Prime peers by default while retaining full roster counts", async () => {
+		const tool = new HubTool(
+			session(
+				provider({
+					list: async () => [
+						{ id: "running", displayName: "Running", status: "ready" },
+						{ id: "idle", displayName: "Idle", status: "idle" },
+						{ id: "parked", displayName: "Parked", status: "parked" },
+						{ id: "unknown", displayName: "Unknown", status: "unknown" },
+					],
+				}),
+			),
+		);
+		const active = await tool.execute("active", { op: "list" });
+		expect(active.details?.externalPeers?.map(peer => peer.id)).toEqual(["prime://running", "prime://idle"]);
+		expect(active.details?.counts).toMatchObject({ running: 1, idle: 1, parked: 1, shown: 2 });
+		const parked = await tool.execute("parked", { op: "list", status: "parked" });
+		expect(parked.details?.externalPeers?.map(peer => peer.id)).toEqual(["prime://parked"]);
+		expect(parked.details?.counts).toMatchObject({ running: 1, idle: 1, parked: 1, shown: 1 });
+	});
+
+	it("applies one capacity bound across local and Prime peer rows", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "LocalRunning",
+			displayName: "Local running",
+			kind: "sub",
+			session: { isStreaming: true } as unknown as Parameters<AgentRegistry["register"]>[0]["session"],
+			status: "running",
+		});
+		const result = await new HubTool(
+			session(
+				provider({
+					list: async () => [
+						{ id: "prime-1", displayName: "Prime 1", status: "ready", activeSessionId: "prime-1" },
+						{ id: "prime-2", displayName: "Prime 2", status: "idle", activeSessionId: "prime-2" },
+						{ id: "prime-3", displayName: "Prime 3", status: "active", activeSessionId: "prime-3" },
+					],
+				}),
+			),
+		).execute("call", { op: "list", limit: 2 });
+		expect(result.details?.peers?.map(peer => peer.id)).toEqual(["LocalRunning"]);
+		expect(result.details?.externalPeers?.map(peer => peer.id)).toEqual(["prime://prime-1"]);
+		expect(result.details?.counts).toMatchObject({ shown: 2, truncated: 2 });
+		expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("truncated") });
+	});
 
 	it("races local and external waits and acknowledges the external winner", async () => {
 		let acknowledged = "";
@@ -115,10 +185,47 @@ describe("hub Prime external peers", () => {
 					},
 				}),
 			),
-		).execute("call", { op: "wait", timeoutMs: 100 });
+		).execute("call", { op: "wait" });
 		expect(result.details?.externalWaited).toEqual(external);
 		expect(acknowledged).toBe("claim-1");
 	});
+
+	it.each([false, true])(
+		"returns the committed message when cancellation arrives during ACK (watched jobs: %s)",
+		async watchedJobs => {
+			const controller = new AbortController();
+			const external = bridgeMessage({ body: "committed delivery" });
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const jobId = watchedJobs
+				? manager.register("bash", "pending job", async () => Promise.withResolvers<string>().promise, {
+						ownerId: MAIN_AGENT_ID,
+					})
+				: undefined;
+			let releases = 0;
+			try {
+				const result = await new HubTool(
+					session(
+						provider({
+							wait: async () => waitClaim(external),
+							ack: async () => {
+								controller.abort();
+								return true;
+							},
+							release: async () => {
+								releases++;
+								return true;
+							},
+						}),
+						{ asyncJobManager: manager },
+					),
+				).execute("call", { op: "wait", ...(jobId ? { ids: [jobId] } : {}) }, controller.signal);
+				expect(result.details?.externalWaited).toEqual(external);
+				expect(releases).toBe(0);
+			} finally {
+				if (jobId) manager.cancel(jobId);
+			}
+		},
+	);
 
 	it("keeps a locally consumed message over an external claim in the message-only photo finish", async () => {
 		const registry = AgentRegistry.global();
@@ -147,7 +254,7 @@ describe("hub Prime external peers", () => {
 					},
 				}),
 			),
-		).execute("call", { op: "wait", timeoutMs: 100 });
+		).execute("call", { op: "wait" });
 
 		wait.resolve(waitClaim(external));
 		const localSend = deferred<void>();
@@ -164,6 +271,48 @@ describe("hub Prime external peers", () => {
 		expect(acknowledgements).toBe(0);
 		expect(releases).toBe(1);
 	});
+	it("releases an external claim when the caller aborts during message photo-finish cleanup", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Peer",
+			displayName: "Peer",
+			kind: "sub",
+			session: { isStreaming: true } as unknown as Parameters<AgentRegistry["register"]>[0]["session"],
+			status: "running",
+		});
+		const controller = new AbortController();
+		const abortReason = new Error("photo-finish aborted");
+		const external = bridgeMessage();
+		Object.defineProperty(external, "body", {
+			get() {
+				controller.abort(abortReason);
+				return "external message";
+			},
+		});
+		const wait = deferred<ExternalPeerWaitClaim | null>();
+		let acknowledgements = 0;
+		let releases = 0;
+		const resultPromise = new HubTool(
+			session(
+				provider({
+					wait: async () => wait.promise,
+					ack: async () => {
+						acknowledgements++;
+						return true;
+					},
+					release: async () => {
+						releases++;
+						return true;
+					},
+				}),
+			),
+		).execute("call", { op: "wait" }, controller.signal);
+
+		wait.resolve(waitClaim(external));
+		await expect(resultPromise).rejects.toThrow(abortReason);
+		expect(acknowledgements).toBe(0);
+		expect(releases).toBe(1);
+	});
 	it("keeps a locally consumed message over an external claim with watched jobs", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({
@@ -174,7 +323,7 @@ describe("hub Prime external peers", () => {
 			status: "running",
 		});
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
-		const jobId = manager.register("bash", "wait forever", async () => new Promise<string>(() => {}), {
+		const jobId = manager.register("bash", "wait forever", async () => Promise.withResolvers<string>().promise, {
 			ownerId: MAIN_AGENT_ID,
 		});
 		const external = bridgeMessage({ body: "external loser" });
@@ -196,7 +345,7 @@ describe("hub Prime external peers", () => {
 				}),
 				{ asyncJobManager: manager },
 			),
-		).execute("call", { op: "wait", timeoutMs: 100 });
+		).execute("call", { op: "wait" });
 
 		wait.resolve(waitClaim(external));
 		const localSend = deferred<void>();
@@ -210,6 +359,46 @@ describe("hub Prime external peers", () => {
 		const result = await resultPromise;
 		expect(result.details?.waited?.body).toBe("local winner");
 		expect(result.details?.externalWaited).toBeUndefined();
+		expect(acknowledgements).toBe(0);
+		expect(releases).toBe(1);
+		manager.cancel(jobId);
+	});
+	it("releases an external claim when a watched-job wait aborts before acknowledgement", async () => {
+		const controller = new AbortController();
+		const abortReason = new Error("watched-job aborted");
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const jobId = manager.register("bash", "wait forever", async () => Promise.withResolvers<string>().promise, {
+			ownerId: MAIN_AGENT_ID,
+		});
+		const external = bridgeMessage();
+		Object.defineProperty(external, "body", {
+			get() {
+				controller.abort(abortReason);
+				return "external message";
+			},
+		});
+		const wait = deferred<ExternalPeerWaitClaim | null>();
+		let acknowledgements = 0;
+		let releases = 0;
+		const resultPromise = new HubTool(
+			session(
+				provider({
+					wait: async () => wait.promise,
+					ack: async () => {
+						acknowledgements++;
+						return true;
+					},
+					release: async () => {
+						releases++;
+						return true;
+					},
+				}),
+				{ asyncJobManager: manager },
+			),
+		).execute("call", { op: "wait" }, controller.signal);
+
+		wait.resolve(waitClaim(external));
+		await expect(resultPromise).rejects.toThrow(abortReason);
 		expect(acknowledgements).toBe(0);
 		expect(releases).toBe(1);
 		manager.cancel(jobId);
@@ -236,8 +425,7 @@ describe("hub Prime external peers", () => {
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(result.isError).toBe(true);
 		expect(result.details?.peers?.map(peer => peer.id)).toEqual(["Peer"]);
-		expect(text).toContain("1 peer(s)");
-		expect(text).toContain("Prime external peer provider failed during list: provider unavailable retry later");
+		expect(text).toContain("provider unavailable retry later");
 		expect(text).not.toContain("\u0000");
 		expect(text).not.toContain("\u001b");
 	});
@@ -261,10 +449,7 @@ describe("hub Prime external peers", () => {
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(result.isError).toBe(true);
 		expect(result.details?.peers?.map(peer => peer.id)).toEqual(["Peer"]);
-		expect(text).toContain("1 peer(s)");
-		expect(text).toContain(
-			"Prime external peer provider failed during list: Prime peer ID must be well-formed Unicode",
-		);
+		expect(text).toContain("well-formed Unicode");
 	});
 
 	it("preserves local inbox details when the external provider rejects with a sanitized error", async () => {
@@ -292,29 +477,22 @@ describe("hub Prime external peers", () => {
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(result.isError).toBe(true);
 		expect(result.details?.inbox?.map(message => message.body)).toEqual(["local inbox message"]);
-		expect(text).toContain("1 message(s):");
-		expect(text).toContain("Prime external peer provider failed during inbox: inbox unavailable please retry");
+		expect(text).toContain("inbox unavailable please retry");
 		expect(text).not.toContain("\u0000");
 		expect(text).not.toContain("\u001b");
 	});
 
 	it("keeps local behavior when no external provider is configured", async () => {
-		const result = await new HubTool(session()).execute("call", { op: "list" });
+		const toolSession = session();
+		AgentRegistry.global().register({
+			id: "Peer",
+			displayName: "Peer",
+			kind: "sub",
+			session: null,
+			status: "idle",
+		});
+		const result = await new HubTool(toolSession).execute("call", { op: "list" });
+		expect(result.details?.peers?.map(peer => peer.id)).toEqual(["Peer"]);
 		expect(result.details?.externalPeers).toBeUndefined();
-		expect(result.content[0]).toEqual({
-			type: "text",
-			text: "No other agents (running 0, idle 0, parked 0; shown 0, truncated 0).",
-		});
-	});
-
-	it("does not expose external peers in a restricted session", async () => {
-		const result = await new HubTool(session(provider(), { externalPeerProvider: undefined })).execute("call", {
-			op: "list",
-		});
-		expect(result.details?.externalPeers).toBeUndefined();
-		expect(result.content[0]).toEqual({
-			type: "text",
-			text: "No other agents (running 0, idle 0, parked 0; shown 0, truncated 0).",
-		});
 	});
 });

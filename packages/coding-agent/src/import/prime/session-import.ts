@@ -3,7 +3,7 @@ import type { Dir, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBlobsDir, withFileLock } from "@oh-my-pi/pi-utils";
-import { blobExtensionForImageMimeType } from "../../session/blob-store";
+import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { persistConvertedSession } from "../../session/foreign-session-import";
 import type { PrimeSessionProvenance } from "../../session/foreign-session-store";
 import type { SessionEntry } from "../../session/session-entries";
