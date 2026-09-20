@@ -382,16 +382,21 @@ const asyncResultCarriesMarker = taskEnd => {
 		outputMatches[0][1] === marker
 	);
 };
-const taskEnds =
-	starts.length === 1
-		? events.filter(
-				event =>
-					event?.type === "tool_execution_end" &&
-					event.toolName === "task" &&
-					event.toolCallId === starts[0].toolCallId &&
-					event.isError !== true,
-			)
-		: [];
+const taskCallIds = new Set(starts.map(event => event.toolCallId));
+// Validation replies do not launch a worker; count actual dispatches, not attempts.
+const taskEnds = events.filter(event => {
+	if (
+		event?.type !== "tool_execution_end" ||
+		event.toolName !== "task" ||
+		!taskCallIds.has(event.toolCallId) ||
+		event.isError === true
+	) return false;
+	const details = event.result?.details;
+	return (
+		(Array.isArray(details?.results) && details.results.length > 0) ||
+		(details?.async?.state === "running" && typeof details.async.jobId === "string")
+	);
+});
 const provedNestedRun =
 	taskEnds.length === 1 && (directResultCarriesMarker(taskEnds[0]) || asyncResultCarriesMarker(taskEnds[0]));
 if (!provedNestedRun) {
