@@ -348,36 +348,30 @@ const asyncResultCarriesMarker = taskEnd => {
 	if (taskEnd.result?.details?.async?.state !== "running" || typeof jobId !== "string") {
 		return false;
 	}
-	const waitStarts = events.filter(
-		event =>
+	// Interrupted waits can be retried; either wait or jobs can deliver the result.
+	const snapshotCalls = new Set(events
+		.filter(event =>
 			event?.type === "tool_execution_start" &&
 			event.toolName === "hub" &&
-			event.args?.op === "wait" &&
-			Array.isArray(event.args?.ids) &&
-			event.args.ids.length === 1 &&
-			event.args.ids[0] === jobId,
-	);
-	if (waitStarts.length !== 1) return false;
-	const waitEnds = events.filter(
-		event =>
+			(event.args?.op === "jobs" ||
+				(event.args?.op === "wait" &&
+					(event.args.ids === undefined ||
+						(Array.isArray(event.args.ids) && event.args.ids.includes(jobId))))))
+		.map(event => event.toolCallId));
+	const jobs = events
+		.filter(event =>
 			event?.type === "tool_execution_end" &&
 			event.toolName === "hub" &&
-			event.toolCallId === waitStarts[0].toolCallId &&
-			event.isError !== true,
-	);
-	if (waitEnds.length !== 1) return false;
-	const jobs = waitEnds[0].result?.details?.jobs;
-	if (!Array.isArray(jobs) || jobs.length !== 1) return false;
-	const job = jobs[0];
-	if (
-		job?.id !== jobId ||
-		job.status !== "completed" ||
-		job.error ||
-		typeof job.resultText !== "string" ||
-		job.resultText.split(marker).length !== 2
-	) {
-		return false;
-	}
+			snapshotCalls.has(event.toolCallId) &&
+			event.isError !== true)
+		.flatMap(event => Array.isArray(event.result?.details?.jobs) ? event.result.details.jobs : []);
+	const job = jobs.find(job =>
+		job?.id === jobId &&
+		job.status === "completed" &&
+		!job.error &&
+		typeof job.resultText === "string" &&
+		job.resultText.split(marker).length === 2);
+	if (!job) return false;
 	const taskResultTags = job.resultText.match(/<task-result\b[^>]*>/g) ?? [];
 	const outputMatches = [...job.resultText.matchAll(/<output>\r?\n([\s\S]*?)\r?\n<\/output>/g)];
 	return (
