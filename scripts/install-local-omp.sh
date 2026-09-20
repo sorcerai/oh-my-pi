@@ -331,6 +331,10 @@ const selectsWorker = args =>
 const starts = events.filter(
 	event => event?.type === "tool_execution_start" && event.toolName === "task" && selectsWorker(event.args),
 );
+const outputCarriesMarker = (output, structured) =>
+	structured === undefined
+		? output === marker
+		: structured?.status === "valid" && !structured.error && structured.data === marker;
 const directResultCarriesMarker = taskEnd => {
 	const results = taskEnd.result?.details?.results;
 	if (!Array.isArray(results) || results.length !== 1) return false;
@@ -340,7 +344,7 @@ const directResultCarriesMarker = taskEnd => {
 		result.exitCode === 0 &&
 		result.aborted !== true &&
 		!result.error &&
-		result.output === marker
+		outputCarriesMarker(result.output, result.structuredOutput)
 	);
 };
 const asyncResultCarriesMarker = taskEnd => {
@@ -369,8 +373,7 @@ const asyncResultCarriesMarker = taskEnd => {
 		job?.id === jobId &&
 		job.status === "completed" &&
 		!job.error &&
-		typeof job.resultText === "string" &&
-		job.resultText.split(marker).length === 2);
+		typeof job.resultText === "string");
 	if (!job) return false;
 	const taskResultTags = job.resultText.match(/<task-result\b[^>]*>/g) ?? [];
 	const outputMatches = [...job.resultText.matchAll(/<output>\r?\n([\s\S]*?)\r?\n<\/output>/g)];
@@ -379,7 +382,7 @@ const asyncResultCarriesMarker = taskEnd => {
 		/\bagent="([^"]+)"/.exec(taskResultTags[0])?.[1] === smokeAgent &&
 		/\bstatus="completed"/.test(taskResultTags[0]) &&
 		outputMatches.length === 1 &&
-		outputMatches[0][1] === marker
+		outputCarriesMarker(outputMatches[0][1], job.structured)
 	);
 };
 const taskCallIds = new Set(starts.map(event => event.toolCallId));

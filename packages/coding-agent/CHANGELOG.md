@@ -17,7 +17,7 @@
 - Imported session copies can be continued and rewritten without spurious write conflicts.
 - Explicit credential references refresh command-backed headers on authentication retries.
 - Prime hub waits preserve messages across cancellation, and peer lists respect status filters and combined row limits.
-- Local installer smoke checks no longer reject a verified worker run after corrected task arguments or interrupted waits.
+- Local installer smoke checks correctly verify retried task calls, recovered waits, and schema-validated string results.
 - Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.
 - Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
