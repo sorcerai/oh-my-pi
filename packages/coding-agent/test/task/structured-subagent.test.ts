@@ -593,7 +593,7 @@ describe("structured subagent primitive", () => {
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("preserves provider extensions but suppresses plan capability sources", async () => {
+	it("preserves admitted provider extensions while suppressing restricted capability sources", async () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
 		const extensionPaths = ["/plugins/example.ts"];
@@ -652,7 +652,7 @@ describe("structured subagent primitive", () => {
 		expect(options[0]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,
-			preloadedExtensionPaths: extensionPaths,
+			preloadedExtensionPaths: [],
 			preloadedCustomToolPaths: [],
 		});
 		expect(options[0]?.mcpManager).toBeUndefined();
@@ -672,7 +672,7 @@ describe("structured subagent primitive", () => {
 		expect(options[3]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,
-			preloadedExtensionPaths: extensionPaths,
+			preloadedExtensionPaths: [],
 			preloadedCustomToolPaths: [],
 		});
 		expect(options[3]?.mcpManager).toBeUndefined();

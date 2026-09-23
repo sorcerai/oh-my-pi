@@ -508,11 +508,11 @@ describe("llama.cpp warm-prefix preservation (#3528)", () => {
 		// No `reasoning` option — mirrors a default request against a
 		// discovered model whose spec hardcodes `reasoning: false`.
 		applyChatCompletionsReasoningParams(params, model, model.compat, undefined);
-		// Qwen's `enable_thinking` is unset here (model.reasoning false
-		// short-circuits the reasoning encoder), so the server falls back
-		// to its template default. `preserve_thinking` still rides so
-		// HISTORY rendering keeps the `<think>` blocks intact.
-		expect(params.enable_thinking).toBeUndefined();
+		// Model construction materializes the discovered model's reasoning
+		// capability, so the no-effort request explicitly disables thinking.
+		// `preserve_thinking` still rides so HISTORY rendering keeps the
+		// `<think>` blocks intact.
+		expect(params.enable_thinking).toBe(false);
 		expect(params.preserve_thinking).toBe(true);
 		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
 	});
