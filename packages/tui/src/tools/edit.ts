@@ -167,6 +167,21 @@ interface InspectedInputEntry {
 	rename?: string;
 }
 
+/** Extract file headers from an incomplete sloppy payload while it streams. */
+function getPartialSloppyInputEntries(input: string): InspectedInputEntry[] {
+	const entries: InspectedInputEntry[] = [];
+	const seen = new Set<string>();
+	const header = /<SM:EDIT\s+path=(?:"([^"]*)"|'([^']*)')/gu;
+	for (const match of input.matchAll(header)) {
+		const path = match[1] ?? match[2];
+		if (path !== undefined && !seen.has(path)) {
+			seen.add(path);
+			entries.push({ path });
+		}
+	}
+	return entries;
+}
+
 interface ApplyPatchRenderSummary {
 	entries: InspectedInputEntry[];
 	error?: string;
@@ -713,10 +728,10 @@ function getSloppyInputRenderSummary(
 	if (editMode !== "sloppy" || typeof input !== "string") return undefined;
 	try {
 		const entries = inspectInputEntries(args, "sloppy", input);
-		return entries.length > 0 ? { entries } : undefined;
-	} catch {
-		return undefined;
-	}
+		if (entries.length > 0) return { entries };
+	} catch {}
+	const entries = getPartialSloppyInputEntries(input);
+	return entries.length > 0 ? { entries } : undefined;
 }
 
 function getApplyPatchRenderSummary(
