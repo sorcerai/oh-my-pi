@@ -710,15 +710,9 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(session.getActiveToolNames()).toContain("todo");
 		await session.setActiveToolsByName(["read", "todo"]);
 
-		// Target is a distinct, non-vibe session. Its persisted session-init
-		// metadata does not itself replay an active tool admission, so leave the
-		// target roster to the live session state under test.
+		// Target is a distinct, non-vibe session; leave its roster to the live
+		// session state under test.
 		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
-		targetManager.appendSessionInit({
-			systemPrompt: "Test",
-			task: "",
-			spawns: "",
-		});
 		targetManager.appendModeChange("none");
 		await targetManager.ensureOnDisk();
 		const targetFile = targetManager.getSessionFile();
