@@ -1,5 +1,4 @@
-//! Section staging: prepare/commit split (`packages/hashline/src/patcher.ts` +
-//! `coding-agent/src/edit/hashline/execute.ts`).
+//! Section staging: prepare/commit split.
 
 use std::{collections::HashMap, path::Path};
 

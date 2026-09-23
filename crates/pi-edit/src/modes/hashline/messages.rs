@@ -1,5 +1,5 @@
 //! Centralized error/warning text for the hashline parser, applier, and
-//! patcher. Port of `packages/hashline/src/messages.ts`.
+//! patcher messages.
 
 use std::{
 	collections::{BTreeSet, HashSet},

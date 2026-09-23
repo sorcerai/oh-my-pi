@@ -6,11 +6,11 @@
 - Entry: `packages/coding-agent/src/tools/grep.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/grep.md`
 - Key collaborators:
-  - `packages/coding-agent/src/tools/match-line-format.ts` — model-facing anchor formatting.
+  - `packages/tui/src/tools/match-line-format.ts` — model-facing anchor formatting.
   - `packages/coding-agent/src/tools/path-utils.ts` — path normalization, glob splitting, internal URL resolution.
   - `packages/coding-agent/src/tools/file-recorder.ts` — file ordering for grouped output.
-  - `packages/coding-agent/src/tools/grouped-file-output.ts` — grouped per-file text layout.
-  - `packages/coding-agent/src/session/streaming-output.ts` — line truncation and final byte truncation.
+  - `packages/tui/src/tools/grouped-file-output.ts` — grouped per-file text layout.
+  - `packages/tui/src/tools/streaming-output.ts` — line truncation and final byte truncation.
   - `packages/coding-agent/src/config/settings-schema.ts` — default context lines.
   - `packages/natives/native/index.d.ts` — native `grep()` types exposed to TS.
   - `crates/pi-natives/src/grep.rs` — native regex/file search implementation.
@@ -136,8 +136,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - File page limit: `20` files (`DEFAULT_FILE_LIMIT` in `packages/coding-agent/src/tools/grep.ts`).
 - Per-file match caps: `20` for multi-file scopes (`MULTI_FILE_PER_FILE_MATCHES`), `200` for single-file scopes (`SINGLE_FILE_MATCHES`).
 - Native/JS preselection cap: `2000` matches (`INTERNAL_TOTAL_CAP`).
-- Line truncation: `512` characters per emitted line (`DEFAULT_MAX_COLUMN` in `packages/coding-agent/src/session/streaming-output.ts`). Native grep marks truncated lines; JS reports `linesTruncated`.
-- Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
+- Line truncation: `512` characters per emitted line (`DEFAULT_MAX_COLUMN` in `packages/tui/src/tools/streaming-output.ts`). Native grep marks truncated lines; JS reports `linesTruncated`.
+- Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
 - Context defaults: `grep.contextBefore = 1`, `grep.contextAfter = 3` in `packages/coding-agent/src/config/settings-schema.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.
 - Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/pi-natives/src/grep.rs`.

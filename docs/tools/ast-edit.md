@@ -12,7 +12,7 @@
   - `packages/coding-agent/src/tools/resolve.ts` — preview/apply queueing
   - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
   - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number diff references
-  - `packages/hashline/src/format.ts` — stable hashline header formatting for preview anchors
+  - `crates/pi-edit/src/modes/hashline/format.rs` — stable hashline header formatting for preview anchors
   - `packages/natives/native/index.d.ts` — JS-visible native binding contract
 
 ## Inputs

@@ -1,4 +1,4 @@
-//! Stale-tag anchor recovery (`packages/hashline/src/recovery.ts`).
+//! Stale-tag anchor recovery.
 
 use std::{
 	collections::{HashMap, HashSet},

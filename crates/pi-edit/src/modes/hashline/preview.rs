@@ -1,5 +1,5 @@
 //! Streaming section previews
-//! (`packages/coding-agent/src/edit/hashline/diff.ts`).
+//! (`crates/pi-edit/src/modes/hashline/preview.rs`).
 
 use super::{
 	apply::EmptyPaste,

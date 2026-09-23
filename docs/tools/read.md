@@ -16,7 +16,7 @@
    - `packages/coding-agent/src/utils/cpuprofile.ts` / `sample-profile.ts` — summarize recognized profiler reports.
    - `packages/coding-agent/src/utils/file-display-mode.ts` — decide hashline vs line-number vs raw display.
    - `packages/coding-agent/src/workspace-tree.ts` — render directory trees.
-   - `packages/coding-agent/src/edit/file-snapshot-store.ts` — stores read lines for later hashline edit verification/recovery.
+   - `crates/pi-edit/src/store.rs` — stores read lines for later hashline edit verification/recovery.
    - `packages/coding-agent/src/tools/index.ts` — registers `read: s => new ReadTool(s)`.
 
 ## Inputs
@@ -294,7 +294,7 @@ Notes: ...
 
 ## Limits & Caps
 
-- Shared text truncation defaults from `packages/coding-agent/src/session/streaming-output.ts`:
+- Shared text truncation defaults from `packages/tui/src/tools/streaming-output.ts`:
    - `DEFAULT_MAX_LINES = 3000`
    - `DEFAULT_MAX_BYTES = 50 * 1024`
 - Local text open-ended default line limit: `read.defaultLimit` (default `300`), clamped to `[1, DEFAULT_MAX_LINES]`.
@@ -319,7 +319,7 @@ Notes: ...
    - source bytes cap `20 MiB`
    - post-resize inline output cap `300 KiB`
 - Unique suffix auto-resolution glob timeout: `5000` ms.
-- File snapshot store holds `256` paths with up to `4` versions each (`DEFAULT_MAX_PATHS` / `DEFAULT_MAX_VERSIONS_PER_PATH` in `packages/hashline/src/snapshots.ts`); files over `4 MiB` (`SNAPSHOT_MAX_BYTES`) are not snapshotted.
+- File snapshot store holds `256` paths with up to `4` versions each (`DEFAULT_MAX_PATHS` / `DEFAULT_MAX_VERSIONS_PER_PATH` in `crates/pi-edit/src/store.rs`); files over `4 MiB` (`SNAPSHOT_MAX_BYTES`) are not snapshotted.
 - An unbounded `artifact://<id>:raw` read is refused when the artifact exceeds `50 KiB`; use a bounded `:raw:N-M` range.
 
 ## Errors

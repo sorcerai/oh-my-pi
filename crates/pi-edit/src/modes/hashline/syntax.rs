@@ -1,4 +1,4 @@
-//! Tree-sitter helpers (`packages/hashline/src/syntax.ts`).
+//! Tree-sitter helpers for hashline block resolution.
 
 use std::{
 	collections::{HashMap, VecDeque},

@@ -10,7 +10,7 @@
   - `crates/pi-ast/src/language/mod.rs` — language aliases and extension inference used by the native wrapper.
   - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing and multi-path resolution
   - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
-  - `packages/coding-agent/src/tools/match-line-format.ts` — hashline match rendering
+  - `packages/tui/src/tools/match-line-format.ts` — hashline match rendering
   - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number output mode
   - `packages/natives/native/index.d.ts` — JS-visible native binding contract
 

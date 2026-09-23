@@ -1,6 +1,5 @@
 //! Pure data types shared across the hashline tokenizer, parser, applier,
-//! and patcher. Port of `packages/hashline/src/types.ts`; nothing here
-//! touches a filesystem.
+//! and patcher; nothing here touches a filesystem.
 
 pub use crate::store::Clipboard;
 

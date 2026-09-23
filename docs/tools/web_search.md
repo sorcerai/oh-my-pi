@@ -8,7 +8,7 @@
 - Key collaborators:
   - `packages/coding-agent/src/web/search/provider.ts` — lazy provider registry; availability chain.
   - `packages/coding-agent/src/web/search/types.ts` — unified `SearchResponse` / `SearchProviderError` types.
-  - `packages/coding-agent/src/web/search/render.ts` — TUI renderer details type.
+  - `packages/tui/src/tools/web-search.ts` — TUI renderer details type.
   - `packages/coding-agent/src/web/search/providers/base.ts` — provider interface and shared params contract.
   - `packages/coding-agent/src/web/search/providers/utils.ts` — credential lookup; source normalization.
   - `packages/coding-agent/src/web/search/providers/browser-headers.ts` — shared Chromium navigation headers for scrape providers.
@@ -57,7 +57,7 @@
 The tool returns a single text content block plus structured `details`.
 
 - `content`: `[{ type: "text", text: string }]`
-- `details`: `SearchRenderDetails` from `packages/coding-agent/src/web/search/render.ts`
+- `details`: `SearchRenderDetails` from `packages/tui/src/tools/web-search.ts`
   - `response: SearchResponse`
   - `error?: string`
 
