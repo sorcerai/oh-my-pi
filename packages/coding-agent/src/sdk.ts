@@ -3911,7 +3911,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigWarnings: discoveredAdvisors.warnings,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
-			thinkingLevel: autoThinking ? AUTO_THINKING : (thinkingLevel ?? effectiveThinkingLevel),
+			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,
