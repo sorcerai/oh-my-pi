@@ -43,8 +43,9 @@ describe("AgentSession memory backend lifecycle", () => {
 		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		settings = Settings.isolated({
-			"compaction.enabled": false,
-			"memory.backend": "off",
+		"compaction.enabled": false,
+		"skills.enabled": false,
+		"memory.backend": "off",
 			"mnemopi.noEmbeddings": true,
 			"mnemopi.llmMode": "none",
 		});
@@ -277,6 +278,7 @@ describe("AgentSession memory backend lifecycle", () => {
 				path.join(getProjectAgentDir(sourceCwd), "config.yml"),
 				Bun.YAML.stringify({
 					memory: { backend: source },
+					skills: { enabled: false },
 					mnemopi: { ...mnemopi, dbPath: sourceDbPath },
 					hindsight: { apiUrl: "http://127.0.0.1:1", mentalModelsEnabled: false },
 				}),
@@ -284,7 +286,11 @@ describe("AgentSession memory backend lifecycle", () => {
 			// An existing directory is not a SQLite database, regardless of filesystem permissions.
 			await Bun.write(
 				destinationConfig,
-				Bun.YAML.stringify({ memory: { backend: "mnemopi" }, mnemopi: { ...mnemopi, dbPath: sourceCwd } }),
+				Bun.YAML.stringify({
+					memory: { backend: "mnemopi" },
+					skills: { enabled: false },
+					mnemopi: { ...mnemopi, dbPath: sourceCwd },
+				}),
 			);
 			settings = await Settings.loadIsolated({ cwd: sourceCwd, agentDir: path.join(sourceCwd, "agent") });
 			const toolSession = {

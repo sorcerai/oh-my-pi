@@ -1217,6 +1217,7 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 		params.reasoning_effort = reasoning.wireEffort as Effort;
 		return;
 	}
+	if (reasoning.disableReason === "not-requested") return;
 	encodeChatCompletionsDisabledReasoning(params, reasoning.disableMode);
 }
 

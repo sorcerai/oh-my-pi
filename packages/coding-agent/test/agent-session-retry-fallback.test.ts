@@ -5406,7 +5406,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(primaryModel.provider);
 		expect(session.model?.id).toBe(primaryModel.id);
-		expect(session.thinkingLevel).toBeUndefined();
+		expect(session.thinkingLevel).toBe(Effort.Low);
 	});
 
 	it("clamps a fallback selector's explicit thinking level to the session effort ceiling", async () => {

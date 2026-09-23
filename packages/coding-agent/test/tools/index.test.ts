@@ -160,7 +160,7 @@ describe("createTools", () => {
 		expect(withoutRead.map(tool => tool.name)).toEqual([]);
 
 		const withRead = await createTools(createTestSession(), ["skill_search", "read"]);
-		expect(withRead.map(tool => tool.name)).toEqual(["skill_search", "read"]);
+		expect(withRead.map(tool => tool.name)).toEqual(["skill_search", "read", "write"]);
 
 		const skillsDisabled = await createTools(
 			createTestSession({
@@ -168,7 +168,7 @@ describe("createTools", () => {
 			}),
 			["skill_search", "read"],
 		);
-		expect(skillsDisabled.map(tool => tool.name)).toEqual(["read"]);
+		expect(skillsDisabled.map(tool => tool.name)).toEqual(["read", "write"]);
 	});
 
 	it("creates xd:// presentation state without remounting explicitly requested built-ins", async () => {
