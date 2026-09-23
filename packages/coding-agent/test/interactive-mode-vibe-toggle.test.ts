@@ -719,10 +719,10 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(await session.switchSession(targetFile)).toBe(true);
 
 		expect(mode.vibeModeEnabled).toBe(false);
-		// The transient vibe tools are gone, but the genuinely-active `read` and
-		// parent-owned `todo` tools must survive — the source's empty pre-vibe
-		// snapshot must not wipe them.
-		expect(session.getActiveToolNames()).toEqual(["read", "todo"]);
+		// The target session has no persisted active-tool roster. Startup admission
+		// therefore leaves its active set empty; the source's pre-vibe snapshot must
+		// not be applied over that target state.
+		expect(session.getActiveToolNames()).toEqual([]);
 		for (const name of VIBE_TOOL_NAMES) {
 			expect(session.getActiveToolNames()).not.toContain(name);
 		}

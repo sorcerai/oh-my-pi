@@ -1013,6 +1013,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				await provider.release(winningClaimToken).catch(() => undefined);
 				completedClaimTokens.add(winningClaimToken);
 			}
+			if (!provider) return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
 			throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
 		}
 		if (externalLeg && typeof raceWinner === "object" && raceWinner !== null && "external" in raceWinner) {

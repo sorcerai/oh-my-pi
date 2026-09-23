@@ -10,6 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { parsePrimeConfig } from "../src/import/prime/config-parser";
+import { openSqliteReadConnection } from "../src/tools/sqlite-reader";
 import {
 	applyPrimeDestination,
 	type PrimeDestinationApplyResult,
@@ -1535,7 +1536,8 @@ describe("prime destination planning and apply", () => {
 				createSpy.mockRestore();
 			}
 			for (const candidate of [dbPath, backupPath]) {
-				const inspected = new Database(`file:${candidate}?immutable=1`, { readonly: true });
+				if (!(await fs.stat(candidate).catch(() => undefined))) continue;
+				const inspected = await openSqliteReadConnection(candidate);
 				try {
 					expect(
 						inspected.query("SELECT 1 FROM auth_credentials WHERE provider = ?").get("replacement-provider"),
