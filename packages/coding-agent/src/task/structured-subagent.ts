@@ -474,7 +474,7 @@ function buildExecutorOptions(
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.
 		extensionRoots: session.effectiveExtensionRoots?.bind(session),
-		preloadedExtensionPaths: session.extensionPaths,
+		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedPreparedExtensions: session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,

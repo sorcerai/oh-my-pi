@@ -1217,10 +1217,6 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 		params.reasoning_effort = reasoning.wireEffort as Effort;
 		return;
 	}
-	// Moonshot's native Kimi endpoint requires an explicit disabled thinking
-	// object even when the caller did not request reasoning. Other dialects
-	// intentionally omit their off-switch when reasoning was not requested.
-	if (reasoning.disableReason === "not-requested" && reasoning.disableMode !== "zai-thinking-disabled") return;
 	encodeChatCompletionsDisabledReasoning(params, reasoning.disableMode);
 }
 
