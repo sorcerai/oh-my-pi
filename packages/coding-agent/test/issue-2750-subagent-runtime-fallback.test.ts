@@ -710,7 +710,7 @@ describe("subagent runtime model resolution", () => {
 			modelOverride: "pi-antigravity/gemini-3.6-flash",
 			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
 			authStorage: {
-				setFallbackResolver: () => {},
+				setConfigValueResolver: () => {},
 				setConfigApiKey: () => {},
 				removeConfigApiKey: () => {},
 				hasAuth: () => false,
@@ -809,7 +809,7 @@ describe("subagent runtime model resolution", () => {
 			id: "cancelled-provider-preload",
 			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
 			authStorage: {
-				setFallbackResolver: () => {},
+				setConfigValueResolver: () => {},
 				setConfigApiKey: () => {},
 				removeConfigApiKey: () => {},
 				hasAuth: () => false,
