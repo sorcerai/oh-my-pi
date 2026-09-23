@@ -1,7 +1,6 @@
 //! Text-shape normalization shared by every edit engine: line endings, BOM,
 //! JS-compatible trimming, indentation profiling, and the fuzzy-comparison
 //! normalizers.
-//!
 use xutf::IntoUnicodeNormalized;
 
 /// Line-ending style of a file.
