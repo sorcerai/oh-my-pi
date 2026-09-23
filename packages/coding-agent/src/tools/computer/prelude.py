@@ -4,7 +4,9 @@ def _make_computer():
     def _encode_arg(value):
         if isinstance(value, re.Pattern):
             if not isinstance(value.pattern, str):
-                raise TypeError("computer helpers require regular expressions with string patterns")
+                raise TypeError(
+                    "computer helpers require regular expressions with string patterns"
+                )
             flags = ""
             if value.flags & re.IGNORECASE:
                 flags += "i"
@@ -30,14 +32,10 @@ def _make_computer():
         return values
 
     async def _invoke(action, options):
-        response = await _omp_prelude(
+        response = await _omp_prelude(  # noqa: F821
             "computer",
             {
-                **{
-                    key: value
-                    for key, value in options.items()
-                    if value is not None
-                },
+                **{key: value for key, value in options.items() if value is not None},
                 "action": action,
             },
         )
@@ -59,7 +57,16 @@ def _make_computer():
         return {"method": method, "args": _arguments(args, kwargs)}
 
     class _Element:
-        __slots__ = ("ref", "role", "nativeRole", "title", "description", "enabled", "focused", "childCount")
+        __slots__ = (
+            "ref",
+            "role",
+            "nativeRole",
+            "title",
+            "description",
+            "enabled",
+            "focused",
+            "childCount",
+        )
 
         def __init__(self, snapshot):
             for field in self.__slots__:
@@ -69,7 +76,9 @@ def _make_computer():
             return f"<computer.Element ref={self.ref!r} role={self.role!r}>"
 
         async def _method(self, method, args, kwargs):
-            return await _call([_step("ref", (self.ref,), {}), _step(method, args, kwargs)])
+            return await _call(
+                [_step("ref", (self.ref,), {}), _step(method, args, kwargs)]
+            )
 
         async def value(self, *args, **kwargs):
             return await self._method("value", args, kwargs)
@@ -103,7 +112,10 @@ def _make_computer():
             return _Element(snapshot) if isinstance(snapshot, dict) else None
 
         async def children(self):
-            return [_Element(snapshot) for snapshot in await self._method("children", (), {})]
+            return [
+                _Element(snapshot)
+                for snapshot in await self._method("children", (), {})
+            ]
 
     class _Window:
         __slots__ = ("id", "app", "title", "pid", "bounds", "focused")
@@ -116,7 +128,9 @@ def _make_computer():
             return f"<computer.Window id={self.id!r} app={self.app!r}>"
 
         async def _method(self, method, args, kwargs):
-            return await _call([_step("window", (self.id,), {}), _step(method, args, kwargs)])
+            return await _call(
+                [_step("window", (self.id,), {}), _step(method, args, kwargs)]
+            )
 
         async def screenshot(self, *args, **kwargs):
             return await self._method("screenshot", args, kwargs)
@@ -149,7 +163,10 @@ def _make_computer():
             return await self._method("ax", args, kwargs)
 
         async def find(self, *args, **kwargs):
-            return [_Element(snapshot) for snapshot in await self._method("find", args, kwargs)]
+            return [
+                _Element(snapshot)
+                for snapshot in await self._method("find", args, kwargs)
+            ]
 
         async def ref(self, ref):
             """Resolve a live accessibility element by its `[ref=eN]` tag."""

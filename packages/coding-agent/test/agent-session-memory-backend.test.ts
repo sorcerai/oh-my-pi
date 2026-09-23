@@ -43,9 +43,9 @@ describe("AgentSession memory backend lifecycle", () => {
 		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		settings = Settings.isolated({
-		"compaction.enabled": false,
-		"skills.enabled": false,
-		"memory.backend": "off",
+			"compaction.enabled": false,
+			"skills.enabled": false,
+			"memory.backend": "off",
 			"mnemopi.noEmbeddings": true,
 			"mnemopi.llmMode": "none",
 		});

@@ -263,6 +263,7 @@ def _shadow_identity_state() -> dict[str, str]:
         "tool": _tool_binding_state(user_ns),
     }
 
+
 def _copy_shadow_value(value: Any, depth: int, state: dict[str, Any]) -> Any:
     """Copy exact JSON-safe values without invoking user protocols."""
     if depth > _SHADOW_SNAPSHOT_MAX_DEPTH:
@@ -274,17 +275,29 @@ def _copy_shadow_value(value: Any, depth: int, state: dict[str, Any]) -> Any:
     if value is None or value_type is bool or value_type is int:
         return value
     if value_type is float:
-        return value if value == value and value not in (float("inf"), float("-inf")) else _SHADOW_UNSUPPORTED
+        return (
+            value
+            if value == value and value not in (float("inf"), float("-inf"))
+            else _SHADOW_UNSUPPORTED
+        )
     if value_type is str:
         state["bytes"] += len(value.encode("utf-8"))
-        return value if state["bytes"] <= _SHADOW_SNAPSHOT_MAX_STRING_BYTES else _SHADOW_UNSUPPORTED
+        return (
+            value
+            if state["bytes"] <= _SHADOW_SNAPSHOT_MAX_STRING_BYTES
+            else _SHADOW_UNSUPPORTED
+        )
     if value_type not in (list, tuple, dict) or id(value) in state["seen"]:
         return _SHADOW_UNSUPPORTED
     state["seen"].add(id(value))
     try:
         if value_type in (list, tuple):
             copied = [_copy_shadow_value(item, depth + 1, state) for item in value]
-            return copied if all(item is not _SHADOW_UNSUPPORTED for item in copied) else _SHADOW_UNSUPPORTED
+            return (
+                copied
+                if all(item is not _SHADOW_UNSUPPORTED for item in copied)
+                else _SHADOW_UNSUPPORTED
+            )
         copied_dict: dict[str, Any] = {}
         for key, item in value.items():
             if type(key) is not str:
@@ -324,6 +337,7 @@ def _shadow_tool_available(snapshot: dict[str, Any], user_ns: dict[str, Any]) ->
     # ever captured stays available as before).
     return _tool_binding_state(user_ns) in ("intact", "absent")
 
+
 def _shadow_snapshot_digest(values: dict[str, Any]) -> str:
     payload = json.dumps(
         {"identity": _shadow_identity_state(), "values": values},
@@ -337,7 +351,14 @@ def _shadow_snapshot_digest(values: dict[str, Any]) -> str:
 def _emit_shadow_snapshot(req: dict) -> None:
     rid = str(req.get("id"))
     if _STATE.active_executions != 0:
-        _emit({"type": "shadow_snapshot", "id": rid, "eligible": False, "reason": "kernel is busy"})
+        _emit(
+            {
+                "type": "shadow_snapshot",
+                "id": rid,
+                "eligible": False,
+                "reason": "kernel is busy",
+            }
+        )
         return
     values = _snapshot_user_namespace()
     _emit(
@@ -360,7 +381,9 @@ def _shadow_span(node: ast.AST, line_offsets: list[int]) -> dict[str, int]:
     return {"start": start, "end": end}
 
 
-def _shadow_dependencies(expression: dict[str, Any], output: set[str] | None = None) -> set[str]:
+def _shadow_dependencies(
+    expression: dict[str, Any], output: set[str] | None = None
+) -> set[str]:
     output = output if output is not None else set()
     kind = expression.get("kind")
     if kind == "operation_result":
@@ -378,8 +401,6 @@ def _shadow_dependencies(expression: dict[str, Any], output: set[str] | None = N
         if expression.get("argument") is not None:
             _shadow_dependencies(expression["argument"], output)
     return output
-
-
 
 
 def _shadow_expression_is_string(expression: dict[str, Any]) -> bool:
@@ -446,7 +467,9 @@ def _shadow_expression(
                 projected = _shadow_expression(value.value, environment, snapshot)
                 if projected is None:
                     return None
-                items.append({"kind": "transform", "name": "Python.str", "input": projected})
+                items.append(
+                    {"kind": "transform", "name": "Python.str", "input": projected}
+                )
             else:
                 return None
         return {"kind": "concat", "items": items}
@@ -509,9 +532,17 @@ def _shadow_static_value(
         if not ok:
             return False, None
         property_name = expression["property"]
-        if type(target) is dict and type(property_name) is str and property_name in target:
+        if (
+            type(target) is dict
+            and type(property_name) is str
+            and property_name in target
+        ):
             return True, target[property_name]
-        if type(target) is list and type(property_name) is int and 0 <= property_name < len(target):
+        if (
+            type(target) is list
+            and type(property_name) is int
+            and 0 <= property_name < len(target)
+        ):
             return True, target[property_name]
         return False, None
     if kind == "concat":
@@ -543,16 +574,37 @@ def _shadow_call_kind(node: ast.AST, tool_available: bool = True) -> str | None:
 def _emit_shadow_plan(req: dict) -> None:
     rid = str(req.get("id"))
     if _STATE.active_executions != 0:
-        _emit({"type": "shadow_plan", "id": rid, "eligible": False, "reason": "kernel is busy"})
+        _emit(
+            {
+                "type": "shadow_plan",
+                "id": rid,
+                "eligible": False,
+                "reason": "kernel is busy",
+            }
+        )
         return
     code = req.get("code")
     if type(code) is not str:
-        _emit({"type": "shadow_plan", "id": rid, "eligible": False, "reason": "code is not a string"})
+        _emit(
+            {
+                "type": "shadow_plan",
+                "id": rid,
+                "eligible": False,
+                "reason": "code is not a string",
+            }
+        )
         return
     try:
         module = ast.parse(code, mode="exec")
     except SyntaxError:
-        _emit({"type": "shadow_plan", "id": rid, "eligible": False, "reason": "incomplete or invalid Python"})
+        _emit(
+            {
+                "type": "shadow_plan",
+                "id": rid,
+                "eligible": False,
+                "reason": "incomplete or invalid Python",
+            }
+        )
         return
     snapshot = _snapshot_user_namespace()
     try:
@@ -697,9 +749,14 @@ def _emit_shadow_plan(req: dict) -> None:
                         "span": _shadow_span(statement, line_offsets),
                     }
                     return False
-                operation = add_operation(value_node, dynamic_path, control_dependencies)
+                operation = add_operation(
+                    value_node, dynamic_path, control_dependencies
+                )
                 if operation is not None:
-                    environment[target.id] = {"kind": "operation_result", "operationId": operation["call"]["id"]}
+                    environment[target.id] = {
+                        "kind": "operation_result",
+                        "operationId": operation["call"]["id"],
+                    }
                     continue
                 projected = _shadow_expression(value_node, environment, snapshot)
                 if projected is None:
@@ -719,10 +776,16 @@ def _emit_shadow_plan(req: dict) -> None:
                 environment[target.id] = projected
                 continue
             if isinstance(statement, ast.Expr):
-                if add_operation(statement.value, dynamic_path, control_dependencies) is not None:
+                if (
+                    add_operation(statement.value, dynamic_path, control_dependencies)
+                    is not None
+                ):
                     continue
                 projected = _shadow_expression(statement.value, environment, snapshot)
-                if projected is not None and _shadow_static_value(projected, snapshot)[0]:
+                if (
+                    projected is not None
+                    and _shadow_static_value(projected, snapshot)[0]
+                ):
                     continue
                 barrier = {
                     "kind": "barrier",
@@ -740,7 +803,9 @@ def _emit_shadow_plan(req: dict) -> None:
                     }
                     return False
                 ok, selected = _shadow_static_value(test, snapshot)
-                conditional_id = f"py:{_shadow_span(statement, line_offsets)['start']}:if"
+                conditional_id = (
+                    f"py:{_shadow_span(statement, line_offsets)['start']}:if"
+                )
                 if ok:
                     branch = statement.body if selected else statement.orelse
                     if not project_statements(
@@ -773,7 +838,9 @@ def _emit_shadow_plan(req: dict) -> None:
                 ):
                     return False
                 continue
-            if isinstance(statement, ast.For) and isinstance(statement.target, ast.Name):
+            if isinstance(statement, ast.For) and isinstance(
+                statement.target, ast.Name
+            ):
                 if statement.target.id == "tool":
                     barrier = {
                         "kind": "barrier",
@@ -782,7 +849,11 @@ def _emit_shadow_plan(req: dict) -> None:
                     }
                     return False
                 iterable = _shadow_expression(statement.iter, environment, snapshot)
-                ok, values = _shadow_static_value(iterable, snapshot) if iterable is not None else (False, None)
+                ok, values = (
+                    _shadow_static_value(iterable, snapshot)
+                    if iterable is not None
+                    else (False, None)
+                )
                 if not ok or type(values) is not list or len(values) > 32:
                     barrier = {
                         "kind": "barrier",
@@ -801,7 +872,10 @@ def _emit_shadow_plan(req: dict) -> None:
                 )
                 previous = environment.get(statement.target.id)
                 for index, value in enumerate(values):
-                    environment[statement.target.id] = {"kind": "literal", "value": value}
+                    environment[statement.target.id] = {
+                        "kind": "literal",
+                        "value": value,
+                    }
                     if not project_statements(
                         statement.body,
                         [*dynamic_path, f"loop:{index}"],
@@ -809,7 +883,10 @@ def _emit_shadow_plan(req: dict) -> None:
                     ):
                         return False
                 if values:
-                    environment[statement.target.id] = {"kind": "literal", "value": values[-1]}
+                    environment[statement.target.id] = {
+                        "kind": "literal",
+                        "value": values[-1],
+                    }
                 elif previous is None:
                     environment.pop(statement.target.id, None)
                 else:
@@ -843,6 +920,7 @@ def _emit_shadow_plan(req: dict) -> None:
             "barrier": barrier,
         }
     )
+
 
 def _drain_captured_stdout() -> None:
     """Forward bytes written to the captured fd 1 as stdout frames.
@@ -1731,7 +1809,6 @@ async def _run_compiled_async(code, ns: dict, *, want_value: bool) -> Any:
     return None
 
 
-
 _CALL_SITE_HELPER_NAME = "__omp_with_call_site__"
 
 # Runner-owned reference to the genuine instrumentation helper. The helper is
@@ -1763,7 +1840,9 @@ def _cell_binds_call_site_helper(module: ast.Module) -> bool:
     """Whether the cell binds the reserved helper name in any scope."""
     for node in ast.walk(module):
         if isinstance(node, ast.Name):
-            if node.id == _CALL_SITE_HELPER_NAME and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id == _CALL_SITE_HELPER_NAME and isinstance(
+                node.ctx, (ast.Store, ast.Del)
+            ):
                 return True
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name == _CALL_SITE_HELPER_NAME:
@@ -1778,6 +1857,7 @@ def _cell_binds_call_site_helper(module: ast.Module) -> bool:
             if node.name == _CALL_SITE_HELPER_NAME:
                 return True
     return False
+
 
 class _ShadowCallSiteTransformer(ast.NodeTransformer):
     def __init__(self, line_offsets: list[int]) -> None:
@@ -1985,7 +2065,9 @@ def _handle_tool_request(req: dict) -> None:
             requested = req.get("names") or list(tools)
             envelope = {
                 "ok": True,
-                "tools": [tools[name].describe() for name in requested if name in tools],
+                "tools": [
+                    tools[name].describe() for name in requested if name in tools
+                ],
                 "missing": [name for name in requested if name not in tools],
             }
         elif op == "call":
@@ -2162,6 +2244,7 @@ def _admit_shadow_run(req: dict) -> bool:
     _STATE.active_executions += 1
     req["_execution_reserved"] = True
     return True
+
 
 # ---------------------------------------------------------------------------
 # Main loop

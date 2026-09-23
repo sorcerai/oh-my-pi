@@ -9,7 +9,9 @@ def _make_browser():
     def _encode_arg(value):
         if isinstance(value, re.Pattern):
             if not isinstance(value.pattern, str):
-                raise TypeError("browser helpers require regular expressions with string patterns")
+                raise TypeError(
+                    "browser helpers require regular expressions with string patterns"
+                )
             flags = ""
             if value.flags & re.IGNORECASE:
                 flags += "i"
@@ -35,14 +37,10 @@ def _make_browser():
         return values
 
     async def _invoke(action, options):
-        response = await _omp_prelude(
+        response = await _omp_prelude(  # noqa: F821
             "browser",
             {
-                **{
-                    key: value
-                    for key, value in options.items()
-                    if value is not None
-                },
+                **{key: value for key, value in options.items() if value is not None},
                 "action": action,
             },
         )
