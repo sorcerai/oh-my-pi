@@ -1043,7 +1043,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("clamps a max default thinking level to the model's ladder ceiling", async () => {
+	test("preserves a max default thinking selector during startup", async () => {
 		const settings = Settings.isolated({ defaultThinkingLevel: "max" });
 
 		const { session } = await createAgentSession({
@@ -1054,9 +1054,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-fallback-model");
-			// The extension model has no explicit ladder; the inferred fallback tops
-			// out at xhigh, so the real max level clamps down.
-			expect(session.thinkingLevel).toBe(Effort.XHigh);
+			// The configured selector remains max even though the model's effective
+			// runtime level is clamped to its supported ladder.
+			expect(session.thinkingLevel).toBe(Effort.Max);
 		} finally {
 			await session.dispose();
 		}
@@ -1603,7 +1603,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-fallback-model");
-			expect(session.thinkingLevel).toBe(Effort.XHigh);
+			expect(session.thinkingLevel).toBe(Effort.Max);
 		} finally {
 			await session.dispose();
 			authStorage.close();

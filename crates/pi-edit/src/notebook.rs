@@ -2,7 +2,7 @@
 //! form (`# %% [type] cell:N` markers) and serializes edits back to JSON
 //! with `JSON.stringify(nb, null, 1)`-identical bytes.
 //!
-//! Port of `packages/coding-agent/src/edit/notebook.ts`.
+//! Notebook codec used by the `pi-edit` crate.
 
 use std::{collections::HashSet, fmt::Write as _, path::Path, sync::LazyLock};
 
