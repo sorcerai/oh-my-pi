@@ -2684,7 +2684,10 @@ function b() {
 			const controller = new AbortController();
 			const pollPromise = jobTool.execute("test-call-useless-poll", { op: "wait", ids: [jobId] }, controller.signal);
 			controller.abort();
-			const polled = await pollPromise;
+			await expect(pollPromise).rejects.toThrow(/abort|cancel/i);
+
+			vi.spyOn(manager, "nextPollWaitMs").mockReturnValue(0);
+			const polled = await jobTool.execute("test-call-useless-poll-snapshot", { op: "wait", ids: [jobId] });
 			expect(polled.useless).toBe(true);
 
 			// A list snapshot showing only running jobs is equally uneventful.

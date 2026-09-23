@@ -702,11 +702,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 	it("does not clobber the target's active tools with the source snapshot when switching out of vibe", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
-		// Pre-vibe snapshot on the source session is empty; entering vibe activates
-		// read, parent-owned todo, and the vibe tools.
+		// The source snapshot is empty; entering vibe activates read, parent-owned
+		// todo, and the vibe tools. The target's live active set must survive.
 		await mode.handleVibeModeCommand();
 		expect(mode.vibeModeEnabled).toBe(true);
 		expect(session.getActiveToolNames()).toContain("read");
+		expect(session.getActiveToolNames()).toContain("todo");
 
 		// Target is a distinct, non-vibe session.
 		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
@@ -719,9 +720,8 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(await session.switchSession(targetFile)).toBe(true);
 
 		expect(mode.vibeModeEnabled).toBe(false);
-		// The target session has no persisted active-tool roster. Startup admission
-		// therefore leaves its active set empty; the source's pre-vibe snapshot must
-		// not be applied over that target state.
+		// The target's empty startup roster must not be repopulated by the source's
+		// Vibe toolset while leaving Vibe mode.
 		expect(session.getActiveToolNames()).toEqual([]);
 		for (const name of VIBE_TOOL_NAMES) {
 			expect(session.getActiveToolNames()).not.toContain(name);

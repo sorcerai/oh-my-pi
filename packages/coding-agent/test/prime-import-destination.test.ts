@@ -1536,7 +1536,7 @@ describe("prime destination planning and apply", () => {
 				createSpy.mockRestore();
 			}
 			for (const candidate of [dbPath, backupPath]) {
-				if (!(await fs.stat(candidate).catch(() => undefined))) continue;
+				expect(await fs.stat(candidate).catch(() => undefined)).toBeDefined();
 				const inspected = await openSqliteReadConnection(candidate);
 				try {
 					expect(
