@@ -156,7 +156,7 @@ tolerate unknown keys (they already do for Cursor).
 | `packages/ai/package.json` | dependency |
 | `packages/agent/src/agent.ts` | `claudeSdkHandlers` option threaded to stream options |
 | `packages/coding-agent/src/sdk.ts` | `ClaudeSdkHandlers` implementation (session entry, approval prompt) |
-| `packages/coding-agent/src/thinking.ts`, `session/model-controls.ts` | effort support for the new api |
+| `packages/tui/src/thinking.ts`, `session/model-controls.ts` | effort support for the new api |
 | `docs/providers.md`, `docs/provider-endpoint-constraints.md` | document |
 
 ## Testing
