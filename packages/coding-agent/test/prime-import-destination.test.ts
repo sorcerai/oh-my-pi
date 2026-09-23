@@ -1537,6 +1537,7 @@ describe("prime destination planning and apply", () => {
 				expect(reported?.outcome).toBe("lost");
 				expect(applied.report.partialApply).toBe(false);
 				expect(applied.report.losses.some(item => item.code === "destination-invalid")).toBe(true);
+				expect(applied.rollbackEntries).toEqual([]);
 			} finally {
 				createSpy.mockRestore();
 			}
@@ -1546,7 +1547,7 @@ describe("prime destination planning and apply", () => {
 			expect(originalAfter.dev).toBe(originalBefore.dev);
 			expect(attackerAfter.ino).toBe(attackerBefore.ino);
 			expect(attackerAfter.dev).toBe(attackerBefore.dev);
-		for (const candidate of [dbPath, backupPath]) {
+			for (const candidate of [dbPath, backupPath]) {
 				expect((await fs.lstat(candidate)).mode & 0o777).toBe(0o600);
 				expect(await fs.stat(candidate).catch(() => undefined)).toBeDefined();
 				const inspected = await openSqliteReadConnection(candidate);
@@ -1558,12 +1559,9 @@ describe("prime destination planning and apply", () => {
 					inspected.close();
 				}
 			}
-			for (const companion of ["agent.db-wal", "agent.db-shm", "agent.db-journal"]) {
-				const companionPaths = [
-					path.join(path.dirname(dbPath), companion),
-					path.join(path.dirname(backupPath), companion),
-				];
-				for (const companionPath of companionPaths) {
+			for (const databasePath of [dbPath, backupPath]) {
+				for (const companion of ["-wal", "-shm", "-journal"]) {
+					const companionPath = `${databasePath}${companion}`;
 					const companionStat = await fs.lstat(companionPath).catch(() => undefined);
 					if (!companionStat) continue;
 					expect(companionStat.isFile()).toBe(true);
