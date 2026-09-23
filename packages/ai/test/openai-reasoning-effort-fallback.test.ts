@@ -206,9 +206,17 @@ function createLocalQwenModel(provider: string, baseUrl: string): Model<"openai-
 		id: "qwen3.8-27b",
 		name: "Qwen3.8 27B (local)",
 		api: "openai-completions",
-		provider,
+		provider: "custom",
 		baseUrl,
 		reasoning: true,
+		// Keep the fallback fixtures independent of the catalog's provider
+		// policy: llama.cpp exercises the twin-emitting Qwen wire, while vLLM
+		// exercises the kwargs-only chat-template wire.
+		compat: {
+			thinkingFormat: provider === "vllm" ? "qwen-chat-template" : "qwen",
+			qwenPreserveThinking: true,
+			qwenTemplateReasoningEffort: true,
+		},
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 262_144,
