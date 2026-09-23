@@ -153,7 +153,7 @@ Cancellation/timeout:
 
 ## 6) Truncation and artifact behavior
 
-`OutputSink` in `src/session/streaming-output.ts` is used by kernel execution paths:
+`OutputSink` in `packages/tui/src/tools/streaming-output.ts` is used by kernel execution paths:
 
 - sanitizes every chunk
 - tracks total/output lines and bytes
