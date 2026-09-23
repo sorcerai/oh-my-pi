@@ -1510,6 +1510,10 @@ describe("prime destination planning and apply", () => {
 			original.close();
 			const attacker = await AuthStorage.create(attackerPath);
 			attacker.close();
+			const originalBefore = await fs.lstat(dbPath),
+				attackerBefore = await fs.lstat(attackerPath);
+			expect(originalBefore.mode & 0o777).toBe(0o600);
+			expect(attackerBefore.mode & 0o777).toBe(0o600);
 			secretTable.add(operationId, "replacement-secret");
 			const operation = credential("replacement-provider", operationId),
 				value = input(snapshot, { credentials: [operation], operations: [operation], secretTable }),
@@ -1531,11 +1535,19 @@ describe("prime destination planning and apply", () => {
 					reported = applied.report.items.find(item => item.itemId === "credential:replacement-provider");
 				expect(raced).toBe(true);
 				expect(reported?.outcome).toBe("lost");
+				expect(applied.report.partialApply).toBe(false);
 				expect(applied.report.losses.some(item => item.code === "destination-invalid")).toBe(true);
 			} finally {
 				createSpy.mockRestore();
 			}
-			for (const candidate of [dbPath, backupPath]) {
+			const originalAfter = await fs.lstat(backupPath),
+				attackerAfter = await fs.lstat(dbPath);
+			expect(originalAfter.ino).toBe(originalBefore.ino);
+			expect(originalAfter.dev).toBe(originalBefore.dev);
+			expect(attackerAfter.ino).toBe(attackerBefore.ino);
+			expect(attackerAfter.dev).toBe(attackerBefore.dev);
+		for (const candidate of [dbPath, backupPath]) {
+				expect((await fs.lstat(candidate)).mode & 0o777).toBe(0o600);
 				expect(await fs.stat(candidate).catch(() => undefined)).toBeDefined();
 				const inspected = await openSqliteReadConnection(candidate);
 				try {
@@ -1544,6 +1556,19 @@ describe("prime destination planning and apply", () => {
 					).toBeNull();
 				} finally {
 					inspected.close();
+				}
+			}
+			for (const companion of ["agent.db-wal", "agent.db-shm", "agent.db-journal"]) {
+				const companionPaths = [
+					path.join(path.dirname(dbPath), companion),
+					path.join(path.dirname(backupPath), companion),
+				];
+				for (const companionPath of companionPaths) {
+					const companionStat = await fs.lstat(companionPath).catch(() => undefined);
+					if (!companionStat) continue;
+					expect(companionStat.isFile()).toBe(true);
+					expect(companionStat.isSymbolicLink()).toBe(false);
+					expect(companionStat.mode & 0o777).toBe(0o600);
 				}
 			}
 		},

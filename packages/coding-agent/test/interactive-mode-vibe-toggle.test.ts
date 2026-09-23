@@ -708,9 +708,16 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.vibeModeEnabled).toBe(true);
 		expect(session.getActiveToolNames()).toContain("read");
 		expect(session.getActiveToolNames()).toContain("todo");
+		await session.setActiveToolsByName(["read", "todo"]);
 
 		// Target is a distinct, non-vibe session.
 		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+		targetManager.appendSessionInit({
+			systemPrompt: "Test",
+			task: "",
+			tools: ["read", "todo"],
+			spawns: "",
+		});
 		targetManager.appendModeChange("none");
 		await targetManager.ensureOnDisk();
 		const targetFile = targetManager.getSessionFile();
@@ -720,9 +727,9 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(await session.switchSession(targetFile)).toBe(true);
 
 		expect(mode.vibeModeEnabled).toBe(false);
-		// The target's empty startup roster must not be repopulated by the source's
-		// Vibe toolset while leaving Vibe mode.
-		expect(session.getActiveToolNames()).toEqual([]);
+		// The target's restored startup roster must not be replaced by the source's
+		// empty pre-Vibe snapshot while leaving Vibe mode.
+		expect(session.getActiveToolNames()).toEqual(["read", "todo"]);
 		for (const name of VIBE_TOOL_NAMES) {
 			expect(session.getActiveToolNames()).not.toContain(name);
 		}
