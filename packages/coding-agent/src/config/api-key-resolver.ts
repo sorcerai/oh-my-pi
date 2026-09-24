@@ -1,14 +1,8 @@
-import {
-	type Api,
-	type ApiKeyResolver,
-	type AuthStorage,
-	isUsageLimitOutcome,
-	type LocalAuthRefStorage,
-	type Model,
-	parseLocalAuthRef,
-	resolveLocalAuthRef,
-} from "@oh-my-pi/pi-ai";
+import { type AuthStorage, type LocalAuthRefStorage, parseLocalAuthRef, resolveLocalAuthRef } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
+import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "authRef">;
@@ -36,6 +30,8 @@ export interface ApiKeyResolverRegistry {
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
 	authStorage: Pick<AuthStorage, "rotateSessionCredential"> & LocalAuthRefStorage;
+	/** Refresh command-backed request headers without resolving a different credential. */
+	invalidateProviderCommandConfigs?(provider: string): void;
 	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
 	 * policy: initial → resolve; step (b) → force-refresh same account; step (c)
@@ -56,7 +52,7 @@ export interface ApiKeyResolverRegistry {
  * Also usable standalone for structural registries that don't carry the method.
  */
 export function createApiKeyResolver(
-	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage">,
+	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage" | "invalidateProviderCommandConfigs">,
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
@@ -66,6 +62,7 @@ export function createApiKeyResolver(
 		if (parsedAuthRef?.kind === "oauth-credential") {
 			const exactAuthRef = `oauth-credential:${parsedAuthRef.providerId}:${parsedAuthRef.credentialId}`;
 			if (lastChance) return undefined;
+			if (error !== undefined) registry.invalidateProviderCommandConfigs?.(provider);
 			return resolveLocalAuthRef(registry.authStorage, exactAuthRef, provider, {
 				sessionId,
 				signal,
@@ -89,12 +86,12 @@ export function createApiKeyResolver(
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				return resolveLocalAuthRef(registry.authStorage, providerAuthRef, provider, { sessionId, signal });
 			}
+			registry.invalidateProviderCommandConfigs?.(provider);
 			return resolveLocalAuthRef(registry.authStorage, providerAuthRef, provider, {
 				sessionId,
 				signal,
-				forceRefresh: true,
+				forceRefresh: !lastChance,
 			});
 		}
 		if (error === undefined) {

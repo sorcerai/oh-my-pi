@@ -1,10 +1,6 @@
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { BridgeMessage, ExternalPeer } from "@oh-my-pi/prime-bridge-protocol";
-import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import type { Theme } from "../../modes/theme/theme";
-import { replaceTabs } from "../render-utils";
 
 function sanitize(value: string): string {
 	return replaceTabs(sanitizeText(value))
@@ -52,13 +48,4 @@ export function formatExternalInbox(messages: BridgeMessage[], peek: boolean): s
 		? `${messages.length} unread external Prime message(s):`
 		: `${messages.length} external Prime message(s):`;
 	return [header, ...messages.map(message => `- ${formatExternalMessage(message)}`)].join("\n");
-}
-
-export function externalRenderResult(
-	result: { content: Array<{ type: string; text?: string }> },
-	_options: RenderResultOptions,
-	_uiTheme: Theme,
-): Component {
-	const text = result.content.find(part => part.type === "text")?.text ?? "";
-	return new Text(replaceTabs(sanitizeText(text)), 0, 0);
 }

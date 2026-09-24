@@ -65,6 +65,7 @@ function createRegisteredTool(name: string, label: string, description = `${labe
 			},
 		},
 		extensionPath: "<test>",
+		sourceInfo: { path: "<test>", source: "extension", scope: "temporary", origin: "top-level" },
 	};
 }
 
@@ -169,6 +170,7 @@ function newSession(
 	const readTool = createBasicTool("read", "Read");
 	const mock = createModel();
 	const sessionManager = SessionManager.inMemory();
+	const settings = Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" });
 	const initialRegisteredTools = options.initialRegisteredTools ?? [];
 	const runner = new ExtensionRunner(
 		[createTestExtension(initialRegisteredTools)],
@@ -178,6 +180,8 @@ function newSession(
 		{
 			getApiKey: async () => "test-key",
 		} as never,
+		undefined,
+		settings,
 	);
 	const toolRegistry = new Map<string, AgentTool>([[readTool.name, readTool]]);
 	for (const registeredTool of initialRegisteredTools) {
@@ -191,7 +195,7 @@ function newSession(
 	const session = new AgentSession({
 		agent,
 		sessionManager,
-		settings: Settings.isolated({ "compaction.enabled": false }),
+		settings,
 		modelRegistry: { getApiKey: async () => "test-key" } as never,
 		toolRegistry,
 		mcpManagerToolNames: options.initialMCPToolNames,

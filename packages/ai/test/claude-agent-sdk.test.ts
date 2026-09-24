@@ -358,8 +358,8 @@ describe("streamClaudeAgentSdk", () => {
 
 	test("not-logged-in failure names claude login", async () => {
 		setClaudeSdkQueryForTests((() => {
-			// biome-ignore lint/correctness/useYield: models an SDK generator that throws before its first yield
 			async function* gen() {
+				yield* [];
 				throw new Error("Not logged in · Please run /login");
 			}
 			return gen();

@@ -10,6 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { parsePrimeConfig } from "../src/import/prime/config-parser";
+import { openSqliteReadConnection } from "../src/tools/sqlite-reader";
 import {
 	applyPrimeDestination,
 	type PrimeDestinationApplyResult,
@@ -1309,7 +1310,7 @@ describe("prime destination planning and apply", () => {
 			report = applied.report;
 		expect(report.partialApply).toBe(false);
 		expect(report.losses.some(loss => loss.code === "source-changed" || loss.code === "source-drift")).toBe(true);
-		expect(report.items.map(item => item.itemId)).toEqual([...report.items.map(item => item.itemId)].sort(compare));
+		expect(report.items.map(item => item.itemId)).toEqual(report.items.map(item => item.itemId).sort(compare));
 	});
 
 	it("terminal-loses every executable item for a symlinked agent directory", async () => {
@@ -1509,6 +1510,10 @@ describe("prime destination planning and apply", () => {
 			original.close();
 			const attacker = await AuthStorage.create(attackerPath);
 			attacker.close();
+			const originalBefore = await fs.lstat(dbPath),
+				attackerBefore = await fs.lstat(attackerPath);
+			expect(originalBefore.mode & 0o777).toBe(0o600);
+			expect(attackerBefore.mode & 0o777).toBe(0o600);
 			secretTable.add(operationId, "replacement-secret");
 			const operation = credential("replacement-provider", operationId),
 				value = input(snapshot, { credentials: [operation], operations: [operation], secretTable }),
@@ -1530,18 +1535,38 @@ describe("prime destination planning and apply", () => {
 					reported = applied.report.items.find(item => item.itemId === "credential:replacement-provider");
 				expect(raced).toBe(true);
 				expect(reported?.outcome).toBe("lost");
+				expect(applied.report.partialApply).toBe(false);
 				expect(applied.report.losses.some(item => item.code === "destination-invalid")).toBe(true);
+				expect(applied.rollbackEntries).toEqual([]);
 			} finally {
 				createSpy.mockRestore();
 			}
+			const originalAfter = await fs.lstat(backupPath),
+				attackerAfter = await fs.lstat(dbPath);
+			expect(originalAfter.ino).toBe(originalBefore.ino);
+			expect(originalAfter.dev).toBe(originalBefore.dev);
+			expect(attackerAfter.ino).toBe(attackerBefore.ino);
+			expect(attackerAfter.dev).toBe(attackerBefore.dev);
 			for (const candidate of [dbPath, backupPath]) {
-				const inspected = new Database(`file:${candidate}?immutable=1`, { readonly: true });
+				expect((await fs.lstat(candidate)).mode & 0o777).toBe(0o600);
+				expect(await fs.stat(candidate).catch(() => undefined)).toBeDefined();
+				const inspected = await openSqliteReadConnection(candidate);
 				try {
 					expect(
 						inspected.query("SELECT 1 FROM auth_credentials WHERE provider = ?").get("replacement-provider"),
 					).toBeNull();
 				} finally {
 					inspected.close();
+				}
+			}
+			for (const databasePath of [dbPath, backupPath]) {
+				for (const companion of ["-wal", "-shm", "-journal"]) {
+					const companionPath = `${databasePath}${companion}`;
+					const companionStat = await fs.lstat(companionPath).catch(() => undefined);
+					if (!companionStat) continue;
+					expect(companionStat.isFile()).toBe(true);
+					expect(companionStat.isSymbolicLink()).toBe(false);
+					expect(companionStat.mode & 0o777).toBe(0o600);
 				}
 			}
 		},
@@ -2278,8 +2303,8 @@ describe("prime destination planning and apply", () => {
 			),
 			realReadFileSync = fsSync.readFileSync.bind(fsSync),
 			readFileSyncSpy = vi.spyOn(fsSync, "readFileSync").mockImplementation(((
-				file: Parameters<typeof fsSync.readFileSync>[0],
-				options: Parameters<typeof fsSync.readFileSync>[1],
+				file: Parameters<typeof realReadFileSync>[0],
+				options: Parameters<typeof realReadFileSync>[1],
 			) => {
 				if (String(file) === modelsPath) return bytesB.toString("utf8") as never;
 				return realReadFileSync(file as never, options as never) as never;

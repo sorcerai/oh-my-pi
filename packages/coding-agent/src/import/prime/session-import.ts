@@ -3,7 +3,7 @@ import type { Dir, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBlobsDir, withFileLock } from "@oh-my-pi/pi-utils";
-import { blobExtensionForImageMimeType } from "../../session/blob-store";
+import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { persistConvertedSession } from "../../session/foreign-session-import";
 import type { PrimeSessionProvenance } from "../../session/foreign-session-store";
 import type { SessionEntry } from "../../session/session-entries";
@@ -1262,7 +1262,7 @@ export async function applyPrimeSessions(
 						blobRefs.set(image.hash, `blob:sha256:${image.hash}`);
 					} catch (error) {
 						if (!operational(error) && !(error instanceof PrimeOperationalError)) throw error;
-						for (const entry of [...manifestEntries]) {
+						for (const entry of manifestEntries.slice()) {
 							if (entry.itemId !== `blob:${image.hash}` && entry.itemId !== `blob:${image.hash}:display`)
 								continue;
 							if (!(await nodeDigest(entry.destinationRef)).exists) forgetRunEntry(manifestKey(entry));

@@ -1,4 +1,4 @@
-//! Clipboard edit resolution (`packages/hashline/src/clipboard.ts`).
+//! Clipboard edit resolution.
 
 use super::{
 	apply::EmptyPaste,

@@ -9,7 +9,9 @@ def _make_browser():
     def _encode_arg(value):
         if isinstance(value, re.Pattern):
             if not isinstance(value.pattern, str):
-                raise TypeError("browser helpers require regular expressions with string patterns")
+                raise TypeError(
+                    "browser helpers require regular expressions with string patterns"
+                )
             flags = ""
             if value.flags & re.IGNORECASE:
                 flags += "i"
@@ -35,14 +37,10 @@ def _make_browser():
         return values
 
     async def _invoke(action, options):
-        response = await _omp_prelude(
+        response = await _omp_prelude(  # noqa: F821
             "browser",
             {
-                **{
-                    key: value
-                    for key, value in options.items()
-                    if value is not None
-                },
+                **{key: value for key, value in options.items() if value is not None},
                 "action": action,
             },
         )
@@ -247,6 +245,7 @@ def _make_browser():
             wait_until=None,
             dialogs=None,
             timeout=None,
+            persist=None,
         ):
             """Open or attach to a browser tab and return its handle."""
             if name is not None:
@@ -261,6 +260,7 @@ def _make_browser():
                     "wait_until": wait_until,
                     "dialogs": dialogs,
                     "timeout": timeout,
+                    "persist": persist,
                 },
             )
             opened_name = details.get("name")

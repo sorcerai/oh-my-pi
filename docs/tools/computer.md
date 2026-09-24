@@ -7,12 +7,13 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 ## Source
 
 - Prelude factory and host service: `packages/coding-agent/src/tools/computer.ts`
+- Prelude asset loading and definitions: `packages/coding-agent/src/tools/computer/prelude-definition.ts`
 - Direct-helper call renderer and approval policy: `packages/coding-agent/src/tools/computer/call.ts`
 - Eval facades: `packages/coding-agent/src/tools/computer/{prelude.js,prelude.py,declarations.d.ts}`
 - Model-facing prelude documentation: `packages/coding-agent/src/prompts/tools/computer.md`
 - Safety prompt: `packages/coding-agent/src/prompts/system/computer-safety.md`
 - Prelude registration/gate: `packages/coding-agent/src/tools/index.ts`
-- Exposure policy: `packages/coding-agent/src/tools/computer/exposure.ts`
+- Blob exposure policy: `packages/coding-agent/src/blob-broker/exposure.ts`
 - Persistent worker: `packages/coding-agent/src/tools/computer/{supervisor,protocol,worker,worker-entry}.ts`
 - Native implementation: `crates/pi-natives/src/desktop/`
 - Native public types: `packages/natives/native/index.d.ts`

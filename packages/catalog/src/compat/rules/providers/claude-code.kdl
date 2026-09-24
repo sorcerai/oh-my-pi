@@ -6,6 +6,8 @@
 // derived from the Anthropic class rules.
 
 provider "claude-code" {
+	default-model "opus"
+	allow-unauthenticated #true
 	thinking-mode "effort"
 	thinking-efforts "low" "medium" "high" "xhigh" "max"
 }

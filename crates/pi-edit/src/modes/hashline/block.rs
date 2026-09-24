@@ -1,5 +1,4 @@
-//! Block-op resolution via tree-sitter (`packages/hashline/src/block.ts` +
-//! `block-resolver.ts`).
+//! Block-op resolution via tree-sitter.
 
 use std::{
 	collections::{HashMap, VecDeque},

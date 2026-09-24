@@ -1,4 +1,4 @@
-//! Edit application with boundary repair (`packages/hashline/src/apply.ts`).
+//! Edit application with boundary repair.
 
 use std::{
 	collections::{BTreeMap, HashMap, HashSet},

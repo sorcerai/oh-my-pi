@@ -4,13 +4,13 @@
 
 ## Source
 - Entry and mode registration: `packages/coding-agent/src/edit/index.ts`
-- Hashline schema: `packages/coding-agent/src/edit/hashline/params.ts`
-- Model-facing hashline prompt: `packages/hashline/src/prompt.md`
-- Canonical constrained-decoding grammar: `packages/hashline/src/grammar.lark`
-- Parser and application: `packages/hashline/src/input.ts`, `packages/hashline/src/parser.ts`, `packages/hashline/src/apply.ts`
-- Snapshot validation/recovery: `packages/hashline/src/snapshots.ts`, `packages/hashline/src/patcher.ts`, `packages/hashline/src/recovery.ts`
-- Coding-agent execution/result shaping: `packages/coding-agent/src/edit/hashline/execute.ts`
-- Streaming preview strategy: `packages/coding-agent/src/edit/streaming.ts`, `packages/coding-agent/src/edit/hashline/diff.ts`
+- Hashline schema and parser types: `crates/pi-edit/src/modes/hashline/types.rs`
+- Model-facing hashline prompt: `crates/pi-edit/prompts/hashline.md`
+- Canonical constrained-decoding grammar: `crates/pi-edit/grammars/hashline.lark`
+- Parser and application: `crates/pi-edit/src/modes/hashline/input.rs`, `crates/pi-edit/src/modes/hashline/parser.rs`, `crates/pi-edit/src/modes/hashline/apply.rs`
+- Snapshot validation/recovery: `crates/pi-edit/src/store.rs`, `crates/pi-edit/src/modes/hashline/patcher.rs`, `crates/pi-edit/src/modes/hashline/recovery.rs`
+- Coding-agent execution/result shaping: `packages/coding-agent/src/edit/index.ts`, `packages/tui/src/tools/edit.ts`
+- Streaming preview strategy: `crates/pi-edit/src/modes/hashline/preview.rs`, `packages/tui/src/tools/edit.ts`
 
 ## Mode selection and availability
 

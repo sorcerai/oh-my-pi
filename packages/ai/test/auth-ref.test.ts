@@ -39,14 +39,12 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 
 	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
 		this.deleteAuthCredentialsForProvider(provider, "replaced by newer credential");
-		const rows = credentials.map(
-			(credential): StoredAuthCredential => ({
-				id: this.#nextId++,
-				provider,
-				credential,
-				disabledCause: null,
-			}),
-		);
+		const rows = credentials.map((credential): StoredAuthCredential => ({
+			id: this.#nextId++,
+			provider,
+			credential,
+			disabledCause: null,
+		}));
 		this.#rows.push(...rows);
 		return rows;
 	}

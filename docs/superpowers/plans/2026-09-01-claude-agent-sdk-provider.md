@@ -1442,7 +1442,7 @@ git commit -m "feat(coding-agent): claude sdk bridge for session resume and tool
 ### Task 7: Effort controls, docs, smoke script
 
 **Files:**
-- Modify: `packages/coding-agent/src/thinking.ts`, `packages/coding-agent/src/session/model-controls.ts` (only if the static `thinking.efforts` from Task 1 is not enough for the effort picker to show `low..max`)
+- Modify: `packages/tui/src/thinking.ts`, `packages/coding-agent/src/session/model-controls.ts` (only if the static `thinking.efforts` from Task 1 is not enough for the effort picker to show `low..max`)
 - Create: `packages/ai/scripts/claude-sdk-smoke.ts`
 - Modify: `docs/providers.md` (provider table + OAuth-backed list), `docs/provider-endpoint-constraints.md`
 
@@ -1521,7 +1521,7 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/ai/scripts/claude-sdk-smoke.ts docs/providers.md docs/provider-endpoint-constraints.md packages/coding-agent/src/thinking.ts packages/coding-agent/src/session/model-controls.ts
+git add packages/ai/scripts/claude-sdk-smoke.ts docs/providers.md docs/provider-endpoint-constraints.md packages/tui/src/thinking.ts packages/coding-agent/src/session/model-controls.ts
 git commit -m "feat(claude-code): effort controls, docs, live smoke script"
 ```
 

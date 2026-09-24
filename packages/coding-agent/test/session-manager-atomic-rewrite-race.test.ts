@@ -9,10 +9,13 @@ import {
 	SessionPersistenceIndeterminateError,
 } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
+	FileSessionStorage,
 	MemorySessionStorage,
 	type SessionStorageWriter,
+	SessionWriteConflictError,
 	type WriteTextAtomicOptions,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 interface DetachableWriter extends SessionStorageWriter {
@@ -322,6 +325,42 @@ describe("SessionManager atomic rewrite race", () => {
 		expect(afterRelease).toContain("newer summary");
 		expect(storage.guardRejections).toBeGreaterThanOrEqual(1);
 		expect(storage.detachedLines).toEqual([]);
+	});
+});
+describe("SessionManager cross-process rewrite freshness", () => {
+	it("refuses to erase a durable turn appended by another manager", async () => {
+		const tempDir = TempDir.createSync("@omp-session-rewrite-conflict-");
+		try {
+			const first = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+			await first.ensureOnDisk();
+			const sessionFile = first.getSessionFile();
+			if (!sessionFile) throw new Error("Expected session file");
+
+			const second = await SessionManager.open(sessionFile, tempDir.path(), new FileSessionStorage(), {
+				suppressBreadcrumb: true,
+			});
+			second.appendMessage({ role: "user", content: "durable second-writer turn", timestamp: Date.now() });
+			await second.close();
+
+			await expect(first.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError);
+
+			const reopened = await SessionManager.open(sessionFile, tempDir.path(), new FileSessionStorage(), {
+				suppressBreadcrumb: true,
+			});
+			expect(
+				reopened
+					.getEntries()
+					.some(
+						entry =>
+							entry.type === "message" &&
+							entry.message.role === "user" &&
+							entry.message.content === "durable second-writer turn",
+					),
+			).toBe(true);
+			await reopened.close();
+		} finally {
+			await tempDir.remove();
+		}
 	});
 });
 
@@ -979,5 +1018,36 @@ describe("IndexedSessionStorage atomic readback", () => {
 		await storage.drain();
 		expect(await storage.readText(sessionPath)).toBe(newerBody);
 		expect(storage.statSync(sessionPath).size).toBe(Buffer.byteLength(newerBody));
+	});
+});
+
+describe("SessionManager create-only publication", () => {
+	it("preserves copied and appended entries through the next full rewrite", async () => {
+		using tempDir = TempDir.createSync("@omp-create-only-rewrite-");
+		const source = SessionManager.inMemory(tempDir.path());
+		source.appendCustomEntry("original", { message: "seed" });
+		const copy = await source.persistCopyCreateOnly({
+			sessionDir: tempDir.path(),
+			suppressBreadcrumb: true,
+		});
+		try {
+			copy.appendCustomEntry("after-copy", { message: "continued" });
+			await copy.flush();
+			await copy.rewriteEntries();
+			const restored = await SessionManager.open(copy.getSessionFile()!, tempDir.path());
+			try {
+				expect(
+					restored
+						.getEntries()
+						.filter(entry => entry.type === "custom")
+						.map(entry => entry.customType),
+				).toEqual(["original", "after-copy"]);
+			} finally {
+				await restored.close();
+			}
+		} finally {
+			await copy.close();
+			await source.close();
+		}
 	});
 });

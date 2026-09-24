@@ -24,37 +24,28 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
 import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { BridgeMessage, BridgeReceipt, ExternalPeer } from "@oh-my-pi/prime-bridge-protocol";
-import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
+import { POLL_WAIT_LADDER_MS } from "../../async/job-manager";
 import type { ExternalPeerProvider, ExternalPeerWaitClaim } from "../../integrations/prime-bridge";
 import { IrcBus } from "../../irc/bus";
-import type { Theme } from "../../modes/theme/theme";
+
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
 import type { AgentRegistry } from "../../registry/agent-registry";
 import type { ToolSession } from "..";
-import type { ToolActivitySummary } from "../renderers";
+
 import {
 	buildJobResult,
 	executeCancel,
 	executeJobsSnapshot,
-	jobsRenderCall,
-	jobsRenderResult,
 	noMatchingJobsResult,
 	nothingToWaitForResult,
-	resolvePollWindow,
 	snapshotJobs,
 	visibleJobs,
 } from "./jobs";
-import {
-	executeLaunch,
-	type LaunchParams,
-	type LaunchRenderArgs,
-	type LaunchToolDetails,
-	launchRenderCall,
-	launchRenderResult,
-} from "./launch";
+
+import { executeLaunch } from "./launch";
+import { type LaunchParams } from "@oh-my-pi/pi-tui/tools/hub";
 import {
 	drainPendingInbox,
 	executeInbox,
@@ -63,32 +54,29 @@ import {
 	executeSend,
 	type HubListParams,
 	messageResult,
-	messagingRenderCall,
-	messagingRenderResult,
 	normalizeIrcTimeoutMs,
-	resolveMessageTimeoutMs,
+	resolveHubListLimit,
 } from "./messaging";
 import {
 	EXTERNAL_PEER_ID_PREFIX,
-	externalRenderResult,
 	externalTargetId,
 	formatExternalInbox,
 	formatExternalMessage,
 	formatExternalPeers,
 	normalizeExternalPeerId,
 } from "./rendering";
+
 import {
 	type CoordinationDetails,
 	DEFAULT_HUB_LIST_LIMIT,
 	type HubDetails,
-	type HubRenderArgs,
-	hubErrorResult,
+	type HubListStatus,
 	MAX_HUB_LIST_LIMIT,
-} from "./types";
+} from "@oh-my-pi/pi-tui/tools/hub";
+import { hubErrorResult } from "./types";
 
-export { isWaitingPollDetails } from "./jobs";
-export type { LaunchParams, LaunchToolDetails } from "./launch";
-export { createIrcMessageCard, isIrcEnabled } from "./messaging";
+export type { LaunchParams, LaunchToolDetails } from "@oh-my-pi/pi-tui/tools/hub";
+export { isIrcEnabled } from "./messaging";
 export * from "./types";
 
 const hubSchema = type({
@@ -101,7 +89,6 @@ const hubSchema = type({
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
-	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
 	"status?": type("'running' | 'idle' | 'parked'").describe("list: filter by status; omit for running+idle"),
 	"limit?": type("number > 0").describe(
@@ -151,6 +138,13 @@ interface MessagingDeps {
 }
 
 const PROGRESS_INTERVAL_MS = 500;
+const PRIME_RUNNING_STATUSES: Record<string, true> = { running: true, ready: true, active: true };
+
+function primeStatusBucket(status: string): HubListStatus | undefined {
+	if (PRIME_RUNNING_STATUSES[status] === true) return "running";
+	if (status === "idle" || status === "parked") return status;
+	return undefined;
+}
 
 /** Mutating process ops require exec approval; messaging, jobs, and inspection are read-only. */
 function hubApproval(params: unknown): ToolApprovalDecision {
@@ -224,7 +218,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		},
 		{
 			caption: "Block until a specific peer answers",
-			call: { op: "wait", from: "AuthLoader", timeoutMs: 60000 },
+			call: { op: "wait", from: "AuthLoader" },
 		},
 		{
 			caption: "Kill a hung background job",
@@ -269,6 +263,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		return this.session.externalPeerProvider;
 	}
 
+	/** A successful ACK commits delivery; callers must not discard it for a later abort. */
 	async #ackExternalClaim(provider: ExternalPeerProvider, claimToken: string): Promise<void> {
 		let failure: unknown;
 		try {
@@ -352,9 +347,16 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			return messaging ? this.#withExternalError(local, "list", error) : this.#externalError("list", error);
 		}
 
-		const seen = new Set<string>();
-		const externalPeers: ExternalPeer[] = [];
+		const localPeers = local.details?.peers ?? [];
+		const localCounts = local.details?.counts ?? { running: 0, idle: 0, parked: 0, shown: 0, truncated: 0 };
+		const limit = resolveHubListLimit(params.limit);
+		const seen = new Set(localPeers.map(peer => peer.id));
+		const filteredExternalPeers: ExternalPeer[] = [];
+		let externalRunning = 0;
+		let externalIdle = 0;
+		let externalParked = 0;
 		for (const peer of rawPeers) {
+			const bucket = primeStatusBucket(peer.status);
 			const activeSessionId =
 				typeof peer.activeSessionId === "string" && peer.activeSessionId.length > 0
 					? peer.activeSessionId
@@ -367,15 +369,30 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			}
 			if (seen.has(id)) continue;
 			seen.add(id);
-			externalPeers.push({ ...peer, id });
+			if (bucket === "running") externalRunning++;
+			else if (bucket === "idle") externalIdle++;
+			else if (bucket === "parked") externalParked++;
+			if (params.status !== undefined ? bucket !== params.status : bucket !== "running" && bucket !== "idle")
+				continue;
+			filteredExternalPeers.push({ ...peer, id });
 		}
+		const externalPeers = filteredExternalPeers.slice(0, Math.max(0, limit - localPeers.length));
+		const externalTruncated = Math.max(0, filteredExternalPeers.length - externalPeers.length);
+		const counts = {
+			running: localCounts.running + externalRunning,
+			idle: localCounts.idle + externalIdle,
+			parked: localCounts.parked + externalParked,
+			shown: localPeers.length + externalPeers.length,
+			truncated: localCounts.truncated + externalTruncated,
+		};
+		const externalText =
+			formatExternalPeers(externalPeers) +
+			(externalTruncated > 0 ? `\n(${externalTruncated} Prime peer(s) truncated by list limit.)` : "");
 		const localText = local.content.find(part => part.type === "text")?.text ?? "";
 		return {
 			...local,
-			content: [
-				{ type: "text", text: [localText, formatExternalPeers(externalPeers)].filter(Boolean).join("\n\n") },
-			],
-			details: { ...local.details, op: "list", externalPeers },
+			content: [{ type: "text", text: [localText, externalText].filter(Boolean).join("\n\n") }],
+			details: { ...local.details, op: "list", counts, externalPeers },
 		};
 	}
 
@@ -412,7 +429,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 					.trim(),
 			);
 		if (params.await && receipt.status !== "failed") {
-			const timeoutMs = resolveMessageTimeoutMs(this.session.settings, params.timeoutMs);
+			const timeoutMs = normalizeIrcTimeoutMs(this.session.settings.get("irc.timeoutMs"));
 			try {
 				const claim = await provider.wait(target, timeoutMs, signal);
 				const waited = claim?.message ?? null;
@@ -475,10 +492,17 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 	async #executeExternalMessageWait(
 		messaging: MessagingDeps | null,
 		params: HubParams,
+		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<HubDetails>> {
 		const provider = this.#external();
 		if (!provider) throw new Error("External provider is unavailable");
+		const completedClaimTokens = new Set<string>();
+		let winningClaimToken: string | undefined;
+		const releaseClaim = async (claimToken: string): Promise<void> => {
+			await provider.release(claimToken).catch(() => undefined);
+			completedClaimTokens.add(claimToken);
+		};
 		const senderId = messaging?.senderId ?? this.session.getAgentId?.() ?? undefined;
 		if (!senderId) return this.#externalError("wait", new Error("Agent identity is unavailable."), { op: "wait" });
 		const from = params.from?.trim() || undefined;
@@ -488,7 +512,6 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			messaging && from !== undefined && !externalRequested
 				? messaging.registry.listVisibleTo(messaging.senderId).some(peer => peer.id === from)
 				: false;
-		const timeoutMs = resolveMessageTimeoutMs(this.session.settings, params.timeoutMs);
 		const localAbort = messaging && !externalRequested ? new AbortController() : undefined;
 		const externalAbort = new AbortController();
 		const cancelReason = new Error("hub wait settled");
@@ -510,7 +533,6 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			| { kind: "external"; claim: ExternalPeerWaitClaim | null }
 			| { kind: "error"; error: unknown };
 		const legs: Promise<WaitRaceResult | "timeout">[] = [];
-		const winnerClaimTokens = new Set<string>();
 		const localCanWait =
 			messaging &&
 			!externalRequested &&
@@ -554,21 +576,36 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			if (winner.kind === "local") return winner.result;
 			if (winner.kind === "external") {
 				if (winner.claim) {
+					winningClaimToken = winner.claim.claimToken;
 					if (localLeg) {
 						localAbort?.abort(cancelReason);
 						const localWinner = await localLeg;
 						if (localWinner.kind === "local") {
-							winnerClaimTokens.add(winner.claim.claimToken);
-							await provider.release(winner.claim.claimToken).catch(() => undefined);
+							await releaseClaim(winner.claim.claimToken);
+							if (signal?.aborted)
+								throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
 							return localWinner.result;
 						}
+					}
+					if (signal?.aborted) {
+						await releaseClaim(winner.claim.claimToken);
+						throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
 					}
 					let formatted: string;
 					try {
 						formatted = await this.#renderExternalClaim(provider, winner.claim.claimToken, winner.claim.message);
+						if (signal?.aborted) {
+							await releaseClaim(winner.claim.claimToken);
+							throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
+						}
 						await this.#ackExternalClaim(provider, winner.claim.claimToken);
-						winnerClaimTokens.add(winner.claim.claimToken);
+						completedClaimTokens.add(winner.claim.claimToken);
 					} catch (error) {
+						if (signal?.aborted) {
+							if (!completedClaimTokens.has(winner.claim.claimToken))
+								await releaseClaim(winner.claim.claimToken);
+							throw error;
+						}
 						return this.#externalError("wait", error, { op: "wait", from: senderId });
 					}
 					return {
@@ -606,7 +643,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			externalAbort.abort(cancelReason);
 			if (externalLeg) {
 				void externalLeg.then(result => {
-					if (result.kind === "external" && result.claim && !winnerClaimTokens.has(result.claim.claimToken))
+					if (
+						result.kind === "external" &&
+						result.claim &&
+						result.claim.claimToken !== winningClaimToken &&
+						!completedClaimTokens.has(result.claim.claimToken)
+					)
 						void provider.release(result.claim.claimToken).catch(() => undefined);
 				});
 			}
@@ -789,18 +831,28 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
 		}
 
+		// Wait window: the adaptive ladder starts at the floor and climbs as the
+		// agent waits in a tight loop, then resets once it steps away (see
+		// AsyncJobManager.nextPollWaitMs). Job and message waits share one
+		// per-owner ladder; only paths that actually block advance and record it.
+		const nextWindowMs = (): number => manager?.nextPollWaitMs(ownerId) ?? POLL_WAIT_LADDER_MS[0];
+
 		if (!manager || runningJobs.length === 0) {
-			if (provider) return this.#executeExternalMessageWait(messaging, params, signal);
+			// Drain buffered local messages before checking peer liveness or
+			// blocking on the external bridge.
+			if (messaging && !externalRequested) {
+				const queued = IrcBus.global().take(messaging.senderId, from);
+				if (queued) return messageResult(messaging.senderId, queued);
+			}
+			if (provider) {
+				try {
+					return await this.#executeExternalMessageWait(messaging, params, nextWindowMs(), signal);
+				} finally {
+					manager?.recordPollWaitEnd(ownerId);
+				}
+			}
 			// No job legs: pure message wait — or nothing to block on at all.
 			if (!messaging) return nothingToWaitForResult(this.session);
-			// The bus mailbox is a separate store from the session-pending buffer
-			// drained above, and only `executeMessageWait` below ever reads it. A
-			// peer that sends and then stops running leaves its message queued
-			// there, so without this take the liveness gate would answer "nothing
-			// to wait for" while `hub inbox` hands back the very message being
-			// waited on. Single atomic take: the rest of the backlog stays queued.
-			const queued = IrcBus.global().take(messaging.senderId, from);
-			if (queued) return messageResult(messaging.senderId, queued);
 			if (!from) {
 				// A bare wait can only be satisfied by a running peer eventually
 				// sending something; with none, return the snapshot immediately
@@ -810,17 +862,14 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 					.some(ref => messaging.registry.isRunning(ref));
 				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
 			}
-			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
+			try {
+				return await executeMessageWait(messaging, { from, timeoutMs: nextWindowMs() }, signal);
+			} finally {
+				manager?.recordPollWaitEnd(ownerId);
+			}
 		}
 
-		// Wait window: explicit timeout wins (0 = no window); otherwise the
-		// `async.pollWaitDuration` fixed value or smart ladder. The ladder
-		// starts at the floor and climbs as the agent waits in a tight loop,
-		// then resets once it steps away (see AsyncJobManager.nextPollWaitMs).
-		const window = resolvePollWindow(this.session, manager, ownerId);
-		const windowMs = params.timeoutMs !== undefined ? normalizeIrcTimeoutMs(params.timeoutMs) : window.waitMs;
-		const usedSmartWindow = window.smart && params.timeoutMs === undefined;
-
+		const windowMs = nextWindowMs();
 		let racePromises: Promise<unknown>[] = runningJobs.map(j => j.promise);
 
 		// Message leg: park a bus waiter with no timeout of its own — the race
@@ -859,7 +908,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				: undefined;
 		const externalCancelled = new Error("hub wait settled");
 		let removeExternalAbortListener: (() => void) | undefined;
-		const winnerClaimTokens = new Set<string>();
+		const completedClaimTokens = new Set<string>();
+		let winningClaimToken: string | undefined;
 		const externalLeg =
 			provider && externalAbort
 				? provider.wait(externalFrom, windowMs, externalAbort.signal).then(
@@ -886,8 +936,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		}
 
 		const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
-		const timeoutHandle = windowMs > 0 ? setTimeout(() => timeoutResolve(), windowMs) : undefined;
-		if (timeoutHandle) racePromises.push(timeoutPromise);
+		const timeoutHandle = setTimeout(() => timeoutResolve(), windowMs);
+		racePromises.push(timeoutPromise);
 
 		const watchedJobIds = runningJobs.map(job => job.id);
 		manager.watchJobs(watchedJobIds);
@@ -928,14 +978,14 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 						racePromises = racePromises.filter(promise => promise !== externalLeg);
 						continue;
 					}
-					winnerClaimTokens.add(externalResult.claim.claimToken);
+					winningClaimToken = externalResult.claim.claimToken;
 				}
 				break;
 			}
 		} finally {
 			manager.unwatchJobs(watchedJobIds);
 			clearTimeout(timeoutHandle);
-			if (progressTimer) clearInterval(progressTimer);
+			clearInterval(progressTimer);
 			busAbort?.abort(busCancelled);
 			externalAbort?.abort(externalCancelled);
 			if (externalLeg) {
@@ -944,7 +994,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 						provider !== undefined &&
 						result.external &&
 						result.claim &&
-						!winnerClaimTokens.has(result.claim.claimToken)
+						result.claim.claimToken !== winningClaimToken &&
+						!completedClaimTokens.has(result.claim.claimToken)
 					)
 						void provider.release(result.claim.claimToken).catch(() => undefined);
 				});
@@ -952,14 +1003,18 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			removeBusAbortListener?.();
 			removeExternalAbortListener?.();
 			removeRaceAbortListener?.();
-			if (usedSmartWindow) {
-				// Reset the idle-gap clock: escalate if the agent waits again soon,
-				// drop back to the floor once it goes quiet for a while.
-				manager.recordPollWaitEnd(ownerId);
-			}
+			// Reset the idle-gap clock: escalate if the agent waits again soon,
+			// drop back to the floor once it goes quiet for a while.
+			manager.recordPollWaitEnd(ownerId);
 		}
 
-		if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
+		if (signal?.aborted) {
+			if (provider && winningClaimToken) {
+				await provider.release(winningClaimToken).catch(() => undefined);
+				completedClaimTokens.add(winningClaimToken);
+			}
+			throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
+		}
 		if (externalLeg && typeof raceWinner === "object" && raceWinner !== null && "external" in raceWinner) {
 			const externalResult = raceWinner as {
 				external: true;
@@ -975,10 +1030,17 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				if (busLeg && messaging) {
 					const settled = await busLeg;
 					if (settled.message) {
-						winnerClaimTokens.add(externalResult.claim.claimToken);
 						await provider.release(externalResult.claim.claimToken).catch(() => undefined);
+						completedClaimTokens.add(externalResult.claim.claimToken);
+						if (signal?.aborted)
+							throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
 						return messageResult(messaging.senderId, settled.message);
 					}
+				}
+				if (signal?.aborted) {
+					await provider.release(externalResult.claim.claimToken).catch(() => undefined);
+					completedClaimTokens.add(externalResult.claim.claimToken);
+					throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
 				}
 				try {
 					const formatted = await this.#renderExternalClaim(
@@ -986,12 +1048,25 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 						externalResult.claim.claimToken,
 						externalResult.claim.message,
 					);
+					if (signal?.aborted) {
+						await provider.release(externalResult.claim.claimToken).catch(() => undefined);
+						completedClaimTokens.add(externalResult.claim.claimToken);
+						throw signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted");
+					}
 					await this.#ackExternalClaim(provider, externalResult.claim.claimToken);
+					completedClaimTokens.add(externalResult.claim.claimToken);
 					return {
 						content: [{ type: "text", text: formatted }],
 						details: { op: "wait", from: ownerId, externalWaited: externalResult.claim.message },
 					};
 				} catch (error) {
+					if (signal?.aborted) {
+						if (!completedClaimTokens.has(externalResult.claim.claimToken)) {
+							await provider.release(externalResult.claim.claimToken).catch(() => undefined);
+							completedClaimTokens.add(externalResult.claim.claimToken);
+						}
+						throw error;
+					}
 					return this.#externalError("wait", error, { op: "wait", from: ownerId });
 				}
 			}
@@ -1007,123 +1082,3 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
 	}
 }
-
-// =============================================================================
-// TUI Renderer — dispatches to the preserved messaging/job/launch renderings.
-// =============================================================================
-
-const LAUNCH_OPS: Record<string, true> = {
-	start: true,
-	ps: true,
-	logs: true,
-	stop: true,
-	restart: true,
-	describe: true,
-};
-
-/** Launch-style call: an explicit process op, or `send`/`wait` targeting a process `name`. */
-function isLaunchStyleArgs(args: HubRenderArgs | undefined): boolean {
-	if (!args?.op) return false;
-	if (LAUNCH_OPS[args.op]) return true;
-	return (args.op === "send" || args.op === "wait") && !!args.name && !args.to && !args.from;
-}
-
-/** Job-style call: job ops, or a `wait` that does not target a peer or process. */
-function isJobStyleArgs(args: HubRenderArgs | undefined): boolean {
-	switch (args?.op) {
-		case "jobs":
-		case "cancel":
-			return true;
-		case "wait":
-			return !!args.ids?.length || (!args.from && !args.name);
-		default:
-			return false;
-	}
-}
-
-/** Launch details carry process/broker state; coordination details never define these keys. */
-function isLaunchDetails(details: HubDetails): details is LaunchToolDetails {
-	// `state`/`cursor` cover logs results, which may carry neither a daemon
-	// snapshot nor terminal rows; coordination details never define these keys.
-	return (
-		"daemon" in details ||
-		"daemons" in details ||
-		"terminalRows" in details ||
-		"spec" in details ||
-		"state" in details ||
-		"cursor" in details
-	);
-}
-
-/** Hub args → launch renderer args: `ps` is the broker's `list`; everything else is verbatim. */
-function toLaunchArgs(args: HubRenderArgs | undefined): LaunchRenderArgs {
-	if (!args) return {};
-	const { op, ...rest } = args;
-	return { ...rest, op: op === "ps" ? "list" : op };
-}
-
-export const hubToolRenderer = {
-	inline: true,
-	mergeCallAndResult: true,
-	/** Compact one-line activity: op plus its peer, process, or job target. */
-	activitySummary(args: unknown): ToolActivitySummary {
-		const hubArgs = (args ?? {}) as HubRenderArgs;
-		const op = hubArgs.op;
-		if (!op) return { label: "Hub" };
-		let detail = op;
-		if (op === "send" && (hubArgs.to || hubArgs.name)) detail = `send → ${hubArgs.to ?? hubArgs.name}`;
-		else if (op === "wait" && (hubArgs.from || hubArgs.name)) detail = `wait ${hubArgs.from ?? hubArgs.name}`;
-		else if ((op === "wait" || op === "cancel") && hubArgs.ids?.length) {
-			detail = `${op} ${hubArgs.ids.length} job${hubArgs.ids.length === 1 ? "" : "s"}`;
-		} else if (hubArgs.name) detail = `${op} ${hubArgs.name}`;
-		return { label: "Hub", detail };
-	},
-	// Only launch pending frames consume the spinner (broker RPC in flight);
-	// messaging/job pending frames are static, exactly as before the merge.
-	animatedPendingPreview: (args: unknown): boolean => isLaunchStyleArgs(args as HubRenderArgs | undefined),
-
-	renderCall(args: HubRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
-		if (isLaunchStyleArgs(args)) return launchRenderCall(toLaunchArgs(args), options, uiTheme);
-		return isJobStyleArgs(args)
-			? jobsRenderCall(args, options, uiTheme)
-			: messagingRenderCall(args, options, uiTheme);
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: HubDetails; isError?: boolean },
-		options: RenderResultOptions,
-		uiTheme: Theme,
-		args?: HubRenderArgs,
-	): Component {
-		// Results dispatch on what actually happened, falling back to the call
-		// shape when details are absent (framework-generated errors).
-		const details = result.details;
-		if (details && isLaunchDetails(details)) {
-			return launchRenderResult({ ...result, details }, options, uiTheme, toLaunchArgs(args));
-		}
-		const coordination = details;
-		if (
-			coordination &&
-			("externalPeers" in coordination ||
-				"externalReceipts" in coordination ||
-				"externalInbox" in coordination ||
-				"externalWaited" in coordination)
-		) {
-			return externalRenderResult(result, options, uiTheme);
-		}
-		if (coordination && (Array.isArray(coordination.jobs) || Array.isArray(coordination.agents))) {
-			return jobsRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-		}
-		if (
-			coordination &&
-			("receipts" in coordination || "waited" in coordination || "inbox" in coordination || "peers" in coordination)
-		) {
-			return messagingRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-		}
-		// Detail-less or op-only results (validation errors, disabled gates).
-		if (isLaunchStyleArgs(args))
-			return launchRenderResult({ ...result, details: undefined }, options, uiTheme, toLaunchArgs(args));
-		if (isJobStyleArgs(args)) return jobsRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-		return messagingRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-	},
-};

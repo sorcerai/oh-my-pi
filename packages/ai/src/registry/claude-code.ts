@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { LoginHook } from "./hooks/types";
+import type { OAuthController } from "./oauth/types";
 
 const execFileAsync = promisify(execFile);
 
@@ -69,8 +69,7 @@ export async function detectClaudeCodeLogin(home: string = homedir()): Promise<C
 	return { found: false, source: null, account: null };
 }
 
-/** `login "custom" hook="claude-code"` (`rules/auth/claude-code.kdl`). */
-export const loginClaudeCodeHook: LoginHook = async cb => {
+export async function loginClaudeCode(cb: OAuthController): Promise<string> {
 	cb.onProgress?.("Checking Claude Code login state...");
 	const state = await detectClaudeCodeLogin();
 	if (!state.found) {
@@ -78,4 +77,4 @@ export const loginClaudeCodeHook: LoginHook = async cb => {
 	}
 	cb.onProgress?.(`Claude Code login found (${state.source}${state.account ? `, ${state.account}` : ""}).`);
 	return CLAUDE_CODE_LOGIN_PLACEHOLDER;
-};
+}

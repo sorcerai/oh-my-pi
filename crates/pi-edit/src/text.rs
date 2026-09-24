@@ -1,10 +1,6 @@
 //! Text-shape normalization shared by every edit engine: line endings, BOM,
 //! JS-compatible trimming, indentation profiling, and the fuzzy-comparison
 //! normalizers.
-//!
-//! Ports `packages/hashline/src/normalize.ts` and
-//! `packages/coding-agent/src/edit/normalize.ts`.
-
 use xutf::IntoUnicodeNormalized;
 
 /// Line-ending style of a file.

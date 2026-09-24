@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
 import { ensurePrimeBridge, type PrimeBridgeLifecycleSettings } from "../src/integrations/prime-bridge/lifecycle";
 import type { DaemonBrokerClient } from "../src/launch/client";
-import type { DaemonOperation, DaemonRpcResult, DaemonSnapshot, DaemonSpec } from "../src/launch/protocol";
+import type { DaemonOperation, DaemonRpcResult } from "../src/launch/protocol";
 
 const settings: PrimeBridgeLifecycleSettings = {
 	enabled: true,

@@ -338,7 +338,7 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 		waiter.abort = undefined;
 	};
 	const wakeWaiters = (): void => {
-		for (const waiter of [...waiters]) {
+		for (const waiter of waiters.slice()) {
 			const claim = store.claimInboxForTarget(waiter.targetId, waiter.from);
 			if (claim === null) continue;
 			removeWaiter(waiter);
@@ -781,7 +781,7 @@ export async function startPrimeBridgeServer(options: PrimeBridgeServerOptions =
 				clearTimeout(retryTimer);
 				retryTimer = undefined;
 			}
-			for (const waiter of [...waiters]) {
+			for (const waiter of waiters.slice()) {
 				removeWaiter(waiter);
 				waiter.resolve(null);
 			}

@@ -45,7 +45,7 @@ DB_PATH = Path.home() / ".omp" / "stats.db"
 OUT_DIR = Path(__file__).resolve().parent / "out"
 DEFAULT_SINCE = "2026-05-04"
 
-# Tool current values (packages/coding-agent/src/session/streaming-output.ts +
+# Tool current values (packages/tui/src/tools/streaming-output.ts +
 # tools/read.ts) — used for baseline comparison.
 CURRENT_DEFAULT = 3000
 CURRENT_LINE_CAP = 3000
