@@ -31,6 +31,17 @@ fail() {
 	exit 1
 }
 
+# Copy the smoke event stream and stderr somewhere cleanup will not delete,
+# so a rejected smoke proof can be diagnosed after the automatic rollback.
+keep_smoke_evidence() {
+	evidence_dir=${OMP_LOCAL_SMOKE_EVIDENCE_DIR:-"$HOME/.omp/logs"}
+	mkdir -p "$evidence_dir" || return 0
+	stamp=$(date +%Y%m%dT%H%M%S)
+	[ -z "$smoke_json" ] || [ ! -s "$smoke_json" ] || cp "$smoke_json" "$evidence_dir/install-local-smoke-$stamp.jsonl"
+	[ -z "$smoke_log" ] || [ ! -s "$smoke_log" ] || cp "$smoke_log" "$evidence_dir/install-local-smoke-$stamp.log"
+	printf '%s: kept smoke evidence in %s (install-local-smoke-%s.*)\n' "$name" "$evidence_dir" "$stamp" >&2
+}
+
 rollback() {
 	set +e
 	if [ "$worker_backup_ready" -eq 1 ]; then
@@ -309,6 +320,7 @@ smoke_log=$(mktemp "$global_bin/.omp.smoke.XXXXXX") || fail "cannot create smoke
 smoke_json=$(mktemp "$global_bin/.omp.smoke-json.XXXXXX") || fail "cannot create smoke event log"
 if ! PI_CODING_AGENT_DIR="$agent_dir" PI_NO_TITLE=1 NO_COLOR=1 "$target" --mode json --no-session --no-title --model "$smoke_model" --max-time "$smoke_timeout" -- "$prompt" >"$smoke_json" 2>"$smoke_log"; then
 	[ ! -s "$smoke_log" ] || cat "$smoke_log" >&2
+	keep_smoke_evidence
 	fail "$smoke_agent smoke command failed"
 fi
 if ! OMP_LOCAL_SMOKE_JSON="$smoke_json" OMP_LOCAL_SMOKE_MARKER="$marker" OMP_LOCAL_SMOKE_AGENT="$smoke_agent" bun -e '
@@ -421,6 +433,7 @@ if (finalText !== marker) {
 }
 ' 2>>"$smoke_log"; then
 	[ ! -s "$smoke_log" ] || cat "$smoke_log" >&2
+	keep_smoke_evidence
 	fail "$smoke_agent smoke JSON proof failed"
 fi
 
