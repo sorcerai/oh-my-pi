@@ -1124,6 +1124,7 @@ describe("ACP agent", () => {
 			"local/whisper-small",
 			"local/whisper-large-v3-turbo",
 			"local/parakeet-tdt-0.6b-v3",
+			"local/nemotron",
 		]);
 		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);

@@ -1,7 +1,7 @@
 import type { BridgeReceipt, ExternalPeer } from "@oh-my-pi/prime-bridge-protocol";
 import { DEFAULT_PEER_ROSTER_LIMIT } from "@oh-my-pi/pi-tui/tools/irc";
 import type { InternalWriteResult } from "../../internal-urls/types";
-import { collectIrcPeerRoster } from "../../task/executor";
+import { collectIrcPeerRoster } from "../../irc/roster";
 import type { ToolSession } from "../../tools";
 import type { ExternalPeerProvider } from "./external-peer-provider";
 import { primePeerAddress, primeProviderErrorText, sanitizeBridgeText } from "./peer-format";
