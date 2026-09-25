@@ -314,7 +314,7 @@ fi
 printf '%s: version smoke passed: %s\n' "$name" "$version_output"
 
 marker=OMP_LOCAL_INSTALL_FLASH_WORKER_OK
-prompt="Run one nested agent task with the configured agent named $smoke_agent. Give it this instruction: Reply with exactly $marker and no other text. You must call the task tool and wait for its result. If the nested result carries $marker, reply with exactly $marker and no other text. Otherwise, fail without printing the marker."
+prompt="Run one nested agent task with the configured agent named $smoke_agent. Give it this instruction: Reply with exactly $marker and no other text. Do not set an outputSchema on the task. You must call the task tool and wait for its result. If the nested result carries $marker, reply with exactly $marker and no other text. Otherwise, fail without printing the marker."
 printf '%s: running live smoke with parent %s and worker %s\n' "$name" "$smoke_model" "$smoke_agent"
 smoke_log=$(mktemp "$global_bin/.omp.smoke.XXXXXX") || fail "cannot create smoke log"
 smoke_json=$(mktemp "$global_bin/.omp.smoke-json.XXXXXX") || fail "cannot create smoke event log"
