@@ -352,20 +352,22 @@ const asyncResultCarriesMarker = taskEnd => {
 	if (taskEnd.result?.details?.async?.state !== "running" || typeof jobId !== "string") {
 		return false;
 	}
-	// Interrupted waits can be retried; either wait or jobs can deliver the result.
+	// Interrupted waits can be retried; the wait tool (or the pre-18.3 hub
+	// wait/jobs ops) can deliver the result.
 	const snapshotCalls = new Set(events
 		.filter(event =>
 			event?.type === "tool_execution_start" &&
-			event.toolName === "hub" &&
-			(event.args?.op === "jobs" ||
-				(event.args?.op === "wait" &&
-					(event.args.ids === undefined ||
-						(Array.isArray(event.args.ids) && event.args.ids.includes(jobId))))))
+			(event.toolName === "wait" ||
+				(event.toolName === "hub" &&
+					(event.args?.op === "jobs" ||
+						(event.args?.op === "wait" &&
+							(event.args.ids === undefined ||
+								(Array.isArray(event.args.ids) && event.args.ids.includes(jobId))))))))
 		.map(event => event.toolCallId));
 	const jobs = events
 		.filter(event =>
 			event?.type === "tool_execution_end" &&
-			event.toolName === "hub" &&
+			(event.toolName === "wait" || event.toolName === "hub") &&
 			snapshotCalls.has(event.toolCallId) &&
 			event.isError !== true)
 		.flatMap(event => Array.isArray(event.result?.details?.jobs) ? event.result.details.jobs : []);
