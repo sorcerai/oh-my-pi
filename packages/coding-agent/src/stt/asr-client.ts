@@ -11,7 +11,7 @@ import {
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
 } from "../subprocess/worker-client";
-import { tinyWorkerEnv } from "../tiny/title-client";
+import { tinyModelEnvKey, tinyWorkerEnv } from "../tiny/title-client";
 import { safeSend } from "../utils/ipc";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
 import { getSttModelSpec, type SttModelKey } from "./models";
@@ -166,6 +166,8 @@ export class SttClient {
 	#progressListeners = new Set<(event: SttProgressEvent) => void>();
 	#nextRequestId = 0;
 	#refed = false;
+	/** {@link tinyModelEnvKey} the current worker was spawned under. */
+	#workerEnvKey: string | undefined;
 	/** Test seam; `undefined` routes spawns through {@link spawnSttWorkerFor}. */
 	#spawnWorker: (() => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>) | undefined;
 
@@ -320,10 +322,11 @@ export class SttClient {
 	}
 
 	#ensureWorker(modelKey: SttModelKey): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
+		const envKey = tinyModelEnvKey();
 		if (this.#spawnWorker) {
 			if (this.#worker) return this.#worker;
 			const worker = this.#spawnWorker();
-			this.#adoptWorker(worker, null);
+			this.#adoptWorker(worker, null, envKey);
 			return worker;
 		}
 		// Auto-routed spawns: a model tier may demand a different transport than
@@ -331,19 +334,27 @@ export class SttClient {
 		// Nemotron binary). terminate() clears the worker synchronously before
 		// its async kill, so spawning right after the fire-and-forget call is
 		// safe; stale in-flight work fails via the termination path.
-		if (this.#worker && this.#workerTransport === spawnTransportFor(modelKey)) return this.#worker;
-		if (this.#worker) void this.terminate();
+		if (this.#worker) {
+			const sameTransport = this.#workerTransport === spawnTransportFor(modelKey);
+			if (sameTransport && (this.#workerEnvKey === envKey || this.#pending.size > 0 || this.#streams.size > 0)) {
+				return this.#worker;
+			}
+			// Transport switch, or device/dtype changed while idle: respawn under the new env.
+			void this.terminate();
+		}
 		const { worker, transport } = spawnSttWorkerFor(modelKey);
-		this.#adoptWorker(worker, transport);
+		this.#adoptWorker(worker, transport, envKey);
 		return worker;
 	}
 
 	#adoptWorker(
 		worker: RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>,
 		transport: SttWorkerTransport | null,
+		envKey: string,
 	): void {
 		this.#worker = worker;
 		this.#workerTransport = transport;
+		this.#workerEnvKey = envKey;
 		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
 		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
 		this.#refed = false;

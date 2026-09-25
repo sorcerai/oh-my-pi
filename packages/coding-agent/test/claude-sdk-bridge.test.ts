@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ClaudeSdkBridge } from "../src/claude-sdk-bridge";
+import type { ApprovalMode } from "../src/tools/approval";
 
 function bridge(
 	overrides: Partial<ConstructorParameters<typeof ClaudeSdkBridge>[0]> = {},
@@ -8,7 +9,10 @@ function bridge(
 	let persisted: string | undefined;
 	const selections: string[] = [];
 	const b = new ClaudeSdkBridge({
-		getSettings: () => ({ get: (k: string) => settings[k] }),
+		getApprovalSettings: () => ({
+			mode: (settings["tools.approvalMode"] as ApprovalMode | undefined) ?? "yolo",
+			policies: (settings["tools.approval"] as Record<string, unknown> | undefined) ?? {},
+		}),
 		isAutoApprove: () => false,
 		hasUI: () => true,
 		select: async prompt => {
@@ -43,7 +47,7 @@ describe("ClaudeSdkBridge", () => {
 	test("reset before the first read tombstones an id persisted by an earlier process", () => {
 		let persisted: string | undefined = "abc";
 		const b = new ClaudeSdkBridge({
-			getSettings: () => undefined,
+			getApprovalSettings: () => undefined,
 			isAutoApprove: () => false,
 			hasUI: () => false,
 			select: async () => undefined,
@@ -60,7 +64,7 @@ describe("ClaudeSdkBridge", () => {
 		let persisted: string | undefined = "a";
 		const writes: (string | undefined)[] = [];
 		const b = new ClaudeSdkBridge({
-			getSettings: () => undefined,
+			getApprovalSettings: () => undefined,
 			isAutoApprove: () => false,
 			hasUI: () => false,
 			select: async () => undefined,

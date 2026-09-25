@@ -103,7 +103,7 @@ export async function sendPrimeMessage(
 		receipt = await provider.send(target, content, replyTo);
 	} catch (error) {
 		return {
-			text: primeProviderErrorText("send", error),
+			content: [{ type: "text", text: primeProviderErrorText("send", error) }],
 			details: { message: { op: "send", from: senderId, to, externalReceipts: [] } },
 			isError: true,
 		};
@@ -112,7 +112,7 @@ export async function sendPrimeMessage(
 	const lines = [`Prime ${status === "failed" ? "send failed" : `send ${status}`}: ${sanitizeBridgeText(to)}`];
 	if (receipt.error) lines.push(sanitizeBridgeText(receipt.error));
 	return {
-		text: lines.join("\n"),
+		content: [{ type: "text", text: lines.join("\n") }],
 		details: { message: { op: "send", from: senderId, to, externalReceipts: [receipt] } },
 		isError: receipt.status === "failed",
 	};

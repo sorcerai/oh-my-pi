@@ -22,6 +22,8 @@ import type { ExternalPeerProvider, ExternalPeerWaitClaim } from "../integration
 import { formatPrimeMessage, primeProviderErrorText } from "../integrations/prime-bridge/peer-format";
 import { ackPrimeClaim } from "../integrations/prime-bridge/peers";
 
+import { cfgLaunchEnabled } from "./settings";
+
 const waitSchema = type({});
 const WAIT_MAX_MS = 30 * 60_000;
 const PROGRESS_INTERVAL_MS = 500;
@@ -95,14 +97,14 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const senderId = this.session.getAgentId?.() ?? undefined;
 		const messaging = registry && senderId ? { registry, senderId } : undefined;
 		const manager = this.session.asyncJobManager;
-		const ownerFilter = senderId ? { ownerId: senderId } : undefined;
+		const ownerFilter = { ownerId: senderId };
 		// The Prime leg participates in every block whenever a provider is
 		// configured; the gate below and the race read this same value.
 		const prime = this.session.externalPeerProvider;
 
 		const pending = takeQueuedMessage(messaging);
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
-		if (this.session.settings.get("launch.enabled")) await listServices(this.session, signal);
+		if (cfgLaunchEnabled.get(this.session.settings)) await listServices(this.session, signal);
 		const deadline = Date.now() + WAIT_MAX_MS;
 		for (;;) {
 			const queued = takeQueuedMessage(messaging);
