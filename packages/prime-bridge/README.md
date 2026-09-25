@@ -57,7 +57,7 @@ omp config set primeBridge.autoStart true
 
 `autoStart` uses the machine-global launch broker. It starts the `omp-prime-bridge` application with the configured port and token path. It does not start a bridge with an operating-system service manager.
 
-`hub list` shows Prime sessions with `prime://` addresses. Use the exact listed address with `hub send` or `hub wait`; reserved addresses never route to local peers.
+A bare `read agent://` lists Prime sessions as `prime~<encoded id>` next to local peers. Send with `write agent://prime~<encoded id>` (optional `?replyTo=<message id>`); the `wait` tool claims the next Prime message and acknowledges it once shown. The `prime~` prefix never routes to local peers.
 
 ## Token and trust
 

@@ -426,18 +426,11 @@ describe("pickElectronTarget", () => {
 			const targetPage = (await launched.browser.pages())[0];
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
-			const navigationUrl = "http://127.0.0.1:9/aborted-by-interception";
+			// Count navigations only: after the abort Chrome renders its error page,
+			// whose inline data: icons also surface as intercepted requests.
 			let requestCount = 0;
 			const onRequest = (request: HTTPRequest) => {
-				if (
-					!request.isNavigationRequest() ||
-					request.frame() !== targetPage.mainFrame() ||
-					request.url() !== navigationUrl
-				) {
-					void request.continue();
-					return;
-				}
-				requestCount++;
+				if (request.isNavigationRequest()) requestCount++;
 				void request.abort("failed");
 			};
 			await targetPage.setRequestInterception(true);
@@ -456,7 +449,7 @@ describe("pickElectronTarget", () => {
 						// Loopback keeps a hypothetical interception miss local and
 						// loud (instant connection refusal, count 0) instead of
 						// wandering into DNS or a proxy.
-						url: navigationUrl,
+						url: "http://127.0.0.1:9/aborted-by-interception",
 						waitUntil: "domcontentloaded",
 						timeoutMs: 15_000,
 					}),

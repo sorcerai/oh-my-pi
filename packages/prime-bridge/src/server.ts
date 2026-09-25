@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { BridgeMessage, BridgeReceipt, ExternalPeer } from "@oh-my-pi/prime-bridge-protocol";
+import {
+	type BridgeMessage,
+	type BridgeReceipt,
+	type ExternalPeer,
+	MAX_WAIT_TIMEOUT_MS,
+} from "@oh-my-pi/prime-bridge-protocol";
 import {
 	type PrimeBridgeConfig,
 	type PrimeBridgeConfigOverrides,
@@ -68,7 +73,6 @@ const primeReceiptStatuses: Record<"delivered" | "queued", true> = {
 const MAX_POST_BODY_BYTES = 1_048_576;
 const MAX_MESSAGE_FIELD_BYTES = 262_144;
 export const MAX_INBOX_RESPONSE_BYTES = 8 * 1024 * 1024;
-export const MAX_WAIT_TIMEOUT_MS = 60_000;
 export const MAX_ACTIVE_WAITERS = 100;
 const DRAIN_BATCH_LIMIT = 100;
 const DRAIN_CLAIM_LEASE_MS = 30_000;

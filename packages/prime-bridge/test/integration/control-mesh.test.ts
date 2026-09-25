@@ -261,15 +261,18 @@ describe("Prime bridge control mesh", () => {
 			expect(await postMessage(bridge.url, bridge.token, capturedOmpMessage)).toEqual(ompReceipt);
 			expect(sendCommands()).toHaveLength(1);
 
-			expect(await provider.inbox(true)).toEqual([]);
+			// OMP's own send never loops back as inbound mail.
+			expect(await provider.wait(undefined, 1)).toBeNull();
 			const inbound = message();
 			expect(await postMessage(bridge.url, bridge.token, inbound)).toEqual({
 				meshMessageId: inbound.meshMessageId,
 				status: "injected",
 			});
-			expect(await provider.inbox(true)).toEqual([inbound]);
-			expect(await provider.inbox(false)).toEqual([inbound]);
-			expect(await provider.inbox(false)).toEqual([]);
+			const inboundClaim = await provider.wait(undefined, 1);
+			expect(inboundClaim?.message).toEqual(inbound);
+			if (inboundClaim === null) throw new Error("expected the pending inbound message to be claimed");
+			expect(await provider.ack(inboundClaim.claimToken)).toBe(true);
+			expect(await provider.wait(undefined, 1)).toBeNull();
 
 			const waitedFor = message({
 				meshMessageId: "prime-inbound-2",

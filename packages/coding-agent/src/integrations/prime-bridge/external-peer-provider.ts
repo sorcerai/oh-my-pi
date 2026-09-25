@@ -12,7 +12,6 @@ export interface ExternalPeerWaitClaim {
 export interface ExternalPeerProvider {
 	list(): Promise<ExternalPeer[]>;
 	send(target: string, message: string, replyTo?: string): Promise<BridgeReceipt>;
-	inbox(peek: boolean): Promise<BridgeMessage[]>;
 	wait(from: string | undefined, timeoutMs: number, signal?: AbortSignal): Promise<ExternalPeerWaitClaim | null>;
 	ack(claimToken: string): Promise<boolean>;
 	release(claimToken: string): Promise<boolean>;
@@ -189,16 +188,6 @@ export class PrimeExternalPeerProvider implements ExternalPeerProvider {
 		const value = await this.#client.post<unknown>("/v1/messages", payload);
 		validateReceipt(value);
 		return value;
-	}
-
-	async inbox(peek: boolean): Promise<BridgeMessage[]> {
-		await this.#prepare();
-		const value = await this.#client.get<unknown>(
-			`/v1/inbox?targetId=${encodeURIComponent(this.#originSessionId)}&peek=${peek ? "true" : "false"}`,
-		);
-		if (!Array.isArray(value)) throw new Error("Prime bridge inbox response has invalid shape");
-		for (const message of value) validateMessage(message);
-		return value as BridgeMessage[];
 	}
 
 	async wait(

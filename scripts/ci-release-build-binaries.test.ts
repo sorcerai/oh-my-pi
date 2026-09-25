@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { $ } from "bun";
 import { releaseSttWorkerAssetName, resolveCrossBuild } from "../packages/coding-agent/scripts/build-binary";
+import { compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
 
 const repoRoot = path.join(import.meta.dir, "..");
 
@@ -91,5 +94,28 @@ describe("darwin-arm64 release STT worker staging", () => {
 		const x64 = await runReleaseDryRun("darwin-x64");
 		expect(x64.exitCode, x64.stderr).toBe(0);
 		expect(x64.stdout).not.toContain("build:stt-worker");
+	});
+});
+
+it("runs compiled bytecode containing dependency import.meta.resolve calls", async () => {
+	using temp = TempDir.createSync("@omp-bytecode-");
+	const entrypoint = temp.join("entry.ts");
+	const outfile = temp.join(process.platform === "win32" ? "probe.exe" : "probe");
+	await Bun.write(entrypoint, 'console.log(import.meta.resolve("node:fs"));\n');
+	await compileCodingAgent({
+		repoRoot: temp.path(),
+		entrypoint,
+		outfile,
+		transformersVersion: "unused",
+	});
+	const result = await $`${outfile}`.quiet().nothrow();
+	expect(result.exitCode).toBe(0);
+	expect(result.text().trim()).toBe("node:fs");
+}, 30_000);
+describe("macOS release binary entitlements", () => {
+	it("allows Xcode MCP automation through Apple Events", async () => {
+		const entitlements = await Bun.file(path.join(repoRoot, "scripts/macos-entitlements.plist")).text();
+
+		expect(entitlements).toContain("<key>com.apple.security.automation.apple-events</key>\n\t<true/>");
 	});
 });

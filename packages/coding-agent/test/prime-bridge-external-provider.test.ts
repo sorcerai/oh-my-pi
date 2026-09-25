@@ -114,17 +114,14 @@ describe("PrimeExternalPeerProvider", () => {
 		expect(body.meshMessageId).not.toBe(body.idempotencyKey);
 	});
 
-	it("uses the inbox peek query and wait body", async () => {
+	it("sends the documented wait body", async () => {
 		const requests: RecordedRequest[] = [];
 		const readCount = { value: 0 };
-		const incoming = message({ extra: "preserve" });
-		const peer = provider(dependencies([Response.json([incoming]), Response.json(null)], requests, readCount));
+		const peer = provider(dependencies([Response.json(null)], requests, readCount));
 
-		expect(await peer.inbox(true)).toEqual([incoming]);
 		expect(await peer.wait(undefined, 25)).toBeNull();
-		expect(requests[1]?.url).toBe("http://127.0.0.1:4123/v1/inbox?targetId=omp-session&peek=true");
-		expect(requests[3]?.url).toBe("http://127.0.0.1:4123/v1/wait");
-		expect(JSON.parse(String(requests[3]?.init?.body))).toEqual({ targetId: "omp-session", timeoutMs: 25 });
+		expect(requests[1]?.url).toBe("http://127.0.0.1:4123/v1/wait");
+		expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({ targetId: "omp-session", timeoutMs: 25 });
 	});
 
 	it("preserves an incoming claim returned by wait", async () => {
@@ -206,7 +203,6 @@ describe("PrimeExternalPeerProvider", () => {
 			[
 				Response.json([{ id: "prime-1", displayName: "Prime", status: "ready" }]),
 				Response.json({ meshMessageId: "server-id", status: "queued" }),
-				Response.json([]),
 				Response.json(null),
 			],
 			requests,
@@ -224,23 +220,9 @@ describe("PrimeExternalPeerProvider", () => {
 
 		await peer.list();
 		await peer.send("prime-42", "hello");
-		await peer.inbox(false);
 		await peer.wait(undefined, 25);
 
-		expect(events).toEqual([
-			"ensure",
-			"http",
-			"http",
-			"ensure",
-			"http",
-			"http",
-			"ensure",
-			"http",
-			"http",
-			"ensure",
-			"http",
-			"http",
-		]);
+		expect(events).toEqual(["ensure", "http", "http", "ensure", "http", "http", "ensure", "http", "http"]);
 	});
 
 	it("keeps autoStart false request-only when no readiness callback is injected", async () => {

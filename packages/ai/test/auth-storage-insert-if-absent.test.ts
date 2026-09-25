@@ -98,7 +98,7 @@ const runContentionWorker = async (): Promise<void> => {
 	try {
 		await Bun.write(`${barrierPath}.ready.${workerId}`, "");
 		await waitForFile(`${barrierPath}.start`);
-		const result = storage.insertCredentialsIfProviderAbsent(PROVIDER, [{ type: "api_key", key }]);
+		const result = storage.credentials.insertIfProviderAbsent(PROVIDER, [{ type: "api_key", key }]);
 		process.stdout.write(JSON.stringify(result));
 	} finally {
 		storage.close();
@@ -115,14 +115,14 @@ if (WORKER_MODE) {
 		const attackerPath = path.join(tempDir, "attacker.db");
 		try {
 			const initialized = await openStorage(dbPath);
-			await initialized.storage.set("validated-provider", {
+			await initialized.storage.credentials.set("validated-provider", {
 				type: "api_key",
 				key: "validated-before-swap",
 			});
 			initialized.storage.close();
 
 			const attacker = await openStorage(attackerPath);
-			await attacker.storage.set("attacker-provider", {
+			await attacker.storage.credentials.set("attacker-provider", {
 				type: "api_key",
 				key: "attacker-before-swap",
 			});
@@ -154,7 +154,7 @@ if (WORKER_MODE) {
 		const dbPath = path.join(tempDir, "agent.db");
 		const live = await openStorage(dbPath);
 		try {
-			await live.storage.set("live-provider", { type: "api_key", key: "live-secret" });
+			await live.storage.credentials.set("live-provider", { type: "api_key", key: "live-secret" });
 			const expected = await fs.lstat(dbPath);
 			const importer = await SqliteAuthCredentialStore.openExisting(dbPath, expected);
 			try {
@@ -237,39 +237,39 @@ if (WORKER_MODE) {
 		const first = await openStorage(dbPath);
 		const second = await openStorage(dbPath);
 		try {
-			const firstGeneration = first.storage.getGeneration();
-			const firstResult = first.storage.insertCredentialsIfProviderAbsent(PROVIDER, [
+			const firstGeneration = first.storage.credentials.generation;
+			const firstResult = first.storage.credentials.insertIfProviderAbsent(PROVIDER, [
 				{ type: "api_key", key: WINNER_SECRET },
 			]);
-			const secondGeneration = second.storage.getGeneration();
-			const secondResult = second.storage.insertCredentialsIfProviderAbsent(PROVIDER, [
+			const secondGeneration = second.storage.credentials.generation;
+			const secondResult = second.storage.credentials.insertIfProviderAbsent(PROVIDER, [
 				{ type: "api_key", key: LOSER_SECRET },
 			]);
 			expect(firstResult.inserted).toBe(true);
 			expect(secondResult.inserted).toBe(false);
-			expect(first.storage.getGeneration()).toBeGreaterThan(firstGeneration);
-			expect(second.storage.getGeneration()).toBeGreaterThan(secondGeneration);
-			expect(second.storage.listStoredCredentials(PROVIDER)).toEqual(first.storage.listStoredCredentials(PROVIDER));
+			expect(first.storage.credentials.generation).toBeGreaterThan(firstGeneration);
+			expect(second.storage.credentials.generation).toBeGreaterThan(secondGeneration);
+			expect(second.storage.credentials.list(PROVIDER)).toEqual(first.storage.credentials.list(PROVIDER));
 
 			const seededProvider = "seeded-create-only-provider";
-			await first.storage.set(seededProvider, { type: "api_key", key: SEEDED_SECRET });
-			const seededGeneration = first.storage.getGeneration();
+			await first.storage.credentials.set(seededProvider, { type: "api_key", key: SEEDED_SECRET });
+			const seededGeneration = first.storage.credentials.generation;
 			const seededBefore = readRawCredential(dbPath, seededProvider);
-			const seededResult = first.storage.insertCredentialsIfProviderAbsent(seededProvider, [
+			const seededResult = first.storage.credentials.insertIfProviderAbsent(seededProvider, [
 				{ type: "api_key", key: "must-not-replace-seeded-key" },
 			]);
 			expect(seededResult.inserted).toBe(false);
-			expect(first.storage.getGeneration()).toBe(seededGeneration);
+			expect(first.storage.credentials.generation).toBe(seededGeneration);
 			expect(readRawCredential(dbPath, seededProvider)).toEqual(seededBefore);
 			expect(JSON.stringify(seededResult)).not.toContain(SEEDED_SECRET);
 			expect(JSON.stringify(seededResult)).not.toContain("must-not-replace-seeded-key");
 
 			const disabledProvider = "disabled-only-create-only-provider";
-			await first.storage.set(disabledProvider, { type: "api_key", key: "disabled-api-key" });
+			await first.storage.credentials.set(disabledProvider, { type: "api_key", key: "disabled-api-key" });
 			const disabledRow = first.store.listAuthCredentials(disabledProvider)[0]!;
 			first.store.deleteAuthCredential(disabledRow.id, "test tombstone");
 			const tombstonesBefore = await first.store.listDisabledCredentials(disabledProvider);
-			const disabledResult = first.storage.insertCredentialsIfProviderAbsent(disabledProvider, [
+			const disabledResult = first.storage.credentials.insertIfProviderAbsent(disabledProvider, [
 				{ type: "api_key", key: "new-active-api-key" },
 			]);
 			expect(disabledResult.inserted).toBe(true);
@@ -277,25 +277,25 @@ if (WORKER_MODE) {
 			expect(await first.store.listDisabledCredentials(disabledProvider)).toEqual(tombstonesBefore);
 
 			const emptyProvider = "empty-create-only-provider";
-			const emptyGeneration = first.storage.getGeneration();
-			expect(first.storage.insertCredentialsIfProviderAbsent(emptyProvider, [])).toEqual({
+			const emptyGeneration = first.storage.credentials.generation;
+			expect(first.storage.credentials.insertIfProviderAbsent(emptyProvider, [])).toEqual({
 				inserted: false,
 				provider: emptyProvider,
 				rows: [],
 			});
-			expect(first.storage.getGeneration()).toBe(emptyGeneration);
+			expect(first.storage.credentials.generation).toBe(emptyGeneration);
 			expect(first.store.listAuthCredentials(emptyProvider)).toHaveLength(0);
 
 			const unrelatedBefore = first.store.listAuthCredentials();
 			expect(() =>
-				first.storage.insertCredentialsIfProviderAbsent(" \t", [
+				first.storage.credentials.insertIfProviderAbsent(" \t", [
 					{ type: "api_key", key: "must-not-insert-for-empty-provider" },
 				]),
 			).toThrow();
 			expect(first.store.listAuthCredentials()).toEqual(unrelatedBefore);
 
 			const oauthProvider = "oauth-dedupe-create-only-provider";
-			const oauthRows = first.storage.insertCredentialsIfProviderAbsent(oauthProvider, [
+			const oauthRows = first.storage.credentials.insertIfProviderAbsent(oauthProvider, [
 				{
 					type: "oauth",
 					access: "old-access",
@@ -322,7 +322,7 @@ if (WORKER_MODE) {
 				expires: Number.POSITIVE_INFINITY,
 			} as unknown as AuthCredential;
 			expect(() =>
-				first.storage.insertCredentialsIfProviderAbsent(malformedProvider, [
+				first.storage.credentials.insertIfProviderAbsent(malformedProvider, [
 					{ type: "api_key", key: "valid-batch-key" },
 					malformed,
 				]),
@@ -336,7 +336,7 @@ if (WORKER_MODE) {
 					value: undefined,
 				});
 				expect(() =>
-					unsupported.storage.insertCredentialsIfProviderAbsent("unsupported-provider", [
+					unsupported.storage.credentials.insertIfProviderAbsent("unsupported-provider", [
 						{ type: "api_key", key: "unsupported-key" },
 					]),
 				).toThrow(ConfigurationError);
@@ -344,13 +344,13 @@ if (WORKER_MODE) {
 				unsupported.storage.close();
 			}
 
-			const expectedRows = first.storage.listStoredCredentials(PROVIDER);
+			const expectedRows = first.storage.credentials.list(PROVIDER);
 			first.storage.close();
 			second.storage.close();
 			const reopened = await openStorage(dbPath);
 			try {
-				await reopened.storage.reload();
-				expect(reopened.storage.listStoredCredentials(PROVIDER)).toEqual(expectedRows);
+				await reopened.storage.credentials.reload();
+				expect(reopened.storage.credentials.list(PROVIDER)).toEqual(expectedRows);
 			} finally {
 				reopened.storage.close();
 			}
@@ -381,14 +381,14 @@ if (WORKER_MODE) {
 		const dbPath = path.join(tempDir, "agent.db");
 		const live = await openStorage(dbPath);
 		try {
-			await live.storage.set("batch-existing-provider", {
+			await live.storage.credentials.set("batch-existing-provider", {
 				type: "api_key",
 				key: "batch-existing-secret",
 			});
 			const expected = await fs.lstat(dbPath);
 			const importer = await AuthStorage.createExisting(dbPath, {}, expected);
 			try {
-				const result = importer.insertCredentialsIfProvidersAbsent([
+				const result = importer.credentials.insertIfProvidersAbsent([
 					{
 						provider: "batch-existing-provider",
 						credentials: [{ type: "api_key", key: "must-not-replace-existing-secret" }],
@@ -419,7 +419,7 @@ if (WORKER_MODE) {
 					expires: Number.POSITIVE_INFINITY,
 				} as unknown as AuthCredential;
 				expect(() =>
-					importer.insertCredentialsIfProvidersAbsent([
+					importer.credentials.insertIfProvidersAbsent([
 						{
 							provider: "batch-would-be-inserted",
 							credentials: [{ type: "api_key", key: "must-not-survive-malformed-batch" }],
@@ -441,16 +441,16 @@ if (WORKER_MODE) {
 		const dbPath = path.join(tempDir, "agent.db");
 		const live = await openStorage(dbPath);
 		try {
-			await live.storage.set("batch-cache-existing-a", { type: "api_key", key: "batch-cache-secret-a" });
-			await live.storage.set("batch-cache-existing-b", { type: "api_key", key: "batch-cache-secret-b" });
+			await live.storage.credentials.set("batch-cache-existing-a", { type: "api_key", key: "batch-cache-secret-a" });
+			await live.storage.credentials.set("batch-cache-existing-b", { type: "api_key", key: "batch-cache-secret-b" });
 			const expected = await fs.lstat(dbPath);
 			const importer = await AuthStorage.createExisting(dbPath, {}, expected);
 			try {
-				const initialGeneration = importer.getGeneration();
+				const initialGeneration = importer.credentials.generation;
 				const generations: number[] = [];
-				const unsubscribe = importer.onGenerationChanged(generation => generations.push(generation));
+				const unsubscribe = importer.credentials.onGeneration(generation => generations.push(generation));
 				try {
-					const result = importer.insertCredentialsIfProvidersAbsent([
+					const result = importer.credentials.insertIfProvidersAbsent([
 						{ provider: "batch-cache-existing-a", credentials: [{ type: "api_key", key: "ignored-a" }] },
 						{ provider: "batch-cache-existing-b", credentials: [{ type: "api_key", key: "ignored-b" }] },
 					]);
@@ -458,13 +458,13 @@ if (WORKER_MODE) {
 						inserted: [],
 						skipped: ["batch-cache-existing-a", "batch-cache-existing-b"],
 					});
-					expect(importer.listStoredCredentials("batch-cache-existing-a")).toEqual([
+					expect(importer.credentials.list("batch-cache-existing-a")).toEqual([
 						expect.objectContaining({ credential: { type: "api_key", key: "batch-cache-secret-a" } }),
 					]);
-					expect(importer.listStoredCredentials("batch-cache-existing-b")).toEqual([
+					expect(importer.credentials.list("batch-cache-existing-b")).toEqual([
 						expect.objectContaining({ credential: { type: "api_key", key: "batch-cache-secret-b" } }),
 					]);
-					expect(importer.getGeneration()).toBe(initialGeneration + 1);
+					expect(importer.credentials.generation).toBe(initialGeneration + 1);
 					expect(generations).toEqual([initialGeneration + 1]);
 					expect(JSON.stringify(result)).not.toContain("batch-cache-secret-a");
 					expect(JSON.stringify(result)).not.toContain("batch-cache-secret-b");
@@ -485,15 +485,15 @@ if (WORKER_MODE) {
 		const dbPath = path.join(tempDir, "agent.db");
 		const { storage } = await openStorage(dbPath);
 		try {
-			const initialGeneration = storage.getGeneration();
+			const initialGeneration = storage.credentials.generation;
 			expect(() =>
-				storage.insertCredentialsIfProvidersAbsent([
+				storage.credentials.insertIfProvidersAbsent([
 					{ provider: "batch-duplicate-provider", credentials: [{ type: "api_key", key: "first-secret" }] },
 					{ provider: "batch-duplicate-provider", credentials: [{ type: "api_key", key: "second-secret" }] },
 				]),
 			).toThrow(ConfigurationError);
-			expect(storage.getGeneration()).toBe(initialGeneration);
-			expect(storage.listStoredCredentials("batch-duplicate-provider")).toEqual([]);
+			expect(storage.credentials.generation).toBe(initialGeneration);
+			expect(storage.credentials.list("batch-duplicate-provider")).toEqual([]);
 			expect(readRawCredential(dbPath, "batch-duplicate-provider")).toEqual([]);
 		} finally {
 			storage.close();
@@ -506,7 +506,10 @@ if (WORKER_MODE) {
 		const dbPath = path.join(tempDir, "agent.db");
 		const live = await openStorage(dbPath);
 		try {
-			await live.storage.set("boundary-seeded-provider", { type: "api_key", key: "boundary-seeded-secret" });
+			await live.storage.credentials.set("boundary-seeded-provider", {
+				type: "api_key",
+				key: "boundary-seeded-secret",
+			});
 			const expected = await fs.lstat(dbPath);
 			const importer = await AuthStorage.createExisting(dbPath, {}, expected);
 			const companionPath = `${dbPath}-journal`;
@@ -514,11 +517,11 @@ if (WORKER_MODE) {
 				await fs.writeFile(companionPath, "unsafe companion");
 				await fs.chmod(companionPath, 0o644);
 				expect(() =>
-					importer.insertCredentialsIfProviderAbsent("boundary-new-provider", [
+					importer.credentials.insertIfProviderAbsent("boundary-new-provider", [
 						{ type: "api_key", key: "boundary-new-secret" },
 					]),
 				).toThrow(ConfigurationError);
-				expect(importer.listStoredCredentials("boundary-new-provider")).toEqual([]);
+				expect(importer.credentials.list("boundary-new-provider")).toEqual([]);
 				expect(live.store.listAuthCredentials("boundary-new-provider")).toEqual([]);
 			} finally {
 				importer.close();

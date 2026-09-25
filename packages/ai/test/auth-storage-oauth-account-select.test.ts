@@ -43,13 +43,13 @@ describe("AuthStorage OAuth account selection", () => {
 		}
 	});
 
-	test("listOAuthAccounts reports stored order, positions, and identity without refreshing", async () => {
+	test("oauth.accounts reports stored order, positions, and identity without refreshing", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");
 		const refreshSpy = vi.spyOn(oauthUtils, "getOAuthApiKey");
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
 
-		const accounts = storage.listOAuthAccounts(PROVIDER);
+		const accounts = storage.oauth.accounts(PROVIDER);
 
 		expect(accounts.map(a => a.position)).toEqual([0, 1, 2]);
 		expect(accounts.map(a => a.accountId)).toEqual(["acc-a", "acc-b", "acc-c"]);
@@ -58,7 +58,7 @@ describe("AuthStorage OAuth account selection", () => {
 		expect(refreshSpy).not.toHaveBeenCalled();
 	});
 
-	test("pinSessionOAuthAccount selects and restores the exact stored account", async () => {
+	test("sessions.pin selects and restores the exact stored account", async () => {
 		const storage = authStorage;
 		const credentialStore = store;
 		if (!storage || !credentialStore) throw new Error("test setup failed");
@@ -66,18 +66,18 @@ describe("AuthStorage OAuth account selection", () => {
 			const credential = credentials[provider];
 			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
-		const accounts = storage.listOAuthAccounts(PROVIDER, "session-pin");
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		const accounts = storage.oauth.accounts(PROVIDER, "session-pin");
 		const target = accounts[1];
 		if (!target) throw new Error("expected second OAuth account");
 
 		expect(accounts.some(account => account.active)).toBe(false);
-		expect(storage.pinSessionOAuthAccount(PROVIDER, "session-pin", -1)).toBe(false);
-		expect(storage.pinSessionOAuthAccount(PROVIDER, "session-pin", target.credentialId)).toBe(true);
-		expect(storage.getOAuthAccountIdentity(PROVIDER, "session-pin")?.email).toBe("b@example.com");
+		expect(storage.sessions.pin(PROVIDER, "session-pin", -1)).toBe(false);
+		expect(storage.sessions.pin(PROVIDER, "session-pin", target.credentialId)).toBe(true);
+		expect(storage.oauth.identity(PROVIDER, "session-pin")?.email).toBe("b@example.com");
 		expect(
-			storage
-				.listOAuthAccounts(PROVIDER, "session-pin")
+			storage.oauth
+				.accounts(PROVIDER, "session-pin")
 				.filter(account => account.active)
 				.map(account => account.email),
 		).toEqual(["b@example.com"]);
@@ -88,9 +88,9 @@ describe("AuthStorage OAuth account selection", () => {
 		).toBe("b@example.com");
 
 		const restored = new AuthStorage(credentialStore);
-		await restored.reload();
-		expect(restored.getOAuthAccountIdentity(PROVIDER, "session-pin")?.email).toBe("b@example.com");
-		expect(restored.listOAuthAccounts(PROVIDER, "session-pin").find(account => account.active)?.credentialId).toBe(
+		await restored.credentials.reload();
+		expect(restored.oauth.identity(PROVIDER, "session-pin")?.email).toBe("b@example.com");
+		expect(restored.oauth.accounts(PROVIDER, "session-pin").find(account => account.active)?.credentialId).toBe(
 			target.credentialId,
 		);
 	});
@@ -102,13 +102,13 @@ describe("AuthStorage OAuth account selection", () => {
 			const credential = credentials[provider];
 			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
-		const accountB = storage.listOAuthAccounts(PROVIDER)[1];
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const accountB = storage.oauth.accounts(PROVIDER)[1];
 		if (!accountB) throw new Error("expected second OAuth account");
-		expect(storage.pinSessionOAuthAccount(PROVIDER, "parent-session", accountB.credentialId)).toBe(true);
+		expect(storage.sessions.pin(PROVIDER, "parent-session", accountB.credentialId)).toBe(true);
 
-		expect(storage.inheritSessionCredentials("parent-session", "child-session")).toBe(1);
-		expect(storage.listOAuthAccounts(PROVIDER, "child-session").find(account => account.active)?.email).toBe(
+		expect(storage.sessions.inherit("parent-session", "child-session")).toBe(1);
+		expect(storage.oauth.accounts(PROVIDER, "child-session").find(account => account.active)?.email).toBe(
 			"b@example.com",
 		);
 		expect(
@@ -117,7 +117,7 @@ describe("AuthStorage OAuth account selection", () => {
 			}),
 		).toBe("b@example.com");
 
-		const outcome = await storage.markUsageLimitReached(PROVIDER, "child-session", { retryAfterMs: 60_000 });
+		const outcome = await storage.limits.markReached(PROVIDER, "child-session", { retryAfterMs: 60_000 });
 		expect(outcome.switched).toBe(true);
 		expect(
 			await withOAuthAccess(storage, PROVIDER, access => Promise.resolve(access.email), {
@@ -126,7 +126,7 @@ describe("AuthStorage OAuth account selection", () => {
 		).toBe("a@example.com");
 	});
 
-	test("getOAuthAccessAt resolves the credential at the requested position and touches only that one", async () => {
+	test("resolves the account at the requested position by ID and touches only that one", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");
 		const seen: string[] = [];
@@ -136,7 +136,7 @@ describe("AuthStorage OAuth account selection", () => {
 			seen.push(credential.access);
 			return { newCredentials: credential, apiKey: credential.access };
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
 
 		for (const [position, suffix] of [
 			[0, "a"],
@@ -144,7 +144,9 @@ describe("AuthStorage OAuth account selection", () => {
 			[2, "c"],
 		] as const) {
 			seen.length = 0;
-			const result = await storage.getOAuthAccessAt(PROVIDER, position);
+			const account = storage.oauth.accounts(PROVIDER)[position];
+			if (!account) throw new Error("expected OAuth account at position");
+			const result = await storage.oauth.accessById(PROVIDER, account.credentialId);
 			expect(result?.ok).toBe(true);
 			if (!result?.ok) throw new Error("expected ok resolution");
 			expect(result.accountId).toBe(`acc-${suffix}`);
@@ -154,7 +156,7 @@ describe("AuthStorage OAuth account selection", () => {
 		}
 	});
 
-	test("getOAuthAccessByCredentialId force-refreshes only the still-valid durable requested row", async () => {
+	test("oauth.accessById force-refreshes only the still-valid durable requested row", async () => {
 		const storage = authStorage;
 		const credentialStore = store;
 		if (!storage || !credentialStore) throw new Error("test setup failed");
@@ -179,12 +181,12 @@ describe("AuthStorage OAuth account selection", () => {
 				return credentials.access;
 			},
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
 		const before = credentialStore.listAuthCredentials(PROVIDER);
-		const target = storage.listOAuthAccounts(PROVIDER)[1];
+		const target = storage.oauth.accounts(PROVIDER)[1];
 		if (!target) throw new Error("expected second OAuth account");
 
-		const result = await storage.getOAuthAccessByCredentialId(PROVIDER, target.credentialId, { forceRefresh: true });
+		const result = await storage.oauth.accessById(PROVIDER, target.credentialId, { forceRefresh: true });
 
 		expect(result?.ok).toBe(true);
 		if (!result?.ok) throw new Error("expected ok resolution");
@@ -204,7 +206,7 @@ describe("AuthStorage OAuth account selection", () => {
 		});
 	});
 
-	test("getOAuthAccessByCredentialId ignores provider-wide API-key overrides", async () => {
+	test("oauth.accessById ignores provider-wide API-key overrides", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");
 		oauthUtils.registerOAuthProvider({
@@ -221,26 +223,26 @@ describe("AuthStorage OAuth account selection", () => {
 				return credentials.access;
 			},
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
-		const target = storage.listOAuthAccounts(PROVIDER)[1];
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const target = storage.oauth.accounts(PROVIDER)[1];
 		if (!target) throw new Error("expected second OAuth account");
 
-		storage.setConfigApiKey(PROVIDER, "config-api-key");
-		expect(await storage.getApiKey(PROVIDER)).toBe("config-api-key");
-		const withConfigOverride = await storage.getOAuthAccessByCredentialId(PROVIDER, target.credentialId);
+		storage.keys.setConfig(PROVIDER, "config-api-key");
+		expect(await storage.keys.get(PROVIDER)).toBe("config-api-key");
+		const withConfigOverride = await storage.oauth.accessById(PROVIDER, target.credentialId);
 		expect(withConfigOverride?.ok).toBe(true);
 		if (!withConfigOverride?.ok) throw new Error("expected config-override resolution");
 		expect(withConfigOverride.accessToken).toBe("access-b");
 
-		storage.setRuntimeApiKey(PROVIDER, "runtime-api-key");
-		expect(await storage.getApiKey(PROVIDER)).toBe("runtime-api-key");
-		const withRuntimeOverride = await storage.getOAuthAccessByCredentialId(PROVIDER, target.credentialId);
+		storage.keys.setRuntime(PROVIDER, "runtime-api-key");
+		expect(await storage.keys.get(PROVIDER)).toBe("runtime-api-key");
+		const withRuntimeOverride = await storage.oauth.accessById(PROVIDER, target.credentialId);
 		expect(withRuntimeOverride?.ok).toBe(true);
 		if (!withRuntimeOverride?.ok) throw new Error("expected runtime-override resolution");
 		expect(withRuntimeOverride.accessToken).toBe("access-b");
 	});
 
-	test("getOAuthAccessByCredentialId does not substitute a sibling on failure", async () => {
+	test("oauth.accessById does not substitute a sibling on failure", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");
 		const seen: string[] = [];
@@ -251,11 +253,11 @@ describe("AuthStorage OAuth account selection", () => {
 			if (credential.accountId === "acc-b") throw new Error("invalid_grant");
 			return { newCredentials: credential, apiKey: credential.access };
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
-		const target = storage.listOAuthAccounts(PROVIDER)[1];
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		const target = storage.oauth.accounts(PROVIDER)[1];
 		if (!target) throw new Error("expected second OAuth account");
 
-		const result = await storage.getOAuthAccessByCredentialId(PROVIDER, target.credentialId);
+		const result = await storage.oauth.accessById(PROVIDER, target.credentialId);
 
 		expect(result?.ok).toBe(false);
 		if (!result || result.ok) throw new Error("expected failed resolution");
@@ -264,15 +266,7 @@ describe("AuthStorage OAuth account selection", () => {
 		expect(seen).toEqual(["access-b"]);
 	});
 
-	test("getOAuthAccessAt returns undefined for an out-of-range position", async () => {
-		const storage = authStorage;
-		if (!storage) throw new Error("test setup failed");
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
-		expect(await storage.getOAuthAccessAt(PROVIDER, 2)).toBeUndefined();
-		expect(await storage.getOAuthAccessAt(PROVIDER, -1)).toBeUndefined();
-	});
-
-	test("getOAuthAccessAt fails the requested account without touching siblings", async () => {
+	test("resolving the selected account by ID fails without touching siblings", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");
 		// The targeted account (acc-b) fails definitively; siblings would refresh fine.
@@ -284,9 +278,11 @@ describe("AuthStorage OAuth account selection", () => {
 			if (credential.access === "access-b") throw new Error("invalid_grant");
 			return { newCredentials: credential, apiKey: credential.access };
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
 
-		const result = await storage.getOAuthAccessAt(PROVIDER, 1);
+		const account = storage.oauth.accounts(PROVIDER)[1];
+		if (!account) throw new Error("expected second OAuth account");
+		const result = await storage.oauth.accessById(PROVIDER, account.credentialId);
 
 		expect(result?.ok).toBe(false);
 		if (!result || result.ok) throw new Error("expected failed resolution");

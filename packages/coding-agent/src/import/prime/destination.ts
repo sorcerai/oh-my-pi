@@ -4,6 +4,7 @@ import { type Dirent, constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { OmpErrors } from "@oh-my-pi/omptype";
+import { AUTH_SCHEMA_VERSION } from "@oh-my-pi/pi-ai/auth/sqlite-credential-store";
 import { getAgentDbPath, MAIN_CONFIG_FILENAMES, withFileLock } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
 import { ModelRegistry } from "../../config/model-registry";
@@ -925,7 +926,8 @@ async function validateExistingCredentialDatabase(dbPath: string): Promise<void>
 		const version = db.query("SELECT version FROM auth_schema_version WHERE id = 1").get() as {
 			version?: number;
 		} | null;
-		if (version?.version !== 7) throw new DestinationValidationError("credential schema requires migration");
+		if (version?.version !== AUTH_SCHEMA_VERSION)
+			throw new DestinationValidationError("credential schema requires migration");
 		const columns = db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name?: unknown }>;
 		const names = new Set(columns.flatMap(row => (typeof row.name === "string" ? [row.name] : [])));
 		for (const name of ["id", "provider", "credential_type", "data", "identity_key", "disabled_cause"])

@@ -1,4 +1,4 @@
-import type { AuthStorage, OAuthAccessResolution } from "./auth-storage";
+import type { KeysApi, OAuthAccessResolution, OAuthApi } from "./auth-storage";
 
 const INVALID_AUTH_REF_MESSAGE =
 	"Invalid local auth reference: expected provider:<providerId> or oauth-credential:<providerId>:<positiveCredentialId>";
@@ -21,8 +21,8 @@ export type LocalAuthRef = ProviderLocalAuthRef | OAuthCredentialLocalAuthRef;
 
 /** Minimum credential lookup surface needed to resolve local authentication references. */
 export interface LocalAuthRefStorage {
-	readonly getApiKey?: AuthStorage["getApiKey"];
-	readonly getOAuthAccessByCredentialId?: AuthStorage["getOAuthAccessByCredentialId"];
+	readonly keys?: Pick<KeysApi, "get">;
+	readonly oauth?: Pick<OAuthApi, "accessById">;
 }
 
 /** Request-local context passed to the existing AuthStorage resolution paths. */
@@ -91,12 +91,12 @@ export async function resolveLocalAuthRef(
 ): Promise<string> {
 	const parsed = parseLocalAuthRef(authRef, expectedProviderId);
 	if (parsed.kind === "provider") {
-		if (typeof authStorage.getApiKey !== "function") {
+		if (typeof authStorage.keys?.get !== "function") {
 			throw new Error("No authentication credential is available for the expected provider");
 		}
 		let credential: string | undefined;
 		try {
-			credential = await authStorage.getApiKey(parsed.providerId, options.sessionId, {
+			credential = await authStorage.keys.get(parsed.providerId, options.sessionId, {
 				signal: options.signal,
 				forceRefresh: options.forceRefresh,
 			});
@@ -109,12 +109,12 @@ export async function resolveLocalAuthRef(
 		return credential;
 	}
 
-	if (typeof authStorage.getOAuthAccessByCredentialId !== "function") {
+	if (typeof authStorage.oauth?.accessById !== "function") {
 		throw new Error("OAuth credential was not found for the expected provider");
 	}
 	let resolution: OAuthAccessResolution | undefined;
 	try {
-		resolution = await authStorage.getOAuthAccessByCredentialId(parsed.providerId, parsed.credentialId, {
+		resolution = await authStorage.oauth.accessById(parsed.providerId, parsed.credentialId, {
 			signal: options.signal,
 			forceRefresh: options.forceRefresh,
 		});

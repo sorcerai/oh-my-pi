@@ -396,3 +396,6 @@ export function isPrimeDaemonFrame(value: unknown): value is PrimeDaemonFrame {
 		return false;
 	}
 }
+
+/** Longest `/v1/wait` long-poll the bridge accepts; clients re-arm after it. */
+export const MAX_WAIT_TIMEOUT_MS = 60_000;

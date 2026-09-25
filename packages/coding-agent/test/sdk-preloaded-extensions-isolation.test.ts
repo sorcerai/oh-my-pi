@@ -86,7 +86,6 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 			send: async () => {
 				throw new Error("restricted session must not send externally");
 			},
-			inbox: async () => [],
 			wait: async () => null,
 			ack: async () => false,
 			release: async () => false,
