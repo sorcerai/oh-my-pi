@@ -1,5 +1,5 @@
 import { type AuthStorage, type LocalAuthRefStorage, parseLocalAuthRef, resolveLocalAuthRef } from "@oh-my-pi/pi-ai";
-import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
+import type { ApiKeyResolution, ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
@@ -29,7 +29,13 @@ export interface ApiKeyResolverRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined>;
-	authStorage: Pick<AuthStorage, "rotateSessionCredential"> & LocalAuthRefStorage;
+	/** Resolve the bearer and durable credential row identity, when available. */
+	getApiKeyWithCredentialForProvider(
+		provider: string,
+		sessionId?: string,
+		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+	): Promise<ApiKeyResolution>;
+	authStorage: Pick<AuthStorage, "limits"> & LocalAuthRefStorage;
 	/** Refresh command-backed request headers without resolving a different credential. */
 	invalidateProviderCommandConfigs?(provider: string): void;
 	/**
@@ -52,22 +58,28 @@ export interface ApiKeyResolverRegistry {
  * Also usable standalone for structural registries that don't carry the method.
  */
 export function createApiKeyResolver(
-	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage" | "invalidateProviderCommandConfigs">,
+	registry: Pick<
+		ApiKeyResolverRegistry,
+		"getApiKeyWithCredentialForProvider" | "authStorage" | "invalidateProviderCommandConfigs"
+	>,
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId, authRef } = options;
 	const parsedAuthRef = authRef === undefined ? undefined : parseLocalAuthRef(authRef, provider);
+	const resolveKey = (forceRefresh: boolean | undefined, signal?: AbortSignal): Promise<ApiKeyResolution> =>
+		registry.getApiKeyWithCredentialForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh, signal });
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (parsedAuthRef?.kind === "oauth-credential") {
 			const exactAuthRef = `oauth-credential:${parsedAuthRef.providerId}:${parsedAuthRef.credentialId}`;
 			if (lastChance) return undefined;
 			if (error !== undefined) registry.invalidateProviderCommandConfigs?.(provider);
-			return resolveLocalAuthRef(registry.authStorage, exactAuthRef, provider, {
+			const apiKey = await resolveLocalAuthRef(registry.authStorage, exactAuthRef, provider, {
 				sessionId,
 				signal,
 				forceRefresh: error !== undefined,
 			});
+			return { apiKey, credentialId: parsedAuthRef.credentialId };
 		}
 		if (parsedAuthRef?.kind === "provider") {
 			const providerAuthRef = `provider:${parsedAuthRef.providerId}`;
@@ -75,7 +87,7 @@ export function createApiKeyResolver(
 				return resolveLocalAuthRef(registry.authStorage, providerAuthRef, provider, { sessionId, signal });
 			}
 			if (lastChance) {
-				const switched = await registry.authStorage.rotateSessionCredential(provider, sessionId, {
+				const switched = await registry.authStorage.limits.rotate(provider, sessionId, {
 					error,
 					modelId,
 					signal,
@@ -95,7 +107,7 @@ export function createApiKeyResolver(
 			});
 		}
 		if (error === undefined) {
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return resolveKey(undefined);
 		}
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
@@ -103,7 +115,7 @@ export function createApiKeyResolver(
 			// sibling exists we switch immediately; the precise no-sibling backoff
 			// is owned by `markUsageLimitReached` (default + server usage-report
 			// reset) and the outer whole-turn retry layer.
-			const switched = await registry.authStorage.rotateSessionCredential(provider, sessionId, {
+			const switched = await registry.authStorage.limits.rotate(provider, sessionId, {
 				error,
 				modelId,
 				signal,
@@ -117,8 +129,8 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return resolveKey(undefined);
 		}
-		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
+		return resolveKey(true, signal);
 	};
 }

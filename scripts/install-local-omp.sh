@@ -31,6 +31,17 @@ fail() {
 	exit 1
 }
 
+# Copy the smoke event stream and stderr somewhere cleanup will not delete,
+# so a rejected smoke proof can be diagnosed after the automatic rollback.
+keep_smoke_evidence() {
+	evidence_dir=${OMP_LOCAL_SMOKE_EVIDENCE_DIR:-"$HOME/.omp/logs"}
+	mkdir -p "$evidence_dir" || return 0
+	stamp=$(date +%Y%m%dT%H%M%S)
+	[ -z "$smoke_json" ] || [ ! -s "$smoke_json" ] || cp "$smoke_json" "$evidence_dir/install-local-smoke-$stamp.jsonl"
+	[ -z "$smoke_log" ] || [ ! -s "$smoke_log" ] || cp "$smoke_log" "$evidence_dir/install-local-smoke-$stamp.log"
+	printf '%s: kept smoke evidence in %s (install-local-smoke-%s.*)\n' "$name" "$evidence_dir" "$stamp" >&2
+}
+
 rollback() {
 	set +e
 	if [ "$worker_backup_ready" -eq 1 ]; then
@@ -303,12 +314,13 @@ fi
 printf '%s: version smoke passed: %s\n' "$name" "$version_output"
 
 marker=OMP_LOCAL_INSTALL_FLASH_WORKER_OK
-prompt="Run one nested agent task with the configured agent named $smoke_agent. Give it this instruction: Reply with exactly $marker and no other text. You must call the task tool and wait for its result. If the nested result carries $marker, reply with exactly $marker and no other text. Otherwise, fail without printing the marker."
+prompt="Run one nested agent task with the configured agent named $smoke_agent. Give it this instruction: Reply with exactly $marker and no other text. Do not set an outputSchema on the task. You must call the task tool and wait for its result. If the nested result carries $marker, reply with exactly $marker and no other text. Otherwise, fail without printing the marker."
 printf '%s: running live smoke with parent %s and worker %s\n' "$name" "$smoke_model" "$smoke_agent"
 smoke_log=$(mktemp "$global_bin/.omp.smoke.XXXXXX") || fail "cannot create smoke log"
 smoke_json=$(mktemp "$global_bin/.omp.smoke-json.XXXXXX") || fail "cannot create smoke event log"
 if ! PI_CODING_AGENT_DIR="$agent_dir" PI_NO_TITLE=1 NO_COLOR=1 "$target" --mode json --no-session --no-title --model "$smoke_model" --max-time "$smoke_timeout" -- "$prompt" >"$smoke_json" 2>"$smoke_log"; then
 	[ ! -s "$smoke_log" ] || cat "$smoke_log" >&2
+	keep_smoke_evidence
 	fail "$smoke_agent smoke command failed"
 fi
 if ! OMP_LOCAL_SMOKE_JSON="$smoke_json" OMP_LOCAL_SMOKE_MARKER="$marker" OMP_LOCAL_SMOKE_AGENT="$smoke_agent" bun -e '
@@ -352,20 +364,22 @@ const asyncResultCarriesMarker = taskEnd => {
 	if (taskEnd.result?.details?.async?.state !== "running" || typeof jobId !== "string") {
 		return false;
 	}
-	// Interrupted waits can be retried; either wait or jobs can deliver the result.
+	// Interrupted waits can be retried; the wait tool (or the pre-18.3 hub
+	// wait/jobs ops) can deliver the result.
 	const snapshotCalls = new Set(events
 		.filter(event =>
 			event?.type === "tool_execution_start" &&
-			event.toolName === "hub" &&
-			(event.args?.op === "jobs" ||
-				(event.args?.op === "wait" &&
-					(event.args.ids === undefined ||
-						(Array.isArray(event.args.ids) && event.args.ids.includes(jobId))))))
+			(event.toolName === "wait" ||
+				(event.toolName === "hub" &&
+					(event.args?.op === "jobs" ||
+						(event.args?.op === "wait" &&
+							(event.args.ids === undefined ||
+								(Array.isArray(event.args.ids) && event.args.ids.includes(jobId))))))))
 		.map(event => event.toolCallId));
 	const jobs = events
 		.filter(event =>
 			event?.type === "tool_execution_end" &&
-			event.toolName === "hub" &&
+			(event.toolName === "wait" || event.toolName === "hub") &&
 			snapshotCalls.has(event.toolCallId) &&
 			event.isError !== true)
 		.flatMap(event => Array.isArray(event.result?.details?.jobs) ? event.result.details.jobs : []);
@@ -419,6 +433,7 @@ if (finalText !== marker) {
 }
 ' 2>>"$smoke_log"; then
 	[ ! -s "$smoke_log" ] || cat "$smoke_log" >&2
+	keep_smoke_evidence
 	fail "$smoke_agent smoke JSON proof failed"
 fi
 

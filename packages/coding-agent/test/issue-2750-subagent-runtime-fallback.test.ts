@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -8,10 +9,22 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "./helpers/session-defaults";
+
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+async function createTempAuthStorage(): Promise<AuthStorage> {
+	const dir = TempDir.createSync("@pi-issue-2750-auth-");
+	tempDirs.push(dir);
+	return AuthStorage.create(path.join(dir.path(), "auth.db"));
+}
+
+const tempDirs: TempDir[] = [];
 
 function model(provider: string, id: string): Model<Api> {
 	return buildModel({
@@ -95,6 +108,7 @@ function createYieldingSession(
 describe("subagent runtime model resolution", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		for (const dir of tempDirs.splice(0)) dir.removeSync();
 	});
 
 	for (const { level, collide } of [
@@ -165,13 +179,68 @@ describe("subagent runtime model resolution", () => {
 		});
 	}
 
+	it("keeps a subagent fallback reachable when default uses the same primary model", async () => {
+		const primary = model("primary", "bad-runtime-model");
+		const fallback = model("fallback", "working-model");
+		let candidates: string[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options?.settings || !options.sessionManager) throw new Error("Expected child settings and history");
+			const recovery = new TurnRecovery({
+				model: () => primary,
+				thinkingLevel: () => undefined,
+				sessionManager: options.sessionManager,
+				settings: options.settings,
+				modelRegistry: {
+					find: (provider: string, id: string) =>
+						[primary, fallback].find(m => m.provider === provider && m.id === id),
+					hasProvider: () => true,
+					getAvailable: () => [primary, fallback],
+				},
+				configWarnings: [],
+			} as unknown as TurnRecoveryHost);
+			return {
+				session: createYieldingSession("none", async () => {
+					const selector = "primary/bad-runtime-model";
+					candidates = recovery
+						.retryFallbackChainKeys(selector)
+						.flatMap(role =>
+							recovery.findRetryFallbackCandidates(role, selector).map(candidate => candidate.raw),
+						);
+				}),
+				extensionsResult: {},
+				setToolUIContext: () => {},
+			} as never;
+		});
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "shared-primary",
+			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
+			settings: Settings.isolated({
+				modelRoles: { default: "primary/bad-runtime-model" },
+				"retry.fallbackChains": { default: [] },
+			}),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+		expect(candidates).toEqual(["fallback/working-model"]);
+	});
+
 	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
 		const primary = model("primary", "bad-runtime-model");
 		const fallback = model("fallback", "working-model");
 		let childFallbackChains: Record<string, string[]> | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
+				| Record<string, string[]>
+				| undefined;
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
 
@@ -268,7 +337,9 @@ describe("subagent runtime model resolution", () => {
 		let childModelRole: string | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
+				| Record<string, string[]>
+				| undefined;
 			childFallbackChainKeys = Object.keys(childFallbackChains ?? {});
 			childModelRole = options.settings?.getModelRoles()["subagent:single-model-configured-fallback"];
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
@@ -311,7 +382,9 @@ describe("subagent runtime model resolution", () => {
 		let childModelRole: string | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
+				| Record<string, string[]>
+				| undefined;
 			childModelRole = options.settings?.getModelRoles()["subagent:role-alias-chain"];
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
@@ -360,7 +433,9 @@ describe("subagent runtime model resolution", () => {
 		let childFallbackChains: Record<string, string[]> | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
+				| Record<string, string[]>
+				| undefined;
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
 
@@ -403,7 +478,9 @@ describe("subagent runtime model resolution", () => {
 		let childFallbackChains: Record<string, string[]> | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
+				| Record<string, string[]>
+				| undefined;
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
 
@@ -442,7 +519,7 @@ describe("subagent runtime model resolution", () => {
 		let childModelRole: string | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains");
+			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
 			childModelRole = options.settings?.getModelRoles()["subagent:collapsed-multiple-models"];
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
@@ -507,45 +584,13 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelRole).toBeUndefined();
 	});
 
-	it("preserves malformed fallback configuration for child validation", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		let childFallbackChains: unknown;
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains");
-			childModelRole = options.settings?.getModelRoles()["subagent:single-model-malformed-fallback"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "single-model-malformed-fallback",
-			modelOverride: "lm-studio/local-reviewer",
-			settings: Settings.isolated({ "retry.fallbackChains": null as never }),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		expect(childFallbackChains).toBeNull();
-		expect(childModelRole).toBeUndefined();
-	});
-
 	it("leaves malformed default fallback entries for child validation", async () => {
 		const primary = model("lm-studio", "local-reviewer");
 		let childFallbackChains: unknown;
 		let childModelRole: string | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains");
+			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
 			childModelRole = options.settings?.getModelRoles()["subagent:single-model-invalid-default-fallback"];
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
@@ -576,7 +621,9 @@ describe("subagent runtime model resolution", () => {
 		let childFallbackChains: Record<string, string[]> | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = (options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined) as
+				| Record<string, string[]>
+				| undefined;
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
 
@@ -709,12 +756,7 @@ describe("subagent runtime model resolution", () => {
 			id: "retained-extension-runtime",
 			modelOverride: "pi-antigravity/gemini-3.6-flash",
 			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
-			authStorage: {
-				setConfigValueResolver: () => {},
-				setConfigApiKey: () => {},
-				removeConfigApiKey: () => {},
-				hasAuth: () => false,
-			} as never,
+			authStorage: await createTempAuthStorage(),
 			settings: Settings.isolated(),
 			enableLsp: false,
 		});
@@ -808,12 +850,7 @@ describe("subagent runtime model resolution", () => {
 			index: 0,
 			id: "cancelled-provider-preload",
 			preloadedExtensionPaths: ["/tmp/pi-antigravity-bridge.ts"],
-			authStorage: {
-				setConfigValueResolver: () => {},
-				setConfigApiKey: () => {},
-				removeConfigApiKey: () => {},
-				hasAuth: () => false,
-			} as never,
+			authStorage: await createTempAuthStorage(),
 			settings: Settings.isolated(),
 			enableLsp: false,
 			signal: abortController.signal,

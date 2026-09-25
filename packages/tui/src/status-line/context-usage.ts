@@ -2,6 +2,7 @@ import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
+import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../theme";
@@ -12,7 +13,7 @@ interface ContextSkill {
 	readonly hide?: boolean;
 }
 
-type ContextTool = Pick<AiTool, "name" | "description" | "parameters">;
+type ContextTool = Pick<AiTool, "name" | "description" | "parameters" | "examples">;
 
 /** Savings computed by the host's inline-image planner, not by the renderer. */
 export interface ContextSavingsEstimate {
@@ -152,6 +153,8 @@ export interface NonMessageTokenSource {
 	 * provider-facing prompt. Absent: the hide-filter mirror below applies.
 	 */
 	projectPromptSkills?(): readonly ContextSkill[];
+	/** Provider-facing, session-frozen descriptions when available. */
+	readonly renderedSkills?: readonly ContextSkill[];
 }
 
 /** Shared empty system-prompt part list, avoiding an allocation per render. */
@@ -269,9 +272,13 @@ export function estimateToolSchemaTokens(tools: ToolSchemaSource, tokenizer: Tok
 				name,
 				description,
 				parameters: parameters as AiTool["parameters"],
+				examples: tool.examples,
 			};
 			const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
 			if (typeof wireJson === "string") fragments.push(wireJson);
+			// The agent loop appends rendered examples to the wire description.
+			const examplesBlock = renderToolExamples(wireTool);
+			if (examplesBlock) fragments.push(examplesBlock);
 		} catch {
 			// Schema may contain functions or cycles; ignore.
 		}
@@ -340,7 +347,7 @@ function nonMessageTokenCacheEntry(
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const toolsRevision = getToolSchemaMetadataRevision(toolsRef);
-	const skillsRef = session.skills ?? EMPTY_SKILLS;
+	const skillsRef = session.renderedSkills ?? session.skills ?? EMPTY_SKILLS;
 	const skillsSettingsRef = session.skillsSettings;
 	const projectPromptSkillsRef = session.projectPromptSkills;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
@@ -413,7 +420,10 @@ export function computeNonMessageBreakdown(
 	const skillsTokens =
 		skillful === false
 			? 0
-			: estimateSkillsTokens(renderedSkills(session, session.skills ?? EMPTY_SKILLS, tools), tokenizer);
+			: estimateSkillsTokens(
+					renderedSkills(session, session.renderedSkills ?? session.skills ?? EMPTY_SKILLS, tools),
+					tokenizer,
+				);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer, sourceRevision);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));

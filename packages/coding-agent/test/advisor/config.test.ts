@@ -103,7 +103,7 @@ describe("discoverAdvisorConfigs", () => {
 		expect(noTools?.tools).toEqual([]);
 		expect(defaultTools?.tools).toBeUndefined();
 		expect(invalidOnly?.tools).toEqual([]);
-		expect(aliasTools?.tools).toEqual(["grep", "glob"]);
+		expect(aliasTools?.tools).toEqual(["grep", "find"]);
 	});
 
 	it("ignores a malformed YAML file without throwing", async () => {

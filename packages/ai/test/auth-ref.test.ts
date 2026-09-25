@@ -25,9 +25,11 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 		if (row) row.credential = credential;
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
-		const row = this.#rows.find(candidate => candidate.id === id);
-		if (row) row.disabledCause = disabledCause;
+	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
+		const row = this.#rows.find(candidate => candidate.id === id && candidate.disabledCause === null);
+		if (!row) return false;
+		row.disabledCause = disabledCause;
+		return true;
 	}
 
 	tryDisableAuthCredentialIfMatches(id: number, expectedData: string, disabledCause: string): boolean {
@@ -37,8 +39,8 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
-	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
-		this.deleteAuthCredentialsForProvider(provider, "replaced by newer credential");
+	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
+		this.#disableProvider(provider, "replaced by newer credential");
 		const rows = credentials.map((credential): StoredAuthCredential => ({
 			id: this.#nextId++,
 			provider,
@@ -49,11 +51,15 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 		return rows;
 	}
 
-	upsertAuthCredentialForProvider(provider: string, credential: AuthCredential): StoredAuthCredential[] {
-		return this.replaceAuthCredentialsForProvider(provider, [credential]);
+	upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+		return this.replaceAuthCredentials(provider, [credential]);
 	}
 
-	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
+	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
+		this.#disableProvider(provider, disabledCause);
+	}
+
+	#disableProvider(provider: string, disabledCause: string): void {
 		for (const row of this.#rows) {
 			if (row.provider === provider && row.disabledCause === null) row.disabledCause = disabledCause;
 		}
@@ -101,7 +107,7 @@ describe("local auth references", () => {
 	});
 
 	test("parses and resolves a provider reference through normal AuthStorage selection", async () => {
-		await storage.set(PROVIDER, { type: "api_key", key: "test-only-provider-key" });
+		await storage.credentials.set(PROVIDER, { type: "api_key", key: "test-only-provider-key" });
 
 		expect(parseLocalAuthRef(`provider:${PROVIDER}`, PROVIDER)).toEqual({
 			kind: "provider",
@@ -124,7 +130,7 @@ describe("local auth references", () => {
 	});
 
 	test("resolves the exact durable OAuth credential row", async () => {
-		const exactResolver = vi.spyOn(storage, "getOAuthAccessByCredentialId").mockResolvedValue({
+		const exactResolver = vi.spyOn(storage.oauth, "accessById").mockResolvedValue({
 			ok: true,
 			accessToken: "test-only-second-access",
 			credentialId: 2,
@@ -160,8 +166,8 @@ describe("local auth references", () => {
 	});
 
 	test("rejects a provider mismatch before credential access", async () => {
-		const providerResolver = vi.spyOn(storage, "getApiKey");
-		const oauthResolver = vi.spyOn(storage, "getOAuthAccessByCredentialId");
+		const providerResolver = vi.spyOn(storage.keys, "get");
+		const oauthResolver = vi.spyOn(storage.oauth, "accessById");
 
 		await expect(resolveLocalAuthRef(storage, `provider:${PROVIDER}`, "different-provider")).rejects.toThrow(
 			"Local auth reference provider does not match the expected provider",
@@ -172,8 +178,8 @@ describe("local auth references", () => {
 
 	test("rejects a missing OAuth credential without exposing credential material", async () => {
 		const credentialValue = "must-not-appear-in-errors";
-		await storage.set(PROVIDER, oauthCredential(credentialValue));
-		const existing = storage.listOAuthAccounts(PROVIDER)[0];
+		await storage.credentials.set(PROVIDER, oauthCredential(credentialValue));
+		const existing = storage.oauth.accounts(PROVIDER)[0];
 		if (!existing) throw new Error("expected an OAuth credential");
 		const missingId = existing.credentialId + 1;
 
@@ -188,7 +194,7 @@ describe("local auth references", () => {
 	});
 
 	test("rejects a non-OAuth credential row as a missing OAuth credential", async () => {
-		await storage.set(PROVIDER, { type: "api_key", key: "test-only-provider-key" });
+		await storage.credentials.set(PROVIDER, { type: "api_key", key: "test-only-provider-key" });
 		const row = store.listAuthCredentials(PROVIDER)[0];
 		if (!row) throw new Error("expected an API-key credential");
 
@@ -198,7 +204,7 @@ describe("local auth references", () => {
 	});
 
 	test("rejects an OAuth credential with no access token", async () => {
-		vi.spyOn(storage, "getOAuthAccessByCredentialId").mockResolvedValue({
+		vi.spyOn(storage.oauth, "accessById").mockResolvedValue({
 			ok: true,
 			accessToken: "",
 			credentialId: 1,

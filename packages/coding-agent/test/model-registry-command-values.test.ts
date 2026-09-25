@@ -194,7 +194,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				},
 			}),
 		);
-		authStorage.setRuntimeApiKey("custom-proxy", "runtime-key");
+		authStorage.keys.setRuntime("custom-proxy", "runtime-key");
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
@@ -411,14 +411,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			model.authRef = authRef;
 			let bearer = "stale-bearer";
 			const referenceLookup = authRef.startsWith("provider:")
-				? spyOn(authStorage, "getApiKey").mockImplementation(async () => bearer)
-				: spyOn(authStorage, "getOAuthAccessByCredentialId").mockImplementation(async () => ({
+				? spyOn(authStorage.keys, "get").mockImplementation(async () => bearer)
+				: spyOn(authStorage.oauth, "accessById").mockImplementation(async () => ({
 						ok: true,
 						accessToken: bearer,
 						credentialId: 2,
 						accountId: "test-only-account",
 					}));
-			const fallbackLookup = spyOn(registry, "getApiKeyForProvider").mockImplementation(() => {
+			const fallbackLookup = spyOn(registry, "getApiKeyWithCredentialForProvider").mockImplementation(() => {
 				throw new Error("Explicit authRef must not resolve the provider fallback");
 			});
 			try {

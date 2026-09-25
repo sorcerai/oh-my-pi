@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { cfgSkillsEnabled } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "../src/config/settings";
 import type { LoadSkillsResult, Skill } from "../src/extensibility/skills";
@@ -113,7 +114,7 @@ describe("SessionTools.refreshSkills", () => {
 		const settings = Settings.isolated({
 			includeModelInPrompt: false,
 		});
-		settings.set("skills.enabled", false);
+		cfgSkillsEnabled.set(settings, false);
 		const read = makeTestTool("read");
 		const toolRegistry = new Map<string, AgentTool>([["read", read]]);
 		const promptSnapshots: Array<{ names: string[]; hasSkillSearch: boolean }> = [];
@@ -130,7 +131,7 @@ describe("SessionTools.refreshSkills", () => {
 		await sessionTools.refreshSkills();
 		expect(sessionTools.getAllToolNames()).toEqual(["read"]);
 
-		settings.set("skills.enabled", true);
+		cfgSkillsEnabled.set(settings, true);
 		await sessionTools.refreshSkills();
 
 		expect(sessionTools.getAllToolNames()).toContain("skill_search");
@@ -157,7 +158,7 @@ describe("SessionTools.refreshSkills", () => {
 		await sessionTools.refreshSkills();
 		expect(sessionTools.getAllToolNames()).toEqual(["read", "skill_search"]);
 
-		settings.set("skills.enabled", false);
+		cfgSkillsEnabled.set(settings, false);
 		await sessionTools.refreshSkills();
 
 		expect(sessionTools.getAllToolNames()).toEqual(["read"]);
@@ -200,7 +201,7 @@ describe("SessionTools.refreshSkills", () => {
 		const previousMounted = [...xdev.mountedNames];
 		const previousPrompt = [...sessionTools.baseSystemPrompt];
 
-		settings.set("skills.enabled", true);
+		cfgSkillsEnabled.set(settings, true);
 		await expect(sessionTools.refreshSkills()).rejects.toThrow("enable prompt rebuild failed");
 
 		expect(rebuildSystemPrompt).toHaveBeenCalledTimes(1);
@@ -254,7 +255,7 @@ describe("SessionTools.refreshSkills", () => {
 		const previousMounted = [...xdev.mountedNames];
 		const previousPrompt = [...sessionTools.baseSystemPrompt];
 
-		settings.set("skills.enabled", false);
+		cfgSkillsEnabled.set(settings, false);
 		await expect(sessionTools.refreshSkills()).rejects.toThrow("disable prompt rebuild failed");
 
 		expect(rebuildSystemPrompt).toHaveBeenCalledTimes(1);
@@ -275,7 +276,7 @@ describe("SessionTools.refreshSkills", () => {
 		const settings = Settings.isolated({
 			includeModelInPrompt: false,
 		});
-		settings.set("skills.enabled", false);
+		cfgSkillsEnabled.set(settings, false);
 		const read = makeTestTool("read");
 		const toolRegistry = new Map<string, AgentTool>([["read", read]]);
 		const sessionTools = makeSessionTools({
@@ -285,7 +286,7 @@ describe("SessionTools.refreshSkills", () => {
 			presentationPinnedToolNames: new Set(["read"]),
 		});
 
-		settings.set("skills.enabled", true);
+		cfgSkillsEnabled.set(settings, true);
 		await sessionTools.refreshSkills();
 
 		expect(sessionTools.getAllToolNames()).not.toContain("skill_search");
@@ -296,7 +297,7 @@ describe("SessionTools.refreshSkills", () => {
 		const settings = Settings.isolated({
 			includeModelInPrompt: false,
 		});
-		settings.set("skills.enabled", false);
+		cfgSkillsEnabled.set(settings, false);
 		const read = makeTestTool("read");
 		const toolRegistry = new Map<string, AgentTool>([["read", read]]);
 		const sessionTools = makeSessionTools({
@@ -313,7 +314,7 @@ describe("SessionTools.refreshSkills", () => {
 			return result.promise;
 		});
 
-		settings.set("skills.enabled", true);
+		cfgSkillsEnabled.set(settings, true);
 		const refreshOne = sessionTools.refreshSkills();
 		const refreshTwo = sessionTools.refreshSkills();
 		first.resolve({ skills: [], warnings: [] });

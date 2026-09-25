@@ -11,6 +11,11 @@
  * reloads extensions per session so each session gets its own ExtensionAPI.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import {
+	cfgPrimeBridgeEnabled,
+	cfgPrimeBridgeTokenPath,
+	cfgPrimeBridgeUrl,
+} from "@oh-my-pi/pi-coding-agent/integrations/prime-bridge/settings";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -86,7 +91,6 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 			send: async () => {
 				throw new Error("restricted session must not send externally");
 			},
-			inbox: async () => [],
 			wait: async () => null,
 			ack: async () => false,
 			release: async () => false,
@@ -119,9 +123,9 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 
 	it("uses the durable session manager ID for an SDK-created provider", async () => {
 		const settings = Settings.isolated();
-		settings.set("primeBridge.enabled", true);
-		settings.set("primeBridge.url", "http://127.0.0.1:3210");
-		settings.set("primeBridge.tokenPath", path.join(sharedDir, "bridge-token"));
+		cfgPrimeBridgeEnabled.set(settings, true);
+		cfgPrimeBridgeUrl.set(settings, "http://127.0.0.1:3210");
+		cfgPrimeBridgeTokenPath.set(settings, path.join(sharedDir, "bridge-token"));
 		const sessionManager = SessionManager.inMemory();
 		const expectedSessionId = sessionManager.getSessionId();
 		const factory = vi.spyOn(primeBridge, "createExternalPeerProvider").mockReturnValue(undefined);

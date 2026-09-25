@@ -4,6 +4,7 @@ import { type Dirent, constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { OmpErrors } from "@oh-my-pi/omptype";
+import { AUTH_SCHEMA_VERSION } from "@oh-my-pi/pi-ai/auth/sqlite-credential-store";
 import { getAgentDbPath, MAIN_CONFIG_FILENAMES, withFileLock } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
 import { ModelRegistry } from "../../config/model-registry";
@@ -11,7 +12,25 @@ import { modelSpecV1ToOmpModelRecord } from "../../config/model-spec-v1";
 
 import { ModelsConfigFile, validateModelsConfig } from "../../config/models-config";
 import type { ModelsConfig } from "../../config/models-config-schema";
-import { type SettingPath, Settings, type SettingsCreateOnlyMutation, type SettingValue } from "../../config/settings";
+import { cfgEnabledModels, cfgModelRoles } from "../../config/model-settings";
+import type { AnySetting, SettingValueOf } from "../../config/registry";
+import { Settings, type SettingsCreateOnlyMutation } from "../../config/settings";
+import { cfgShellPath } from "../../exec/settings";
+import { cfgSkillsEnableSkillCommands } from "../../extensibility/settings";
+import { cfgFollowUpMode, cfgSteeringMode, cfgTreeFilterMode } from "../../modes/settings";
+import {
+	cfgCompactionEnabled,
+	cfgCompactionKeepRecentTokens,
+	cfgCompactionReserveTokens,
+} from "../../session/context-settings";
+import {
+	cfgDefaultThinkingLevel,
+	cfgHideThinkingBlock,
+	cfgRetryBaseDelayMs,
+	cfgRetryEnabled,
+	cfgRetryMaxDelayMs,
+	cfgRetryMaxRetries,
+} from "../../session/settings";
 import { loadSkillsFromDir } from "../../extensibility/skills";
 import { AuthStorage } from "../../session/auth-storage";
 import { revalidatePrimeSource } from "./source";
@@ -133,12 +152,31 @@ export type PrimeSupportedSettingPath =
 	| "modelRoles";
 
 type PrimeNonRoleSettingPath = Exclude<PrimeSupportedSettingPath, "modelRoles">;
+/** Registry handle of every whole-value setting the Prime importer may create. */
+const PRIME_SETTING_HANDLES = {
+	defaultThinkingLevel: cfgDefaultThinkingLevel,
+	steeringMode: cfgSteeringMode,
+	followUpMode: cfgFollowUpMode,
+	hideThinkingBlock: cfgHideThinkingBlock,
+	shellPath: cfgShellPath,
+	enabledModels: cfgEnabledModels,
+	treeFilterMode: cfgTreeFilterMode,
+	"compaction.enabled": cfgCompactionEnabled,
+	"compaction.reserveTokens": cfgCompactionReserveTokens,
+	"compaction.keepRecentTokens": cfgCompactionKeepRecentTokens,
+	"retry.enabled": cfgRetryEnabled,
+	"retry.maxRetries": cfgRetryMaxRetries,
+	"retry.baseDelayMs": cfgRetryBaseDelayMs,
+	"retry.maxDelayMs": cfgRetryMaxDelayMs,
+	"skills.enableSkillCommands": cfgSkillsEnableSkillCommands,
+} as const satisfies Record<PrimeNonRoleSettingPath, AnySetting>;
+type PrimeSettingValue<P extends PrimeNonRoleSettingPath> = SettingValueOf<(typeof PRIME_SETTING_HANDLES)[P]>;
 export type PrimeSettingMutation =
 	| {
 			[P in PrimeNonRoleSettingPath]: {
 				readonly kind: "setting";
 				readonly path: P;
-				readonly value: SettingValue<P>;
+				readonly value: PrimeSettingValue<P>;
 				readonly sourceRefs: readonly string[];
 				readonly itemId: string;
 			};
@@ -253,25 +291,25 @@ function settingValue(
 	switch (pathValue) {
 		case "defaultThinkingLevel":
 			return typeof value === "string"
-				? ({ ...base, value: value as SettingValue<"defaultThinkingLevel"> } as PrimeSettingMutation)
+				? ({ ...base, value: value as PrimeSettingValue<"defaultThinkingLevel"> } as PrimeSettingMutation)
 				: undefined;
 		case "steeringMode":
 		case "followUpMode":
 		case "treeFilterMode":
 		case "shellPath":
 			return typeof value === "string"
-				? ({ ...base, value: value as SettingValue<typeof pathValue> } as PrimeSettingMutation)
+				? ({ ...base, value: value as PrimeSettingValue<typeof pathValue> } as PrimeSettingMutation)
 				: undefined;
 		case "hideThinkingBlock":
 		case "compaction.enabled":
 		case "retry.enabled":
 		case "skills.enableSkillCommands":
 			return typeof value === "boolean"
-				? ({ ...base, value: value as SettingValue<typeof pathValue> } as PrimeSettingMutation)
+				? ({ ...base, value: value as PrimeSettingValue<typeof pathValue> } as PrimeSettingMutation)
 				: undefined;
 		case "enabledModels":
 			return Array.isArray(value) && value.every(entry => typeof entry === "string")
-				? ({ ...base, value: value as SettingValue<"enabledModels"> } as PrimeSettingMutation)
+				? ({ ...base, value: value as PrimeSettingValue<"enabledModels"> } as PrimeSettingMutation)
 				: undefined;
 		case "compaction.reserveTokens":
 		case "compaction.keepRecentTokens":
@@ -279,7 +317,7 @@ function settingValue(
 		case "retry.baseDelayMs":
 		case "retry.maxDelayMs":
 			return typeof value === "number" && Number.isFinite(value)
-				? ({ ...base, value: value as SettingValue<typeof pathValue> } as PrimeSettingMutation)
+				? ({ ...base, value: value as PrimeSettingValue<typeof pathValue> } as PrimeSettingMutation)
 				: undefined;
 		case "modelRoles":
 			return undefined;
@@ -293,7 +331,7 @@ function planSettings(
 	items: PrimeImportItemResult[];
 	preconditions: PrimeDestinationPrecondition[];
 } {
-	const paths: readonly PrimeSupportedSettingPath[] = [
+	const paths: readonly PrimeNonRoleSettingPath[] = [
 		"compaction.enabled",
 		"compaction.keepRecentTokens",
 		"compaction.reserveTokens",
@@ -318,7 +356,7 @@ function planSettings(
 		if (value === undefined) continue;
 		const refs = refsFor(config, key),
 			id = `setting:${key}`;
-		if (settings.isConfigured(key as SettingPath)) items.push(result(id, "settings", refs, "skipped"));
+		if (settings.isConfigured(PRIME_SETTING_HANDLES[key])) items.push(result(id, "settings", refs, "skipped"));
 		else {
 			const mutation = settingValue(key, value, refs);
 			if (mutation) {
@@ -330,7 +368,7 @@ function planSettings(
 	}
 	const roles = config.effectiveSettings.modelRoles;
 	if (isRecord(roles)) {
-		const current = settings.get("modelRoles"),
+		const current = cfgModelRoles.get(settings),
 			currentRoles = isRecord(current) ? current : {},
 			pending: Record<string, string> = {};
 		for (const role of Object.keys(roles).sort(compare)) {
@@ -925,7 +963,8 @@ async function validateExistingCredentialDatabase(dbPath: string): Promise<void>
 		const version = db.query("SELECT version FROM auth_schema_version WHERE id = 1").get() as {
 			version?: number;
 		} | null;
-		if (version?.version !== 7) throw new DestinationValidationError("credential schema requires migration");
+		if (version?.version !== AUTH_SCHEMA_VERSION)
+			throw new DestinationValidationError("credential schema requires migration");
 		const columns = db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name?: unknown }>;
 		const names = new Set(columns.flatMap(row => (typeof row.name === "string" ? [row.name] : [])));
 		for (const name of ["id", "provider", "credential_type", "data", "identity_key", "disabled_cause"])
@@ -1177,9 +1216,10 @@ export async function validatePrimeDestinationRollbackEntry(
 			if (!(await noSymlinkPath(destination.agentDir, canonical, "file"))) return false;
 			const settings = await Settings.loadReadOnly({ agentDir: destination.agentDir, cwd: destination.cwd });
 			if (role === undefined) {
-				if (!settings.isConfigured(configuredPath)) return false;
+				if (configuredPath === "modelRoles" || !settings.isConfigured(PRIME_SETTING_HANDLES[configuredPath]))
+					return false;
 			} else {
-				const roles = settings.get("modelRoles");
+				const roles = cfgModelRoles.get(settings);
 				if (!isRecord(roles) || typeof roles[role] !== "string") return false;
 			}
 			return (await descriptorDigest(canonical)) === entry.currentSha256;
@@ -1842,7 +1882,8 @@ async function preconditionsHold(plan: PrimeDestinationPlan, includeModels = tru
 	for (const precondition of plan.preconditions) {
 		if (precondition.kind === "models" && !includeModels) continue;
 		if (precondition.kind === "setting") {
-			if (precondition.path !== "modelRoles" && settings.isConfigured(precondition.path)) return "drift";
+			if (precondition.path !== "modelRoles" && settings.isConfigured(PRIME_SETTING_HANDLES[precondition.path]))
+				return "drift";
 		} else if (precondition.kind === "models") {
 			try {
 				const stat = await fs.lstat(precondition.destinationRef);

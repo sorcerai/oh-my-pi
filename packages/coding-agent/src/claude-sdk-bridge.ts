@@ -6,7 +6,8 @@ import { type ApprovalMode, resolveApproval, truncateForPrompt } from "./tools/a
 export const CLAUDE_SDK_SESSION_CUSTOM_TYPE = "claude_sdk_session";
 
 export interface ClaudeSdkBridgeOptions {
-	getSettings(): { get(key: string): unknown } | undefined;
+	/** Live approval mode and per-tool policies; undefined falls back to yolo with no policies. */
+	getApprovalSettings(): { mode: ApprovalMode; policies: Record<string, unknown> } | undefined;
 	isAutoApprove(): boolean;
 	hasUI(): boolean;
 	select(prompt: string, choices: string[], opts: { signal?: AbortSignal }): Promise<string | undefined>;
@@ -58,11 +59,9 @@ export class ClaudeSdkBridge implements ClaudeSdkHandlers {
 	}
 
 	async requestToolPermission(req: ClaudeSdkPermissionRequest): Promise<ClaudeSdkPermissionResult> {
-		const settings = this.options.getSettings();
-		const mode: ApprovalMode = this.options.isAutoApprove()
-			? "yolo"
-			: ((settings?.get("tools.approvalMode") as ApprovalMode | undefined) ?? "yolo");
-		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
+		const approval = this.options.getApprovalSettings();
+		const mode: ApprovalMode = this.options.isAutoApprove() ? "yolo" : (approval?.mode ?? "yolo");
+		const userPolicies = approval?.policies ?? {};
 		const tier = claudeCodeToolTier(req.toolName);
 		const policyKey = `claude-code.${req.toolName}`;
 		const resolved = resolveApproval({ name: policyKey, approval: tier }, req.input, mode, userPolicies);

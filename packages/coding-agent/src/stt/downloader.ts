@@ -12,7 +12,7 @@ export interface DownloadProgress {
 }
 
 export interface EnsureOptions {
-	modelName?: string;
+	modelId?: string;
 	signal?: AbortSignal;
 	onProgress?: (progress: DownloadProgress) => void;
 }
@@ -104,7 +104,7 @@ export async function isSttModelCached(key: string): Promise<boolean> {
 }
 
 /**
- * Download (or warm from cache) the selected model tier via the speech
+ * Download (or warm from cache) the selected local speech model via the speech
  * worker, resolving once the model is fully present and loaded. Streams real
  * Hub progress with an aggregated integer percent. Rejects if the worker cannot
  * obtain the model. Safe to call non-interactively.
@@ -156,7 +156,7 @@ export async function downloadSttModel(
 
 export async function ensureSTTDependencies(options?: EnsureOptions): Promise<void> {
 	await downloadSttModel(
-		resolveSttModelSpec(options?.modelName).key,
+		resolveSttModelSpec(options?.modelId).key,
 		progress => {
 			const stage =
 				progress.status === "ready" || progress.status === "done"

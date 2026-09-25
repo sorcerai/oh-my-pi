@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { BridgeMessage, BridgeReceipt } from "@oh-my-pi/prime-bridge-protocol";
 import { resolveBridgeConfig } from "../src/config";
 import { CommandResultUncertainError } from "../src/prime/client";
-import { MAX_ACTIVE_WAITERS, MAX_WAIT_TIMEOUT_MS, type PrimeBridgeServer, startPrimeBridgeServer } from "../src/server";
+import { type BridgeMessage, type BridgeReceipt, MAX_WAIT_TIMEOUT_MS } from "@oh-my-pi/prime-bridge-protocol";
+import { MAX_ACTIVE_WAITERS, type PrimeBridgeServer, startPrimeBridgeServer } from "../src/server";
 import { BridgeStore, type ClaimedInboxMessage } from "../src/store";
 
 const temporaryDirectories: string[] = [];
