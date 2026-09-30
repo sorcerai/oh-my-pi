@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import bundledPrimeSkillReadme from "../prime-skill/SKILL.md" with { type: "text" };
+import bundledPrimeSkillProject from "../prime-skill/pyproject.toml" with { type: "text" };
+import bundledPrimeSkillModule from "../prime-skill/src/omp_message/__init__.py" with { type: "text" };
+import bundledPrimeSkillEntrypoint from "../prime-skill/src/omp_message/__main__.py" with { type: "text" };
+import bundledPrimeSkillTests from "../prime-skill/test/test_omp_message.py" with { type: "text" };
 import { type PrimeBridgeConfig, resolveBridgeConfig } from "./config";
 import { PrimeDaemonClient } from "./prime/client";
 import { type PrimeBridgeLogger, type PrimeBridgeServer, startPrimeBridgeServer } from "./server";
@@ -11,6 +16,13 @@ import { BridgeStore } from "./store";
 const PRIME_SKILL_MARKER = ".omp-managed";
 const PRIME_SKILL_MARKER_CONTENT = "omp-prime-bridge-skill-v1\n";
 const PRIME_SKILL_DIRECTORY = "omp-message";
+const EMBEDDED_PRIME_SKILL_FILES: readonly [string, string][] = [
+	["SKILL.md", bundledPrimeSkillReadme],
+	["pyproject.toml", bundledPrimeSkillProject],
+	["src/omp_message/__init__.py", bundledPrimeSkillModule],
+	["src/omp_message/__main__.py", bundledPrimeSkillEntrypoint],
+	["test/test_omp_message.py", bundledPrimeSkillTests],
+];
 export interface PrimeBridgeCliDependencies {
 	config?: PrimeBridgeConfig;
 	store?: BridgeStore;
@@ -53,13 +65,13 @@ function isNotFound(error: unknown): boolean {
 	return error.code === "ENOENT";
 }
 
-async function assertDirectory(directory: string, create: boolean): Promise<void> {
+async function assertDirectory(directory: string): Promise<void> {
 	try {
 		const stat = await fs.lstat(directory);
 		if (stat.isSymbolicLink()) throw new Error(`Refusing symlinked Prime skill path: ${directory}`);
 		if (!stat.isDirectory()) throw new Error(`Prime skill path is not a directory: ${directory}`);
 	} catch (error) {
-		if (!create || !isNotFound(error)) throw error;
+		if (!isNotFound(error)) throw error;
 		await fs.mkdir(directory, { recursive: true, mode: 0o700 });
 	}
 	await fs.chmod(directory, 0o700);
@@ -83,6 +95,14 @@ async function copySkillTree(source: string, destination: string): Promise<void>
 		await fs.chmod(destinationEntry, 0o600);
 	}
 }
+async function copyEmbeddedSkillTree(destination: string): Promise<void> {
+	await fs.mkdir(destination, { recursive: true, mode: 0o700 });
+	for (const [relativePath, contents] of EMBEDDED_PRIME_SKILL_FILES) {
+		const destinationPath = path.join(destination, relativePath);
+		await fs.mkdir(path.dirname(destinationPath), { recursive: true, mode: 0o700 });
+		await fs.writeFile(destinationPath, contents, { mode: 0o600 });
+	}
+}
 
 async function isManagedSkill(directory: string): Promise<boolean> {
 	const marker = path.join(directory, PRIME_SKILL_MARKER);
@@ -103,12 +123,12 @@ async function isManagedSkill(directory: string): Promise<boolean> {
  */
 export async function installPrimeSkill(options: PrimeSkillInstallOptions = {}): Promise<string> {
 	const homeDir = options.homeDir ?? os.homedir();
-	const sourceDir = options.sourceDir ?? path.resolve(import.meta.dir, "..", "prime-skill");
+	const sourceDir = options.sourceDir;
 	const agentsDir = path.join(homeDir, ".agents");
 	const skillsDir = path.join(agentsDir, "skills");
 	const targetDir = path.join(skillsDir, PRIME_SKILL_DIRECTORY);
-	await assertDirectory(agentsDir, true);
-	await assertDirectory(skillsDir, true);
+	await assertDirectory(agentsDir);
+	await assertDirectory(skillsDir);
 
 	let targetExists = false;
 	try {
@@ -122,7 +142,8 @@ export async function installPrimeSkill(options: PrimeSkillInstallOptions = {}):
 	}
 	const stagingDir = path.join(skillsDir, `.${PRIME_SKILL_DIRECTORY}.tmp-${process.pid}-${randomUUID()}`);
 	try {
-		await copySkillTree(sourceDir, stagingDir);
+		if (sourceDir === undefined) await copyEmbeddedSkillTree(stagingDir);
+		else await copySkillTree(sourceDir, stagingDir);
 		const marker = path.join(stagingDir, PRIME_SKILL_MARKER);
 		await fs.writeFile(marker, PRIME_SKILL_MARKER_CONTENT, { mode: 0o600 });
 		await fs.chmod(stagingDir, 0o700);
@@ -221,7 +242,7 @@ export async function main(
 	};
 }
 
-if (import.meta.main) {
+export async function runPrimeBridgeCli(argv: readonly string[] = Bun.argv.slice(2)): Promise<void> {
 	let running: RunningPrimeBridge | undefined;
 	let stopping: Promise<void> | undefined;
 	const shutdown = async (): Promise<void> => {
@@ -237,7 +258,7 @@ if (import.meta.main) {
 	};
 
 	try {
-		running = await main();
+		running = await main(argv);
 		console.log(running.url);
 		process.once("SIGINT", () => {
 			void shutdown();
@@ -250,3 +271,7 @@ if (import.meta.main) {
 		process.exitCode = 1;
 	}
 }
+
+// The in-binary worker host loads this module on demand; startup failures are
+// handled in runPrimeBridgeCli, and the bound server keeps the process alive.
+if (import.meta.main) void runPrimeBridgeCli();

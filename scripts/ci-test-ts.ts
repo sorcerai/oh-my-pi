@@ -93,6 +93,7 @@ const fastWorkspacePackages = [
 	"packages/snapcompact",
 	"packages/agent",
 	"packages/mnemopi",
+	"packages/prime-bridge-protocol",
 	"packages/prime-bridge",
 ];
 
@@ -385,6 +386,9 @@ const SCRUBBED_ENV_NAMES = new Set([
 	"GOOGLE_APPLICATION_CREDENTIALS",
 	"ANTHROPIC_OAUTH_TOKEN",
 	"XAI_OAUTH_TOKEN",
+	// Provider stream tests exercise model-specific timeout precedence themselves;
+	// an inherited override masks the compat and idle-timeout cases.
+	"PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS",
 ]);
 
 function isScrubbedEnvVar(key: string): boolean {

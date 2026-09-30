@@ -176,6 +176,25 @@ describe("local auth references", () => {
 		expect(oauthResolver).not.toHaveBeenCalled();
 	});
 
+	test.each(["provider", "oauth-credential"] as const)(
+		"preserves caller cancellation while resolving a %s reference",
+		async kind => {
+			const controller = new AbortController();
+			const reason = new DOMException("request canceled", "AbortError");
+			controller.abort(reason);
+			const authRef = kind === "provider" ? `provider:${PROVIDER}` : `oauth-credential:${PROVIDER}:2`;
+			if (kind === "provider") {
+				vi.spyOn(storage.keys, "get").mockRejectedValue(reason);
+			} else {
+				vi.spyOn(storage.oauth, "accessById").mockRejectedValue(reason);
+			}
+
+			await expect(resolveLocalAuthRef(storage, authRef, PROVIDER, { signal: controller.signal })).rejects.toBe(
+				reason,
+			);
+		},
+	);
+
 	test("rejects a missing OAuth credential without exposing credential material", async () => {
 		const credentialValue = "must-not-appear-in-errors";
 		await storage.credentials.set(PROVIDER, oauthCredential(credentialValue));

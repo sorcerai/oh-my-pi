@@ -100,6 +100,32 @@ describe("persistent JavaScript package environments", () => {
 		expect(JSON.parse(retained.output.trim())).toEqual([13, await fs.realpath(workspace.path()), 2]);
 	});
 
+	it("imports an installed managed package without admitting packages from parent directories", async () => {
+		using workspace = TempDir.createSync("@omp-js-package-present-");
+		const sessionId = `js-package-present:${crypto.randomUUID()}`;
+		const session = makeSession(workspace.path(), sessionId);
+		const environment = resolveJsPackageEnvironment(workspace.path());
+		managedRoots.push(environment.root);
+		const packageDir = path.join(environment.root, "node_modules", "unit-square");
+		await Bun.write(
+			path.join(environment.root, "package.json"),
+			JSON.stringify({ dependencies: { "unit-square": "1.0.0" } }),
+		);
+		await Bun.write(
+			path.join(packageDir, "package.json"),
+			JSON.stringify({ name: "unit-square", type: "module", main: "index.js" }),
+		);
+		await Bun.write(path.join(packageDir, "index.js"), "export const square = value => value * value;\n");
+
+		// The package exists only in this managed environment, not this test module's static graph.
+		const result = await executeJs(
+			'const { square } = await import("unit-square"); square(7)',
+			executorOptions(session, sessionId),
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("49");
+	});
+
 	it("does not resolve a missing project package from OMP's own dependencies", async () => {
 		// Dynamic import is the behavior under test: a static import would be
 		// resolved by this test module's own dependency graph.

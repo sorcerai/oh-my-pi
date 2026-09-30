@@ -1047,7 +1047,9 @@ def transform_cell(source: str) -> str:
             name, args = head
             call = "__omp_magic_async" if name == "load" else "__omp_magic"
             prefix = "await " if name == "load" else ""
-            out.append(f"{indent}{prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})")
+            out.append(
+                f"{indent}{prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})"
+            )
             i += consumed
             continue
 
@@ -1455,8 +1457,10 @@ async def _magic_load(args: str) -> None:
     path = Path(os.path.expanduser(parts[0])).resolve()
     source = path.read_text(encoding="utf-8")
     await _exec_source_async(
-        transform_cell(source), _STATE.user_ns,
-        filename=str(path), linecache_source=source,
+        transform_cell(source),
+        _STATE.user_ns,
+        filename=str(path),
+        linecache_source=source,
     )
 
 
@@ -2374,9 +2378,9 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
 
     A background thread reads stdin and enqueues requests so a cell parked on
     a top-level ``await`` (an ``await agent(...)`` bridge call, say) does not
-    block sibling requests: eval sessions are shared across concurrent agents
-    (subagents inherit the parent's eval session id), so multiple requests can
-    be in flight on one kernel at once. The reader thread stays blocked in a
+    block sibling requests: auto-backgrounded cells, user Python shortcuts, and
+    kernel-defined tool calls from subagents can all be in flight on one kernel
+    at once. The reader thread stays blocked in a
     ``sys.stdin`` read for its whole life, which is safe on POSIX but wedges
     native-extension imports on Windows (see ``_serve_windows``).
     """

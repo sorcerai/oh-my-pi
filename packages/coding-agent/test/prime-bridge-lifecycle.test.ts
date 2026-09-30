@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import { PRIME_BRIDGE_WORKER_ARG } from "../src/cli/worker-selectors";
 import { ensurePrimeBridge, type PrimeBridgeLifecycleSettings } from "../src/integrations/prime-bridge/lifecycle";
-import type { DaemonBrokerClient } from "../src/launch/client";
+import { resolveWorkerSpawnCmd } from "../src/subprocess/worker-client";
+import { type DaemonBrokerClient, DaemonBrokerRejectedError } from "../src/launch/client";
 import type { DaemonOperation, DaemonRpcResult } from "../src/launch/protocol";
 
 const settings: PrimeBridgeLifecycleSettings = {
@@ -101,12 +103,14 @@ function waitOperations(broker: FakeBroker): Extract<DaemonOperation, { op: "wai
 	);
 }
 function matchingSpec(broker: FakeBroker, tokenPath?: string): DaemonSpec {
+	const spawn = resolveWorkerSpawnCmd(PRIME_BRIDGE_WORKER_ARG);
+	const bridgeArgs = tokenPath === undefined ? ["--port", "4123"] : ["--port", "4123", "--token-file", tokenPath];
 	return {
 		name: "prime-bridge",
-		application: "omp-prime-bridge",
-		args: tokenPath === undefined ? ["--port", "4123"] : ["--port", "4123", "--token-file", tokenPath],
+		application: spawn.cmd[0]!,
+		args: [...spawn.cmd.slice(1), ...bridgeArgs],
 		env: {},
-		cwd: broker.projectDir,
+		cwd: spawn.cwd ?? broker.projectDir,
 		pty: false,
 		ready: { host: "127.0.0.1", port: 4123, timeoutMs: 30_000 },
 		restart: "always",
@@ -123,15 +127,16 @@ describe("ensurePrimeBridge", () => {
 		await ensurePrimeBridge(settings, dependencies(broker, scopes));
 
 		expect(scopes).toEqual(["prime-bridge"]);
+		const expectedSpawn = resolveWorkerSpawnCmd(PRIME_BRIDGE_WORKER_ARG);
 		expect(startOperations(broker)).toEqual([
 			{
 				op: "start",
 				spec: {
 					name: "prime-bridge",
-					application: "omp-prime-bridge",
-					args: ["--port", "4123"],
+					application: expectedSpawn.cmd[0]!,
+					args: [...expectedSpawn.cmd.slice(1), "--port", "4123"],
 					env: {},
-					cwd: "/global/prime-bridge",
+					cwd: expectedSpawn.cwd ?? broker.projectDir,
 					pty: false,
 					ready: { host: "127.0.0.1", port: 4123, timeoutMs: 30_000 },
 					restart: "always",
@@ -140,6 +145,107 @@ describe("ensurePrimeBridge", () => {
 				},
 			},
 		]);
+	});
+
+	it("replaces only a persisted legacy Prime launcher with the bundled worker command", async () => {
+		const broker = new FakeBroker();
+		const scopes: string[] = [];
+		broker.currentSpec = {
+			...matchingSpec(broker, "/tmp/prime-bridge-token"),
+			application: "omp-prime-bridge",
+			args: ["--port", "4123", "--token-file", "/tmp/prime-bridge-token"],
+			cwd: broker.projectDir,
+		};
+
+		await ensurePrimeBridge({ ...settings, tokenPath: "/tmp/prime-bridge-token" }, dependencies(broker, scopes));
+
+		expect(startOperations(broker)).toEqual([
+			{ op: "start", spec: matchingSpec(broker, "/tmp/prime-bridge-token"), replace: true },
+		]);
+		expect(broker.currentSpec).toEqual(matchingSpec(broker, "/tmp/prime-bridge-token"));
+	});
+
+	it("waits for another client's in-progress legacy migration after a rejected replacement", async () => {
+		const broker = new FakeBroker();
+		const scopes: string[] = [];
+		broker.currentSpec = {
+			...matchingSpec(broker),
+			application: "omp-prime-bridge",
+			args: ["--port", "4123"],
+			cwd: broker.projectDir,
+		};
+		const request = broker.request.bind(broker);
+		let competing = false;
+		let describesAfterConflict = 0;
+		broker.request = async operation => {
+			if (operation.op === "start" && operation.replace) {
+				broker.operations.push(operation);
+				competing = true;
+				broker.currentState = "starting";
+				throw new DaemonBrokerRejectedError("Daemon prime-bridge is already starting");
+			}
+			if (operation.op === "describe" && competing && ++describesAfterConflict === 2) {
+				broker.currentSpec = matchingSpec(broker);
+			}
+			return request(operation);
+		};
+
+		await ensurePrimeBridge(settings, dependencies(broker, scopes));
+
+		expect(describesAfterConflict).toBeGreaterThan(1);
+		expect(broker.currentSpec).toEqual(matchingSpec(broker));
+		expect(broker.currentState).toBe("ready");
+	});
+
+	it("retries a legacy replacement when the competing migration leaves the old record behind", async () => {
+		const broker = new FakeBroker();
+		const scopes: string[] = [];
+		broker.currentSpec = {
+			...matchingSpec(broker),
+			application: "omp-prime-bridge",
+			args: ["--port", "4123"],
+			cwd: broker.projectDir,
+		};
+		const request = broker.request.bind(broker);
+		let replacementAttempts = 0;
+		broker.request = async operation => {
+			if (operation.op === "start" && operation.replace && ++replacementAttempts === 1) {
+				broker.operations.push(operation);
+				throw new DaemonBrokerRejectedError("Daemon prime-bridge is already starting");
+			}
+			return request(operation);
+		};
+
+		await ensurePrimeBridge(settings, dependencies(broker, scopes));
+
+		expect(replacementAttempts).toBe(2);
+		expect(broker.currentSpec).toEqual(matchingSpec(broker));
+		expect(broker.currentState).toBe("ready");
+	});
+
+	it("rejects a foreign daemon spec observed after a competing legacy replacement", async () => {
+		const broker = new FakeBroker();
+		const scopes: string[] = [];
+		broker.currentSpec = {
+			...matchingSpec(broker),
+			application: "omp-prime-bridge",
+			args: ["--port", "4123"],
+			cwd: broker.projectDir,
+		};
+		const request = broker.request.bind(broker);
+		broker.request = async operation => {
+			if (operation.op === "start" && operation.replace) {
+				broker.operations.push(operation);
+				broker.currentSpec = { ...matchingSpec(broker), args: ["--foreign"] };
+				throw new DaemonBrokerRejectedError("Daemon prime-bridge is already starting");
+			}
+			return request(operation);
+		};
+
+		await expect(ensurePrimeBridge(settings, dependencies(broker, scopes))).rejects.toThrow(
+			"conflicting launch specification",
+		);
+		expect(startOperations(broker)).toHaveLength(1);
 	});
 
 	it("restarts a matching failed daemon and waits for readiness", async () => {
@@ -212,7 +318,7 @@ describe("ensurePrimeBridge", () => {
 
 		await ensurePrimeBridge({ ...settings, tokenPath: "/tmp/prime-bridge-token" }, dependencies(broker, scopes));
 
-		expect(startOperations(broker)[0]?.spec.args).toEqual([
+		expect(startOperations(broker)[0]?.spec.args.slice(-4)).toEqual([
 			"--port",
 			"4123",
 			"--token-file",
@@ -274,18 +380,9 @@ describe("ensurePrimeBridge", () => {
 	it("rejects an existing daemon with a conflicting launch specification", async () => {
 		const broker = new FakeBroker();
 		const scopes: string[] = [];
-		broker.currentSpec = {
-			name: "prime-bridge",
-			application: "omp-prime-bridge",
-			args: ["--port", "4123"],
-			env: {},
-			cwd: broker.projectDir,
-			pty: false,
-			ready: { host: "127.0.0.1", port: 4123, timeoutMs: 30_000 },
-			restart: "always",
-			persist: true,
-			detached: true,
-		};
+		const conflict = matchingSpec(broker);
+		conflict.args = [...conflict.args, "--unexpected"];
+		broker.currentSpec = conflict;
 
 		await expect(
 			ensurePrimeBridge({ ...settings, tokenPath: "/tmp/prime-bridge-token" }, dependencies(broker, scopes)),

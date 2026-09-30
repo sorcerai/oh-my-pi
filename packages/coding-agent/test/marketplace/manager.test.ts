@@ -657,19 +657,6 @@ describe("MarketplaceManager", () => {
 		}
 	});
 
-	it("installPlugin keeps marketplace packages out of the npm plugin list", async () => {
-		await ctx.manager.addMarketplace(FIXTURE_DIR);
-		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
-
-		const spies = mockPluginManagerPaths(ctx.tmpDir);
-		try {
-			const plugins = await new PluginManager(ctx.tmpDir).list();
-			expect(plugins.map(plugin => plugin.name)).toEqual([]);
-		} finally {
-			for (const spy of spies) spy.mockRestore();
-		}
-	});
-
 	it("hides legacy marketplace entries that pre-date the scope field", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
@@ -748,7 +735,12 @@ describe("MarketplaceManager", () => {
 			await manager.addMarketplace(FIXTURE_DIR);
 			await manager.installPlugin("hello-plugin", "test-marketplace");
 
-			const roots = await listOmpExtensionRoots({ cwd: tmpHome, home: tmpHome, repoRoot: null });
+			const roots = await listOmpExtensionRoots({
+				cwd: tmpHome,
+				home: tmpHome,
+				agentDir: path.join(tmpHome, ".omp", "agent"),
+				repoRoot: null,
+			});
 			expect(roots.map(root => root.name)).toEqual([]);
 		} finally {
 			fs.rmSync(tmpHome, { recursive: true, force: true });

@@ -59,3 +59,10 @@ packages/*/CHANGELOG.md merge=union
 packages/catalog/src/models.json binary
 packages/catalog/src/compat/rules.json binary
 
+# Generated tree-sitter parser: regenerate from grammar.js (see its README.md).
+crates/vendor/tree-sitter-go/src/parser.c linguist-generated
+
+# Preserve upstream model preamble and unified-diff context bytes verbatim.
+crates/pi-predict/src/smollm/preamble.txt whitespace=-blank-at-eof
+crates/vendor/napi/patches/0001-release-superseded-env-handles.patch whitespace=-blank-at-eol
+

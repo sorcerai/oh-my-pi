@@ -79,7 +79,7 @@ The same surface is reachable as `computer.*` directly and as `desktop.*` inside
 - `desktop.window(id | { app?, title? })` returns one persistent window facade. Zero matches throw; multiple matches throw with the candidates.
 - `desktop.focusedWindow()` returns a window facade or `null`.
 - `desktop.displays()` returns `DesktopDisplay[]`.
-- `desktop.capabilities()` returns capture/input/AX availability, permission states, delivery modes, display server, backend, and display count.
+- `desktop.capabilities()` returns capture/input/AX availability, permission states, takeover support, display server, backend, and display count.
 
 A window facade exposes immutable `id`, `app`, `title`, optional `pid`, `bounds`, and `focused` fields.
 
@@ -88,15 +88,15 @@ A window facade exposes immutable `id`, `app`, `title`, optional `pid`, `bounds`
 Both a selected window and `desktop` expose:
 
 - `screenshot({ silent? }) -> { path, width, height }`
-- `click(x, y, { button?, count?, modifiers?, delivery? })`
-- `doubleClick(x, y, { button?, modifiers?, delivery? })`
+- `click(x, y, { button?, count?, modifiers?, takeover? })`
+- `doubleClick(x, y, { button?, modifiers?, takeover? })`
 - `move(x, y)`
-- `drag([[x, y], ...], { modifiers?, delivery? })`
-- `scroll(x, y, { dx?, dy?, delivery? })`
-- `type(text, { delivery? })`
-- `press(chord | string[], { delivery? })`
+- `drag([[x, y], ...], { modifiers?, takeover? })`
+- `scroll(x, y, { dx?, dy?, takeover? })`
+- `type(text, { takeover? })`
+- `press(chord | string[], { takeover? })`
 
-A window also exposes `raise()`, `ax(...)`, `find(...)`, and `ref(...)`. Input defaults to `delivery: "background"`; `delivery: "foreground"` is the explicit focus-changing fallback. Pixel coordinates belong to the most recent screenshot of the same target. Coordinate input before capture, after target/layout changes, or with another target's frame throws.
+A window also exposes `raise()`, `ax(...)`, `find(...)`, and `ref(...)`. Input defaults to background routes that do not move the user's pointer or deliberately activate the target. Use `{ takeover: true }` to temporarily activate the exact target and post real input when a background route is unavailable. Pixel coordinates belong to the most recent screenshot of the same target. Coordinate input before capture, after target/layout changes, or with another target's frame throws.
 
 Screenshots are PNGs written under the OS temp directory. Unless `silent: true`, each capture emits a status text block and an image block. The returned path always names the full PNG written by the worker; details record displayed dimensions, source dimensions, and target.
 
@@ -110,7 +110,7 @@ Screenshots are PNGs written under the OS temp directory. Unless `silent: true`,
 `El` exposes snapshot fields `ref`, `role`, `nativeRole`, optional `title`/`description`, `enabled`, `focused`, and `childCount`, plus:
 
 - reads: `value()`, `bounds()`, `attributes()`, `actions()`, `parent()`, `children()`;
-- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ delivery? })`, and `focus()`.
+- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ takeover? })`, and `focus()`.
 
 AX actions need no screenshot. AX bounds and `desktop.elementAt()` use global logical desktop coordinates, not screenshot pixels. A window AX snapshot advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
 
@@ -140,7 +140,7 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 ## Side effects
 
 - Captures real windows or the selected desktop composite into provider context and writes PNGs to the OS temp directory.
-- Sends real keyboard/pointer input. Background delivery is intended to preserve focus, pointer, and window order; foreground delivery may temporarily activate the target.
+- Sends real keyboard/pointer input. Background routes are intended to preserve focus, pointer, and window order; takeover may temporarily activate the target.
 - Reads or writes the system clipboard.
 - Executes full-access JavaScript and may invoke other session tools through `tool.*`.
 - Keeps a native desktop session and Bun worker alive across calls.
@@ -156,7 +156,7 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above.
 
-Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, using AX or a delivery mode listed by `desktop.capabilities()` after `BackgroundUnavailable`, and inspecting those capabilities for platform/permission failures.
+Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, using AX or `{ takeover: true }` when `desktop.capabilities().takeover` is true after `BackgroundUnavailable`, and inspecting those capabilities for platform/permission failures.
 
 ## Platform constraints
 
