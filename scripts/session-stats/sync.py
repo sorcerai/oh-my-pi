@@ -36,7 +36,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -683,7 +683,13 @@ def backfill_session_headers(conn: sqlite3.Connection) -> None:
     ).fetchall()
     updates = []
     for (session_file,) in rows:
-        meta = {"session_uuid": None, "version": None, "title": None, "cwd": None, "started_at": None}
+        meta = {
+            "session_uuid": None,
+            "version": None,
+            "title": None,
+            "cwd": None,
+            "started_at": None,
+        }
         try:
             with open(session_file, "rb") as f:
                 for seq, raw in enumerate(f):

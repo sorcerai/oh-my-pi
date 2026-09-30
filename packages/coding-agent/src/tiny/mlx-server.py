@@ -71,7 +71,9 @@ def _request(url):
 
 
 def list_repo_files(repo):
-    with urllib.request.urlopen(_request(f"{HF_ENDPOINT}/api/models/{repo}/tree/main?recursive=true")) as res:
+    with urllib.request.urlopen(
+        _request(f"{HF_ENDPOINT}/api/models/{repo}/tree/main?recursive=true")
+    ) as res:
         entries = json.load(res)
     files = []
     for entry in entries:
@@ -126,7 +128,13 @@ def download_repo(emit, request_id, model_key, repo, model_dir):
             }
         )
 
-    emit({"type": "progress", "id": request_id, "event": {"modelKey": model_key, "status": "download", "name": repo}})
+    emit(
+        {
+            "type": "progress",
+            "id": request_id,
+            "event": {"modelKey": model_key, "status": "download", "name": repo},
+        }
+    )
     for name, size in files:
         target = os.path.join(model_dir, name)
         os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -135,7 +143,12 @@ def download_repo(emit, request_id, model_key, repo, model_dir):
             progress(name)
             continue
         part = f"{target}.part"
-        with urllib.request.urlopen(_request(f"{HF_ENDPOINT}/{repo}/resolve/main/{name}")) as res, open(part, "wb") as out:
+        with (
+            urllib.request.urlopen(
+                _request(f"{HF_ENDPOINT}/{repo}/resolve/main/{name}")
+            ) as res,
+            open(part, "wb") as out,
+        ):
             while True:
                 chunk = res.read(CHUNK_BYTES)
                 if not chunk:
@@ -147,7 +160,13 @@ def download_repo(emit, request_id, model_key, repo, model_dir):
         progress(name, force=True)
     with open(os.path.join(model_dir, COMPLETE_MARKER), "w", encoding="utf-8") as fh:
         json.dump({"repo": repo, "files": [name for name, _ in files]}, fh)
-    emit({"type": "progress", "id": request_id, "event": {"modelKey": model_key, "status": "done", "name": repo}})
+    emit(
+        {
+            "type": "progress",
+            "id": request_id,
+            "event": {"modelKey": model_key, "status": "done", "name": repo},
+        }
+    )
 
 
 # ── Model ──────────────────────────────────────────────────────────
@@ -199,7 +218,9 @@ class Model:
             prompt += prefill
         stop = req.get("stop")
         text = ""
-        for response in stream_generate(model, tokenizer, prompt, max_tokens=int(req["maxNewTokens"])):
+        for response in stream_generate(
+            model, tokenizer, prompt, max_tokens=int(req["maxNewTokens"])
+        ):
             text += response.text
             if stop and stop in text:
                 break
@@ -242,7 +263,10 @@ class Server:
         while True:
             time.sleep(IDLE_POLL_S)
             with self.activity_lock:
-                idle = self.in_flight == 0 and time.monotonic() - self.last_activity >= self.idle_seconds
+                idle = (
+                    self.in_flight == 0
+                    and time.monotonic() - self.last_activity >= self.idle_seconds
+                )
             if idle:
                 self._exit(f"idle for {self.idle_seconds:.0f}s")
 
@@ -264,7 +288,11 @@ class Server:
                     self.model.send_ready(emit, request_id)
                     result = {"type": "loaded", "id": request_id}
                 else:
-                    result = {"type": "text", "id": request_id, "text": self.model.chat(emit, req)}
+                    result = {
+                        "type": "text",
+                        "id": request_id,
+                        "text": self.model.chat(emit, req),
+                    }
         finally:
             self._touch(-1)
         emit(result)
@@ -287,7 +315,13 @@ class Server:
                     try:
                         self.handle(emit, req)
                     except Exception:  # noqa: BLE001 - every failure is reported to the client
-                        emit({"type": "error", "id": req.get("id"), "error": traceback.format_exc()})
+                        emit(
+                            {
+                                "type": "error",
+                                "id": req.get("id"),
+                                "error": traceback.format_exc(),
+                            }
+                        )
         except (BrokenPipeError, ConnectionResetError, OSError):
             # Client went away mid-request; nothing left to report to.
             pass
@@ -303,7 +337,9 @@ class Server:
                 try:
                     probe.connect(socket_path)
                     probe.close()
-                    raise RuntimeError(f"tiny worker already listening on {socket_path}")
+                    raise RuntimeError(
+                        f"tiny worker already listening on {socket_path}"
+                    )
                 except (ConnectionRefusedError, FileNotFoundError):
                     os.unlink(socket_path)
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -323,19 +359,34 @@ class Server:
         sys.stdout.flush()
         while True:
             conn, _ = server.accept()
-            threading.Thread(target=self.serve_connection, args=(conn,), daemon=True).start()
+            threading.Thread(
+                target=self.serve_connection, args=(conn,), daemon=True
+            ).start()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", required=True)
-    parser.add_argument("--tag", required=True, help="launch identity echoed by ping so stale workers get replaced")
+    parser.add_argument(
+        "--tag",
+        required=True,
+        help="launch identity echoed by ping so stale workers get replaced",
+    )
     parser.add_argument("--model-key", required=True)
-    parser.add_argument("--repo", required=True, help="Hub repo holding the MLX weights")
+    parser.add_argument(
+        "--repo", required=True, help="Hub repo holding the MLX weights"
+    )
     parser.add_argument("--dir", required=True, help="local weights directory")
-    parser.add_argument("--idle-seconds", type=float, required=True, help="exit after this long without a request")
+    parser.add_argument(
+        "--idle-seconds",
+        type=float,
+        required=True,
+        help="exit after this long without a request",
+    )
     args = parser.parse_args()
-    Server(Model(args.model_key, args.repo, args.dir), args.tag, args.idle_seconds).serve(args.socket)
+    Server(
+        Model(args.model_key, args.repo, args.dir), args.tag, args.idle_seconds
+    ).serve(args.socket)
 
 
 if __name__ == "__main__":

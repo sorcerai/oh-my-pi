@@ -1047,7 +1047,9 @@ def transform_cell(source: str) -> str:
             name, args = head
             call = "__omp_magic_async" if name == "load" else "__omp_magic"
             prefix = "await " if name == "load" else ""
-            out.append(f"{indent}{prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})")
+            out.append(
+                f"{indent}{prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})"
+            )
             i += consumed
             continue
 
@@ -1455,8 +1457,10 @@ async def _magic_load(args: str) -> None:
     path = Path(os.path.expanduser(parts[0])).resolve()
     source = path.read_text(encoding="utf-8")
     await _exec_source_async(
-        transform_cell(source), _STATE.user_ns,
-        filename=str(path), linecache_source=source,
+        transform_cell(source),
+        _STATE.user_ns,
+        filename=str(path),
+        linecache_source=source,
     )
 
 
