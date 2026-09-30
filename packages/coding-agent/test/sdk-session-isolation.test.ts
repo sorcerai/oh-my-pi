@@ -36,12 +36,14 @@ function createTtsrRule(name: string): Rule {
 }
 
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
+const CONNECTION_URL_PASSWORD_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/:@?#\s]*:([^/?#\s]+)@/i;
 
 async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
 	const removed: Array<[string, string]> = [];
 	for (const [name, value] of Object.entries(process.env)) {
 		if (!value || value.length < 8) continue;
-		if (!SECRET_ENV_PATTERNS.test(name)) continue;
+		const urlPassword = CONNECTION_URL_PASSWORD_RE.exec(value)?.[1];
+		if (!SECRET_ENV_PATTERNS.test(name) && (!urlPassword || urlPassword.length < 8)) continue;
 		removed.push([name, value]);
 		delete process.env[name];
 	}

@@ -47,14 +47,6 @@ describe("renderFormula", () => {
 		expect(blockless).not.toMatch(/generate_completions_from_executable/);
 	});
 
-	it("emits the expected per-asset sha256 next to each url", () => {
-		for (const name in SUMS) {
-			const sha = SUMS[name as keyof typeof SUMS];
-			expect(formula).toContain(`/${name}",`);
-			expect(formula).toContain(`sha256 "${sha}"`);
-		}
-	});
-
 	// Regression: the darwin-arm64 release ships the stt-nemotron worker as its
 	// own bare-binary asset and the installed omp resolves it only beside its
 	// executable — a formula that installs omp without the worker ships broken

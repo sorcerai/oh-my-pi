@@ -15,8 +15,8 @@ const RUST_AFFECTING_FILE_NAMES = [
 	".rustfmt.toml",
 ] as const satisfies readonly string[];
 // Vendored path-patched crates are workspace members for Bazel hermeticity
-// (path-patch rendering is machine-local), but cargo dev tasks keep their
-// historical scope: the forks are not held to workspace format/lint/test gates.
+// (path-patch rendering is machine-local), but cargo clippy/test tasks keep
+// their first-party scope; workspace rustfmt still checks all members.
 //
 // pi-builtins is NOT excluded. It is first-party, and although it opts out of
 // the workspace's pedantic/nursery lints in its own manifest (most of it is
@@ -26,7 +26,13 @@ const VENDORED_FORK_EXCLUDES = [
 	"--exclude",
 	"brush-core",
 	"--exclude",
+	"brush-parser",
+	"--exclude",
 	"cfg_aliases",
+	"--exclude",
+	"napi",
+	"--exclude",
+	"tree-sitter-go",
 ] as const satisfies readonly string[];
 const TASK_COMMANDS = {
 	"check:rs": [
@@ -60,12 +66,9 @@ const TASK_COMMANDS = {
 			"--final-status-level=fail",
 		],
 		// nextest cannot run doctests (no stable libtest-json interface for
-		// them), so they need their own libtest pass. Today this pass executes
-		// nothing: pi-natives is a `cdylib`, which rustdoc refuses to collect
-		// doctests from, and pi-builtins' 16 examples are `ignore`d vendored
-		// uutils docs. It is kept as a guard so that the first runnable
-		// doctest added to a lib crate actually runs instead of silently
-		// never executing.
+		// them), so they need their own libtest pass. Currently pi-natives is
+		// a `cdylib` and first-party doc examples are ignored; keep this guard
+		// so the first runnable doctest added to a lib crate is executed.
 		["cargo", "test", "--doc", "--workspace", ...VENDORED_FORK_EXCLUDES],
 	],
 } as const satisfies Record<string, readonly (readonly string[])[]>;

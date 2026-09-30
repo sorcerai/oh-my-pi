@@ -43,6 +43,11 @@
       "types": "./src/index.ts",
       "import": "./src/index.ts"
     },
+    "./cli": {
+      "types": "./src/cli.ts",
+      "import": "./src/cli.ts",
+      "require": "./src/cli.ts"
+    },
     "./*": {
       "types": "./src/*.ts",
       "import": "./src/*.ts"

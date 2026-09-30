@@ -22,6 +22,7 @@ describe("AgentSession user shortcut hooks", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let modelRegistry: ModelRegistry;
+	let parentSession: AgentSession | undefined;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-user-shortcut-hooks-");
@@ -30,14 +31,16 @@ describe("AgentSession user shortcut hooks", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		if (session) {
-			await session.dispose();
+		if (session && !session.isDisposed) await session.dispose();
+		if (parentSession) {
+			await parentSession.dispose();
+			parentSession = undefined;
 		}
 		await pythonExecutor.disposeAllKernelSessions();
 		tempDir.removeSync();
 	});
 
-	function createSession(extensionRunner?: ExtensionRunner): AgentSession {
+	function createSession(extensionRunner?: ExtensionRunner, options?: { persisted?: boolean }): AgentSession {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
@@ -52,7 +55,9 @@ describe("AgentSession user shortcut hooks", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager: options?.persisted
+				? SessionManager.create(tempDir.path(), `${tempDir.path()}/sessions`)
+				: SessionManager.inMemory(tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 			extensionRunner,
@@ -196,5 +201,26 @@ describe("AgentSession user shortcut hooks", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("123");
+	});
+
+	it("isolates a child Python kernel and leaves the parent's state alive after child disposal", async () => {
+		const parent = createSession();
+		parentSession = parent;
+		const seeded = await parent.executePython("shared_value = 41");
+		expect(seeded.exitCode).toBe(0);
+
+		const child = createSession(undefined, { persisted: true });
+		const fromChild = await child.executePython("print(shared_value + 1)");
+		expect(fromChild.exitCode).toBe(1);
+		expect(fromChild.output).toContain("NameError");
+
+		const childState = await child.executePython("shared_value = 9; print(shared_value)");
+		expect(childState.exitCode).toBe(0);
+		expect(childState.output.trim()).toBe("9");
+		await child.dispose();
+
+		const fromParent = await parent.executePython("print(shared_value)");
+		expect(fromParent.exitCode).toBe(0);
+		expect(fromParent.output.trim()).toBe("41");
 	});
 });

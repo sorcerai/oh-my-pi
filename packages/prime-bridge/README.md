@@ -55,7 +55,7 @@ Start the bridge yourself, or enable broker start:
 omp config set primeBridge.autoStart true
 ```
 
-`autoStart` uses the machine-global launch broker. It starts the `omp-prime-bridge` application with the configured port and token path. It does not start a bridge with an operating-system service manager.
+`autoStart` uses the machine-global launch broker. It starts the bundled Prime bridge worker through the OMP executable with the configured port and token path. It does not start a bridge with an operating-system service manager.
 
 A bare `read agent://` lists Prime sessions as `prime~<encoded id>` next to local peers. Send with `write agent://prime~<encoded id>` (optional `?replyTo=<message id>`); the `wait` tool claims the next Prime message and acknowledges it once shown. The `prime~` prefix never routes to local peers.
 

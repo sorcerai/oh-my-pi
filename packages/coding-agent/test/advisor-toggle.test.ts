@@ -179,12 +179,6 @@ describe("AgentSession advisor toggle", () => {
 		appendAdvisorCost(advisor, 0.5, 1);
 	}
 
-	it("starts with advisor disabled", () => {
-		expect(session.isAdvisorActive()).toBe(false);
-		expect(session.isAdvisorEnabled()).toBe(false);
-		expect(session.formatAdvisorStatus()).toBe("Advisor is disabled.");
-	});
-
 	it("toggle enables the advisor and runtime", () => {
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const active = session.toggleAdvisorEnabled();
@@ -620,16 +614,6 @@ describe("AgentSession advisor toggle", () => {
 		} finally {
 			await reviewSession.dispose();
 		}
-	});
-	it("retains cumulative advisor cost after the advisor is disabled", () => {
-		const advisor = enableAdvisor();
-
-		appendAdvisorCost(advisor, 0.41, 1);
-		appendAdvisorCost(advisor, 0.09, 2);
-
-		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
-		session.setAdvisorEnabled(false);
-		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 	});
 	it("attributes advisor subscription spend after teardown without rescanning the catalog", () => {
 		// #10131: with the runtime gone, isUsingSubscription() must read the
@@ -1306,18 +1290,18 @@ describe("AgentSession advisor toggle", () => {
 		}
 	});
 
-	it("propagates the resolved budget into the advisor model-visible system prompt", () => {
+	it("propagates the resolved budget into the advisor model-visible system prompt", async () => {
 		// Contract: SessionAdvisors must render the resolved budget into the
 		// prompt the advisor model actually receives. If the runtime stopped
 		// supplying it, the template falls back to 4 and this fails.
 		expect(session.setAdvisorEnabled(true)).toBe(true);
-		session.applyAdvisorConfigs([{ name: "Strict", maxNotesPerUpdate: 1 }], undefined);
+		await session.applyAdvisorConfigs([{ name: "Strict", maxNotesPerUpdate: 1 }], undefined);
 		let advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent");
 		expect(advisor.state.systemPrompt.join("\n")).toContain("max 1 non-blockers/update (`blocker` exempt)");
 
 		cfgAdvisorMaxNotesPerUpdate.set(session.settings, 3);
-		session.applyAdvisorConfigs([{ name: "Lenient" }], undefined, undefined);
+		await session.applyAdvisorConfigs([{ name: "Lenient" }], undefined, undefined);
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 		advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent");

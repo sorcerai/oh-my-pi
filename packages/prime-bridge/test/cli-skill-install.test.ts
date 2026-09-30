@@ -48,16 +48,24 @@ describe("Prime skill installation", () => {
 		expect(await fs.readFile(path.join(targetDir, ".omp-managed"), "utf8")).toBe("omp-prime-bridge-skill-v1\n");
 	});
 
-	it("includes the Prime skill in the packed layout and resolves it from the package layout", async () => {
+	it("includes the complete Prime skill in the packed layout and embedded package layout", async () => {
 		const packedOutput = await packedPackageOutput();
 		expect(packedOutput).toMatch(/packed \S+ prime-skill\/SKILL\.md/);
 
 		const { homeDir } = await makeFixture();
 		const targetDir = await installPrimeSkill({ homeDir });
 		const packageSkill = path.resolve(import.meta.dir, "..", "prime-skill");
-		expect(await fs.readFile(path.join(targetDir, "SKILL.md"), "utf8")).toBe(
-			await fs.readFile(path.join(packageSkill, "SKILL.md"), "utf8"),
-		);
+		for (const relativePath of [
+			"SKILL.md",
+			"pyproject.toml",
+			"src/omp_message/__init__.py",
+			"src/omp_message/__main__.py",
+			"test/test_omp_message.py",
+		]) {
+			expect(await fs.readFile(path.join(targetDir, relativePath), "utf8")).toBe(
+				await fs.readFile(path.join(packageSkill, relativePath), "utf8"),
+			);
+		}
 	});
 
 	it("does not overwrite an unmanaged user skill", async () => {

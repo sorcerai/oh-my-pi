@@ -94,6 +94,8 @@ function makeSessionTools(options: SessionToolsTestOptions = {}): SessionTools {
 		localProtocolOptions: () => ({}),
 		getInspectImageModeOverride: () => undefined,
 		setInspectImageModeOverride: () => undefined,
+		evalPreludes: () => [],
+		sessionAgents: () => [],
 	} as unknown as SessionToolsHost;
 
 	return new SessionTools(host, {

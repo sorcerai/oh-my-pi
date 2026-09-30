@@ -101,6 +101,7 @@ export async function resolveLocalAuthRef(
 				forceRefresh: options.forceRefresh,
 			});
 		} catch {
+			options.signal?.throwIfAborted();
 			throw new Error("Authentication credential could not be resolved for the expected provider");
 		}
 		if (!credential) {
@@ -119,6 +120,7 @@ export async function resolveLocalAuthRef(
 			forceRefresh: options.forceRefresh,
 		});
 	} catch {
+		options.signal?.throwIfAborted();
 		throw new Error("OAuth credential could not be resolved for the expected provider");
 	}
 	if (resolution === undefined) {

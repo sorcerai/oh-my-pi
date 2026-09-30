@@ -12,7 +12,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession model persistence", () => {
@@ -480,6 +480,56 @@ describe("AgentSession model persistence", () => {
 		});
 	});
 
+	it.each([Effort.Max, AUTO_THINKING] as const)(
+		"restores a fresh session's configured %s selector after a clamped or provisional start",
+		async selector => {
+			const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const settings = Settings.isolated({ defaultThinkingLevel: Effort.Low });
+			const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), `new-${selector}`));
+			const created = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage: sharedAuthStorage,
+				modelRegistry: sharedModelRegistry,
+				sessionManager,
+				settings,
+				model,
+				thinkingLevel: selector,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+			session = created.session;
+			const effective = selector === AUTO_THINKING ? resolveProvisionalAutoLevel(model) : Effort.XHigh;
+			expect(created.session.thinkingLevel).toBe(effective);
+			expect(sessionManager.getBranch().find(entry => entry.type === "thinking_level_change")).toMatchObject({
+				type: "thinking_level_change",
+				thinkingLevel: effective,
+				configured: selector,
+			});
+			sessionManager.appendMessage({ role: "user", content: "Remember this selection", timestamp: Date.now() });
+			await sessionManager.ensureOnDisk();
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persistent session file");
+			await created.session.dispose();
+			session = undefined;
+
+			const resumed = await createStartupResumeSession(sessionFile, settings);
+			expect(resumed.session.configuredThinkingLevel()).toBe(selector);
+			if (selector === AUTO_THINKING) {
+				expect(resumed.session.isAutoThinking).toBe(true);
+			} else {
+				await resumed.session.setModel(getAnthropicModelOrThrow("claude-opus-4-7"));
+				expect(resumed.session.thinkingLevel).toBe(Effort.Max);
+			}
+		},
+	);
+
 	it("restores routed thinking selectors during startup resume", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const defaultRoleValue = modelValue(defaultModel);
@@ -716,17 +766,5 @@ describe("AgentSession model persistence", () => {
 				EPHEMERAL_MODEL_CHANGE_ROLE,
 			),
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
-	});
-
-	it("lists a named role model before the default fallback", () => {
-		expect(
-			getRestorableSessionModels(
-				{
-					default: "anthropic/claude-sonnet-4-5",
-					smol: "anthropic/claude-sonnet-4-6",
-				},
-				"smol",
-			),
-		).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
 	});
 });

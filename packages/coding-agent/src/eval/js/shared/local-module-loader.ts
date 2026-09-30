@@ -369,23 +369,21 @@ function buildModuleSource(source: string, modulePath: string): string {
 function resolveImportSpecifier(baseDir: string, source: string, packageRoot: string | undefined): string {
 	if (/^[a-z][a-z0-9+.-]*:/i.test(source) || isBuiltin(source)) return source;
 	if (!isBareSpecifier(source)) return Bun.resolveSync(source, baseDir);
-	let projectError: unknown;
 	try {
 		return resolveBareSpecifierWithinProject(source, baseDir);
-	} catch (error) {
-		projectError = error;
-	}
-	if (packageRoot) {
+	} catch (projectError) {
+		if (!packageRoot) throw projectError;
 		try {
-			return resolveBareSpecifierWithinProject(source, packageRoot);
+			return resolveBareSpecifierWithinProject(source, packageRoot, packageRoot);
 		} catch (fallbackError) {
 			throw packageFallbackError(projectError, fallbackError, packageRoot);
 		}
 	}
-	throw projectError;
 }
 
-function resolveBareSpecifierWithinProject(source: string, baseDir: string): string {
+// Managed-package fallback may inspect its own root, but not an ancestor manifest
+// (for example ~/package.json) that would admit undeclared host dependencies.
+function resolveBareSpecifierWithinProject(source: string, baseDir: string, stopAt?: string): string {
 	const resolved = Bun.resolveSync(source, baseDir);
 	if (!path.isAbsolute(resolved)) {
 		throw new Error(
@@ -402,7 +400,7 @@ function resolveBareSpecifierWithinProject(source: string, baseDir: string): str
 		if (parent !== ancestor && fs.existsSync(path.join(ancestor, "package.json")) && pathIsWithin(ancestor, target)) {
 			return resolved;
 		}
-		if (parent === ancestor) break;
+		if (parent === ancestor || ancestor === stopAt) break;
 		ancestor = parent;
 	}
 	throw new Error(

@@ -90,21 +90,15 @@ export class ModelControls {
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
 		this.#configuredThinkingLevel = options.thinkingLevel;
-		if (options.thinkingLevel === AUTO_THINKING) {
-			// Keep auto pending until the first turn while exposing a valid wire effort.
-			this.#autoThinking = true;
-			this.#thinkingLevel = clampThinkingLevelToCeiling(
-				this.#model,
-				resolveProvisionalAutoLevel(this.#model),
-				this.#thinkingLevelCeiling,
-			);
-		} else {
-			this.#thinkingLevel = clampThinkingLevelToCeiling(
-				this.#model,
-				options.thinkingLevel,
-				this.#thinkingLevelCeiling,
-			);
-		}
+		this.#autoThinking = options.thinkingLevel === AUTO_THINKING;
+		// Auto stays pending until the first turn; its provisional effort still follows model limits.
+		const model = this.#model;
+		const initialLevel =
+			options.thinkingLevel === AUTO_THINKING ? resolveProvisionalAutoLevel(model) : options.thinkingLevel;
+		this.#thinkingLevel = resolveThinkingLevelForModel(
+			model,
+			clampThinkingLevelToCeiling(model, initialLevel, this.#thinkingLevelCeiling),
+		);
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
 
@@ -511,6 +505,7 @@ export class ModelControls {
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+		const previousConfiguredLevel = this.#configuredThinkingLevel;
 		this.#configuredThinkingLevel = level;
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
@@ -548,18 +543,22 @@ export class ModelControls {
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
-		const isChanging = wasAuto || effectiveLevel !== this.#thinkingLevel;
+		const isChanging = wasAuto || previousConfiguredLevel !== level || effectiveLevel !== this.#thinkingLevel;
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
-			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, level);
+			if (persist && level !== undefined && level !== ThinkingLevel.Off && level !== ThinkingLevel.Inherit) {
+				cfgDefaultThinkingLevel.set(this.#host.settings, level);
 			}
-			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
+			this.#host.emit({
+				type: "thinking_level_changed",
+				thinkingLevel: effectiveLevel,
+				...(level !== effectiveLevel ? { configured: level } : {}),
+			});
 		}
 	}
 
@@ -604,11 +603,13 @@ export class ModelControls {
 
 	/**
 	 * Classify the current user turn and set the effective thinking level for it.
+	 * `solutionSpace` is a delegator's open-endedness description (task-spawned turns
+	 * only); when non-blank it is classified instead of `promptText`.
 	 * Bounded by a timeout + abort; on failure it preserves the last classified
 	 * level, or uses the provisional concrete level before the first resolution.
 	 * Never throws into the turn, and never clears `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number): Promise<void> {
+	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
 		const model = this.#model;
 		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -630,21 +631,22 @@ export class ModelControls {
 				parentId: this.#host.sessionManager.getLeafId(),
 			};
 			try {
-				resolved = await classifyDifficulty(promptText, {
-					settings: this.#host.settings,
-					registry: this.#host.modelRegistry,
-					model,
-					sessionId: this.#host.sessionId(),
-					signal: controller.signal,
-					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
-					onUsage: usage => {
-						const entryId = this.#host.sessionManager.appendModelUsage(
-							{ purpose: "auto-thinking", ...usage },
-							usageOwner,
-						);
-						if (entryId) usageOwner.parentId = entryId;
+				resolved = await classifyDifficulty(
+					{ request: promptText, solutionSpace },
+					{
+						settings: this.#host.settings,
+						registry: this.#host.modelRegistry,
+						model,
+						sessionId: this.#host.sessionId(),
+						signal: controller.signal,
+						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+						onUsage: usage => {
+							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
+							if (entryId) usageOwner.parentId = entryId;
+						},
+						telemetry: this.#host.agent.telemetry,
 					},
-				});
+				);
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {
 					error: error instanceof Error ? error.message : String(error),

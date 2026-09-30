@@ -1,9 +1,10 @@
 import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForGlobal } from "../../launch/client";
 import type { DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import { PRIME_BRIDGE_WORKER_ARG } from "../../cli/worker-selectors";
+import { resolveWorkerSpawnCmd } from "../../subprocess/worker-client";
 
 const PRIME_BRIDGE_BROKER_SCOPE = "prime-bridge";
 const PRIME_BRIDGE_DAEMON_NAME = "prime-bridge";
-const PRIME_BRIDGE_APPLICATION = "omp-prime-bridge";
 const PRIME_BRIDGE_READY_TIMEOUT_MS = 30_000;
 const inFlightEnsures = new Map<string, Promise<void>>();
 
@@ -82,9 +83,8 @@ async function ensurePrimeBridgeOnce(
 	const spec = primeBridgeSpec(client, endpoint);
 	const listed = await client.request({ op: "list" });
 	if (listed.op !== "list") throw new Error("Prime bridge broker returned an invalid list response");
-	const existing = listed.daemons.find(daemon => daemon.name === PRIME_BRIDGE_DAEMON_NAME);
-	if (existing !== undefined) {
-		await ensureExistingPrimeBridge(client, spec);
+	if (listed.daemons.some(daemon => daemon.name === PRIME_BRIDGE_DAEMON_NAME)) {
+		await ensureExistingPrimeBridge(client, endpoint, spec);
 		return;
 	}
 	try {
@@ -93,34 +93,69 @@ async function ensurePrimeBridgeOnce(
 		if (started.readyTimedOut) throw new Error("Prime bridge did not become ready before the broker timeout");
 	} catch (error) {
 		if (!(error instanceof DaemonBrokerRejectedError)) throw error;
-		await ensureExistingPrimeBridge(client, spec);
+		await ensureExistingPrimeBridge(client, endpoint, spec);
 	}
 }
 
-async function ensureExistingPrimeBridge(client: DaemonBrokerClient, expected: DaemonSpec): Promise<void> {
+async function ensureExistingPrimeBridge(
+	client: DaemonBrokerClient,
+	endpoint: PrimeBridgeEndpoint,
+	expected: DaemonSpec,
+): Promise<void> {
 	const described = await client.request({ op: "describe", name: PRIME_BRIDGE_DAEMON_NAME });
 	if (described.op !== "describe") throw new Error("Prime bridge broker returned an invalid describe response");
-	if (!sameDaemonSpec(described.spec, expected)) {
-		throw new Error("Prime bridge daemon has a conflicting launch specification");
-	}
-	switch (described.daemon.state) {
-		case "ready":
-			return;
-		case "starting":
-		case "restarting":
-		case "running":
-			await waitForPrimeBridge(client, expected);
-			return;
-		case "failed":
-		case "exited": {
-			const restarted = await client.request({ op: "restart", name: PRIME_BRIDGE_DAEMON_NAME });
-			if (restarted.op !== "restart") throw new Error("Prime bridge broker returned an invalid restart response");
-			await waitForPrimeBridge(client, expected);
-			return;
+	if (sameDaemonSpec(described.spec, expected)) {
+		switch (described.daemon.state) {
+			case "ready":
+				return;
+			case "starting":
+			case "restarting":
+			case "running":
+				await waitForPrimeBridge(client, expected);
+				return;
+			case "failed":
+			case "exited": {
+				const restarted = await client.request({ op: "restart", name: PRIME_BRIDGE_DAEMON_NAME });
+				if (restarted.op !== "restart") throw new Error("Prime bridge broker returned an invalid restart response");
+				await waitForPrimeBridge(client, expected);
+				return;
+			}
+			default:
+				throw new Error(`Prime bridge daemon is ${described.daemon.state}`);
 		}
-		default:
-			throw new Error(`Prime bridge daemon is ${described.daemon.state}`);
 	}
+	const legacy = legacyPrimeBridgeSpec(client, endpoint);
+	if (sameDaemonSpec(described.spec, legacy)) {
+		const deadline = Date.now() + PRIME_BRIDGE_READY_TIMEOUT_MS;
+		for (;;) {
+			try {
+				const replaced = await client.request({ op: "start", spec: expected, replace: true });
+				if (replaced.op !== "start") throw new Error("Prime bridge broker returned an invalid start response");
+				if (replaced.readyTimedOut) throw new Error("Prime bridge did not become ready before the broker timeout");
+				return;
+			} catch (error) {
+				if (
+					!(error instanceof DaemonBrokerRejectedError) ||
+					error.message !== `Daemon ${PRIME_BRIDGE_DAEMON_NAME} is already starting`
+				) {
+					throw error;
+				}
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new Error("Prime bridge did not become ready before the broker timeout");
+			await Bun.sleep(Math.min(50, remaining));
+			const current = await client.request({ op: "describe", name: PRIME_BRIDGE_DAEMON_NAME });
+			if (current.op !== "describe") throw new Error("Prime bridge broker returned an invalid describe response");
+			if (sameDaemonSpec(current.spec, expected)) {
+				await ensureExistingPrimeBridge(client, endpoint, expected);
+				return;
+			}
+			if (!sameDaemonSpec(current.spec, legacy)) {
+				throw new Error("Prime bridge daemon has a conflicting launch specification");
+			}
+		}
+	}
+	throw new Error("Prime bridge daemon has a conflicting launch specification");
 }
 
 async function waitForPrimeBridge(client: DaemonBrokerClient, expected: DaemonSpec): Promise<void> {
@@ -135,12 +170,26 @@ async function waitForPrimeBridge(client: DaemonBrokerClient, expected: DaemonSp
 }
 
 function primeBridgeSpec(client: DaemonBrokerClient, endpoint: PrimeBridgeEndpoint): DaemonSpec {
-	const args = ["--port", String(endpoint.port)];
-	if (endpoint.tokenPath !== undefined) args.push("--token-file", endpoint.tokenPath);
+	const spawn = resolveWorkerSpawnCmd(PRIME_BRIDGE_WORKER_ARG);
 	return {
 		name: PRIME_BRIDGE_DAEMON_NAME,
-		application: PRIME_BRIDGE_APPLICATION,
-		args,
+		application: spawn.cmd[0]!,
+		args: [...spawn.cmd.slice(1), ...primeBridgeArgs(endpoint)],
+		env: {},
+		cwd: spawn.cwd ?? client.projectDir,
+		pty: false,
+		ready: { host: endpoint.host, port: endpoint.port, timeoutMs: PRIME_BRIDGE_READY_TIMEOUT_MS },
+		restart: "always",
+		persist: true,
+		detached: true,
+	};
+}
+
+function legacyPrimeBridgeSpec(client: DaemonBrokerClient, endpoint: PrimeBridgeEndpoint): DaemonSpec {
+	return {
+		name: PRIME_BRIDGE_DAEMON_NAME,
+		application: "omp-prime-bridge",
+		args: primeBridgeArgs(endpoint),
 		env: {},
 		cwd: client.projectDir,
 		pty: false,
@@ -149,6 +198,12 @@ function primeBridgeSpec(client: DaemonBrokerClient, endpoint: PrimeBridgeEndpoi
 		persist: true,
 		detached: true,
 	};
+}
+
+function primeBridgeArgs(endpoint: PrimeBridgeEndpoint): string[] {
+	const args = ["--port", String(endpoint.port)];
+	if (endpoint.tokenPath !== undefined) args.push("--token-file", endpoint.tokenPath);
+	return args;
 }
 
 function sameDaemonSpec(actual: DaemonSpec, expected: DaemonSpec): boolean {
