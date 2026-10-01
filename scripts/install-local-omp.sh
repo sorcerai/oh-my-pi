@@ -323,7 +323,8 @@ if ! PI_CODING_AGENT_DIR="$agent_dir" PI_NO_TITLE=1 NO_COLOR=1 "$target" --mode 
 	keep_smoke_evidence
 	fail "$smoke_agent smoke command failed"
 fi
-if ! OMP_LOCAL_SMOKE_JSON="$smoke_json" OMP_LOCAL_SMOKE_MARKER="$marker" OMP_LOCAL_SMOKE_AGENT="$smoke_agent" bun -e '
+if ! (cd "$build_root" && OMP_LOCAL_SMOKE_JSON="$smoke_json" OMP_LOCAL_SMOKE_MARKER="$marker" OMP_LOCAL_SMOKE_AGENT="$smoke_agent" bun -e '
+import { outputCarriesMarker } from "./scripts/install-local-omp-smoke-output.ts";
 const source = await Bun.file(process.env.OMP_LOCAL_SMOKE_JSON).text();
 const marker = process.env.OMP_LOCAL_SMOKE_MARKER;
 const smokeAgent = process.env.OMP_LOCAL_SMOKE_AGENT;
@@ -343,10 +344,6 @@ const selectsWorker = args =>
 const starts = events.filter(
 	event => event?.type === "tool_execution_start" && event.toolName === "task" && selectsWorker(event.args),
 );
-const outputCarriesMarker = (output, structured) =>
-	structured === undefined
-		? output === marker
-		: structured?.status === "valid" && !structured.error && structured.data === marker;
 const directResultCarriesMarker = taskEnd => {
 	const results = taskEnd.result?.details?.results;
 	if (!Array.isArray(results) || results.length !== 1) return false;
@@ -356,7 +353,7 @@ const directResultCarriesMarker = taskEnd => {
 		result.exitCode === 0 &&
 		result.aborted !== true &&
 		!result.error &&
-		outputCarriesMarker(result.output, result.structuredOutput)
+		outputCarriesMarker(result.output, result.structuredOutput, marker)
 	);
 };
 const asyncResultCarriesMarker = taskEnd => {
@@ -396,7 +393,7 @@ const asyncResultCarriesMarker = taskEnd => {
 		/\bagent="([^"]+)"/.exec(taskResultTags[0])?.[1] === smokeAgent &&
 		/\bstatus="completed"/.test(taskResultTags[0]) &&
 		outputMatches.length === 1 &&
-		outputCarriesMarker(outputMatches[0][1], job.structured)
+		outputCarriesMarker(outputMatches[0][1], job.structured, marker)
 	);
 };
 const taskCallIds = new Set(starts.map(event => event.toolCallId));
@@ -431,7 +428,7 @@ const finalText = Array.isArray(finalMessage?.content)
 if (finalText !== marker) {
 	throw new Error("final assistant text did not exactly match the marker");
 }
-' 2>>"$smoke_log"; then
+' 2>>"$smoke_log"); then
 	[ ! -s "$smoke_log" ] || cat "$smoke_log" >&2
 	keep_smoke_evidence
 	fail "$smoke_agent smoke JSON proof failed"

@@ -14,6 +14,7 @@
 - Prime bridge auto-start now works from standalone `omp` installs without a separate `omp-prime-bridge` executable and installs the bundled `omp-message` skill.
 - Thinking selections remain configured across model switches and session resumes even when the current model clamps the effective effort.
 - Managed JavaScript evaluation no longer imports undeclared packages from the host's ancestor directories.
+- Local source installs now accept successful nested smoke results rendered as JSON strings.
 
 ## [18.4.3] - 2026-09-28
 
